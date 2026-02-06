@@ -198,6 +198,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "hp-selector"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "hp-core",
+ "hp-tree",
+ "thiserror",
+]
+
+[[package]]
 name = "hp-simd"
 version = "0.1.0"
 dependencies = [
