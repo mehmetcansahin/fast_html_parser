@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "SIMD abstraction layer with runtime dispatch for the HTML parser"
+repository = "https://github.com/nicatdcw/fast-html-parser"
+keywords = ["simd", "html", "parser"]
+categories = ["algorithms"]
 
 [dependencies]
 hp-core = { path = "../hp-core" }

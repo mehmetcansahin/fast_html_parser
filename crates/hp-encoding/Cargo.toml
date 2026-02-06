@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Encoding detection and conversion for the HTML parser"
+repository = "https://github.com/nicatdcw/fast-html-parser"
+keywords = ["encoding", "html", "charset", "utf8"]
+categories = ["encoding"]
 
 [dependencies]
 hp-core = { path = "../hp-core" }

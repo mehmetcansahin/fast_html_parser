@@ -228,6 +228,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "hp-parser"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "hp-core",
+ "hp-encoding",
+ "hp-selector",
+ "hp-tokenizer",
+ "hp-tree",
+ "tokio",
+]
+
+[[package]]
 name = "hp-selector"
 version = "0.1.0"
 dependencies = [

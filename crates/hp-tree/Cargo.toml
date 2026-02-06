@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "Cache-optimized arena-based DOM tree for the HTML parser"
+repository = "https://github.com/nicatdcw/fast-html-parser"
+keywords = ["html", "dom", "parser", "arena"]
+categories = ["parser-implementations"]
 
 [features]
 default = []

@@ -25,7 +25,7 @@ Detaylı plan: docs/PLAN.md dosyasında. Her faz için bu plana sadık kal.
 - [x] Faz 3: Selector Engine
 - [x] Faz 4: Encoding
 - [x] Faz 5: Async/Streaming
-- [ ] Faz 6: API & Yayın
+- [x] Faz 6: API & Yayın
 
 ## Çalışma Prensibi
 Her faz tamamlandığında:
