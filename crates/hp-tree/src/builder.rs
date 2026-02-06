@@ -120,31 +120,27 @@ impl TreeBuilder {
     }
 
     /// Process a single token and insert it into the tree.
-    pub fn process(&mut self, token: &Token<'_>) {
+    ///
+    /// Returns the [`NodeId`] of the newly created node, or `None` if the
+    /// token did not produce a node (e.g. a close tag or depth limit hit).
+    pub fn process(&mut self, token: &Token<'_>) -> Option<NodeId> {
         match token {
             Token::OpenTag {
                 tag,
                 attributes,
                 self_closing,
                 ..
-            } => {
-                self.handle_open_tag(*tag, attributes, *self_closing);
-            }
+            } => self.handle_open_tag(*tag, attributes, *self_closing),
             Token::CloseTag { tag, .. } => {
                 self.handle_close_tag(*tag);
+                None
             }
-            Token::Text { content } => {
-                self.handle_text(content.as_ref());
-            }
-            Token::Comment { content } => {
-                self.handle_comment(content);
-            }
-            Token::Doctype { content } => {
-                self.handle_doctype(content);
-            }
+            Token::Text { content } => self.handle_text(content.as_ref()),
+            Token::Comment { content } => self.handle_comment(content),
+            Token::Doctype { content } => self.handle_doctype(content),
             Token::CData { content } => {
                 // Treat CDATA as text.
-                self.handle_text(content);
+                self.handle_text(content)
             }
         }
     }
@@ -173,13 +169,13 @@ impl TreeBuilder {
         tag: Tag,
         attributes: &[hp_tokenizer::token::Attribute<'_>],
         self_closing: bool,
-    ) {
+    ) -> Option<NodeId> {
         // Apply implicit close rules.
         self.apply_implicit_close(tag);
 
         // Enforce depth limit.
         if self.current_depth() >= MAX_DEPTH {
-            return;
+            return None;
         }
 
         let depth = self.current_depth();
@@ -206,6 +202,8 @@ impl TreeBuilder {
         } else {
             self.open_elements.push(node);
         }
+
+        Some(node)
     }
 
     /// Handle a close tag token.
@@ -234,30 +232,33 @@ impl TreeBuilder {
     }
 
     /// Handle text content.
-    fn handle_text(&mut self, content: &str) {
+    fn handle_text(&mut self, content: &str) -> Option<NodeId> {
         if content.is_empty() {
-            return;
+            return None;
         }
         let depth = self.current_depth();
         let parent = self.current_parent();
         let node = self.arena.new_text(depth, content);
         self.arena.append_child(parent, node);
+        Some(node)
     }
 
     /// Handle a comment.
-    fn handle_comment(&mut self, content: &str) {
+    fn handle_comment(&mut self, content: &str) -> Option<NodeId> {
         let depth = self.current_depth();
         let parent = self.current_parent();
         let node = self.arena.new_comment(depth, content);
         self.arena.append_child(parent, node);
+        Some(node)
     }
 
     /// Handle a doctype declaration.
-    fn handle_doctype(&mut self, content: &str) {
+    fn handle_doctype(&mut self, content: &str) -> Option<NodeId> {
         let depth = self.current_depth();
         let parent = self.current_parent();
         let node = self.arena.new_doctype(depth, content);
         self.arena.append_child(parent, node);
+        Some(node)
     }
 
     /// Apply implicit close rules based on the new tag.
