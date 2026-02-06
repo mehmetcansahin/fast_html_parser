@@ -22,7 +22,7 @@ Detaylı plan: docs/PLAN.md dosyasında. Her faz için bu plana sadık kal.
 - [x] Faz 0: SIMD Abstraksiyon Katmanı
 - [x] Faz 1: SIMD Tokenizer
 - [x] Faz 2: Arena DOM Tree
-- [ ] Faz 3: Selector Engine
+- [x] Faz 3: Selector Engine
 - [ ] Faz 4: Encoding
 - [ ] Faz 5: Async/Streaming
 - [ ] Faz 6: API & Yayın

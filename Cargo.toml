@@ -5,6 +5,7 @@ members = [
     "crates/hp-simd",
     "crates/hp-tokenizer",
     "crates/hp-tree",
+    "crates/hp-selector",
 ]
 
 [workspace.package]
