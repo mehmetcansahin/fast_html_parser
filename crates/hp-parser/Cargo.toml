@@ -1,0 +1,52 @@
+[package]
+name = "hp-parser"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "SIMD-optimized HTML parser for web scraping — fast tokenization, CSS selectors, XPath, encoding detection"
+repository = "https://github.com/nicatdcw/fast-html-parser"
+keywords = ["html", "parser", "simd", "web-scraping", "css-selector"]
+categories = ["parser-implementations", "web-programming"]
+
+[features]
+default = ["css-selector", "entity-decode"]
+simd = []
+css-selector = ["dep:hp-selector"]
+xpath = ["dep:hp-selector"]
+encoding = ["dep:hp-encoding"]
+async-tokio = ["hp-tree/async-tokio"]
+entity-decode = []
+
+[dependencies]
+hp-core = { path = "../hp-core" }
+hp-tokenizer = { path = "../hp-tokenizer" }
+hp-tree = { path = "../hp-tree" }
+hp-selector = { path = "../hp-selector", optional = true }
+hp-encoding = { path = "../hp-encoding", optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
+
+[[bench]]
+name = "e2e_bench"
+harness = false
+
+[[example]]
+name = "basic_parse"
+
+[[example]]
+name = "web_scraping"
+required-features = ["css-selector"]
+
+[[example]]
+name = "streaming"
+
+[[example]]
+name = "xpath_query"
+required-features = ["xpath"]
+
+[[example]]
+name = "encoding_detect"
+required-features = ["encoding"]
