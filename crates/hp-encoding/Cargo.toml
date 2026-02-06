@@ -1,0 +1,12 @@
+[package]
+name = "hp-encoding"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Encoding detection and conversion for the HTML parser"
+
+[dependencies]
+hp-core = { path = "../hp-core" }
+encoding_rs = { workspace = true }
+thiserror = { workspace = true }
