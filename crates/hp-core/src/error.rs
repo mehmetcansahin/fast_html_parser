@@ -51,6 +51,19 @@ pub enum XPathError {
     },
 }
 
+/// Errors that can occur during encoding detection or conversion.
+#[derive(Debug, thiserror::Error)]
+pub enum EncodingError {
+    /// The decoder encountered bytes that could not be mapped to Unicode.
+    #[error("decode error: malformed {encoding} input at byte offset {offset}")]
+    MalformedInput {
+        /// Name of the encoding being decoded.
+        encoding: &'static str,
+        /// Approximate byte offset of the first invalid sequence.
+        offset: usize,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -78,6 +91,18 @@ mod tests {
             reason: "unexpected token".to_string(),
         };
         assert_eq!(err.to_string(), "invalid xpath: unexpected token");
+    }
+
+    #[test]
+    fn encoding_error_display() {
+        let err = EncodingError::MalformedInput {
+            encoding: "windows-1252",
+            offset: 42,
+        };
+        assert_eq!(
+            err.to_string(),
+            "decode error: malformed windows-1252 input at byte offset 42"
+        );
     }
 
     #[test]

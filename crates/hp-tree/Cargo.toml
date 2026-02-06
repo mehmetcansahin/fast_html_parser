@@ -8,6 +8,7 @@ description = "Cache-optimized arena-based DOM tree for the HTML parser"
 
 [dependencies]
 hp-core = { path = "../hp-core" }
+hp-encoding = { path = "../hp-encoding" }
 hp-tokenizer = { path = "../hp-tokenizer" }
 thiserror = { workspace = true }
 

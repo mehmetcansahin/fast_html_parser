@@ -6,6 +6,7 @@ members = [
     "crates/hp-tokenizer",
     "crates/hp-tree",
     "crates/hp-selector",
+    "crates/hp-encoding",
 ]
 
 [workspace.package]
@@ -17,3 +18,4 @@ license = "MIT OR Apache-2.0"
 thiserror = "2"
 phf = { version = "0.11", features = ["macros"] }
 criterion = { version = "0.5", features = ["html_reports"] }
+encoding_rs = "0.8"
