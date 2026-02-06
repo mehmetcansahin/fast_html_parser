@@ -40,6 +40,17 @@ pub enum SelectorError {
     },
 }
 
+/// Errors that can occur during XPath expression parsing or evaluation.
+#[derive(Debug, thiserror::Error)]
+pub enum XPathError {
+    /// Invalid XPath syntax.
+    #[error("invalid xpath: {reason}")]
+    Invalid {
+        /// Description of what went wrong.
+        reason: String,
+    },
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +70,14 @@ mod tests {
             reason: "unclosed bracket".to_string(),
         };
         assert_eq!(err.to_string(), "invalid selector: unclosed bracket");
+    }
+
+    #[test]
+    fn xpath_error_display() {
+        let err = XPathError::Invalid {
+            reason: "unexpected token".to_string(),
+        };
+        assert_eq!(err.to_string(), "invalid xpath: unexpected token");
     }
 
     #[test]
