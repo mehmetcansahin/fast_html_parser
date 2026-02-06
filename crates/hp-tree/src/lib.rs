@@ -41,6 +41,10 @@ pub enum HtmlError {
         /// Maximum allowed.
         max: usize,
     },
+
+    /// Encoding detection or conversion failed.
+    #[error("encoding error: {0}")]
+    Encoding(#[from] hp_core::error::EncodingError),
 }
 
 /// Maximum input size (256 MiB).
@@ -79,6 +83,40 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
     let (arena, root) = builder.finish();
 
     Ok(Document { arena, root })
+}
+
+/// Parse raw bytes into a [`Document`], auto-detecting the encoding.
+///
+/// The encoding detection pipeline:
+/// 1. BOM detection (UTF-8, UTF-16 LE/BE)
+/// 2. `<meta charset="...">` prescan (first 1 KB)
+/// 3. `<meta http-equiv="Content-Type" content="...charset=...">` prescan
+/// 4. Fallback to UTF-8
+///
+/// # Errors
+///
+/// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB, or
+/// [`HtmlError::Encoding`] if the detected encoding cannot decode the input.
+///
+/// # Example
+///
+/// ```
+/// use hp_tree::parse_bytes;
+///
+/// let doc = parse_bytes(b"<div>Hello</div>").unwrap();
+/// let root = doc.root();
+/// assert_eq!(root.text_content(), "Hello");
+/// ```
+pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
+    if input.len() > MAX_INPUT_SIZE {
+        return Err(HtmlError::InputTooLarge {
+            size: input.len(),
+            max: MAX_INPUT_SIZE,
+        });
+    }
+
+    let (text, _encoding) = hp_encoding::decode_or_detect(input)?;
+    parse(&text)
 }
 
 /// A parsed HTML document backed by an arena.
@@ -618,5 +656,47 @@ mod tests {
         let html = br.outer_html();
         assert!(html.contains("br"), "outer: {html}");
         assert!(html.contains("/>"), "outer: {html}");
+    }
+
+    // ---- parse_bytes tests ----
+
+    #[test]
+    fn parse_bytes_utf8() {
+        let doc = parse_bytes(b"<div><p>Hello</p></div>").unwrap();
+        assert_eq!(doc.root().text_content(), "Hello");
+    }
+
+    #[test]
+    fn parse_bytes_utf8_bom() {
+        let html = b"\xEF\xBB\xBF<div><p>BOM test</p></div>";
+        let doc = parse_bytes(html).unwrap();
+        assert!(doc.root().text_content().contains("BOM test"));
+    }
+
+    #[test]
+    fn parse_bytes_windows_1254_meta() {
+        // Turkish ü=0xFC in windows-1254.
+        let html = b"<meta charset=\"windows-1254\"><p>Merhaba d\xFCnya</p>";
+        let doc = parse_bytes(html).unwrap();
+        let text = doc.root().text_content();
+        assert!(text.contains("dünya"), "text: {text}");
+    }
+
+    #[test]
+    fn parse_bytes_utf16le_bom() {
+        let mut bytes = vec![0xFF, 0xFE]; // BOM
+        for &ch in b"<p>UTF16</p>" {
+            bytes.push(ch);
+            bytes.push(0x00);
+        }
+        let doc = parse_bytes(&bytes).unwrap();
+        let text = doc.root().text_content();
+        assert!(text.contains("UTF16"), "text: {text}");
+    }
+
+    #[test]
+    fn parse_bytes_empty() {
+        let doc = parse_bytes(b"").unwrap();
+        assert!(!doc.root().has_children());
     }
 }
