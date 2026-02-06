@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "CSS selector engine for the HTML parser"
+repository = "https://github.com/nicatdcw/fast-html-parser"
+keywords = ["css", "selector", "xpath", "html"]
+categories = ["parser-implementations", "web-programming"]
 
 [dependencies]
 hp-core = { path = "../hp-core" }
