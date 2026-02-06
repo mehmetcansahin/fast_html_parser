@@ -1,9 +1,9 @@
-//! CSS selector engine for the SIMD-optimized HTML parser.
+//! CSS selector and XPath engine for the SIMD-optimized HTML parser.
 //!
-//! Provides CSS selector parsing, matching, and a convenience API
+//! Provides CSS selector parsing, XPath evaluation, and a convenience API
 //! for querying a parsed [`hp_tree::Document`].
 //!
-//! # Quick Start
+//! # Quick Start — CSS
 //!
 //! ```
 //! use hp_tree::parse;
@@ -15,7 +15,22 @@
 //! assert_eq!(sel.text(), "Hello");
 //! ```
 //!
-//! # Supported Selectors
+//! # Quick Start — XPath
+//!
+//! ```
+//! use hp_tree::parse;
+//! use hp_selector::Selectable;
+//! use hp_selector::xpath::ast::XPathResult;
+//!
+//! let doc = parse("<div><p>Hello</p></div>").unwrap();
+//! let result = doc.xpath("//p/text()").unwrap();
+//! match result {
+//!     XPathResult::Strings(texts) => assert_eq!(texts[0], "Hello"),
+//!     _ => panic!("expected strings"),
+//! }
+//! ```
+//!
+//! # Supported CSS Selectors
 //!
 //! - Type: `div`, `p`, `span`
 //! - Class: `.class`
@@ -26,6 +41,16 @@
 //! - Compound: `div.class#id[attr]`
 //! - Combinator: `A B`, `A > B`, `A + B`, `A ~ B`
 //! - Comma list: `div, span`
+//!
+//! # Supported XPath
+//!
+//! - `//tag` — descendant search
+//! - `//tag[@attr='value']` — attribute predicate
+//! - `/path/to/tag` — absolute path
+//! - `//tag[contains(@attr, 'substr')]` — contains predicate
+//! - `//tag[position()=N]` — position predicate
+//! - `//tag/text()` — text extraction
+//! - `..` — parent axis
 
 /// CSS selector AST types.
 pub mod ast;
@@ -35,16 +60,19 @@ pub mod bloom;
 pub mod matcher;
 /// CSS selector parser.
 pub mod parser;
+/// XPath expression support.
+pub mod xpath;
 
 use std::collections::HashMap;
 
-use hp_core::error::SelectorError;
+use hp_core::error::{SelectorError, XPathError};
 use hp_core::tag::Tag;
 use hp_tree::node::{NodeFlags, NodeId};
 use hp_tree::{Document, NodeRef};
 
 use matcher::{select_all_list, select_first_list};
 use parser::parse_selector;
+use xpath::ast::XPathResult;
 
 /// A collection of matched nodes from a selector query.
 ///
@@ -121,6 +149,40 @@ impl<'a> Selection<'a> {
         }
         Ok(Selection::new(self.doc, results))
     }
+
+    /// Evaluate an XPath expression within the matched nodes.
+    ///
+    /// Each matched node is used as a context root, and results are
+    /// deduplicated in document order.
+    pub fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError> {
+        let parsed = xpath::parser::parse_xpath(expr)?;
+        let mut all_nodes = Vec::new();
+        let mut all_strings = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+
+        for &node_id in &self.nodes {
+            let result = xpath::eval::evaluate(&parsed, self.doc.arena(), node_id);
+            match result {
+                XPathResult::Nodes(nodes) => {
+                    for id in nodes {
+                        if seen.insert(id) {
+                            all_nodes.push(id);
+                        }
+                    }
+                }
+                XPathResult::Strings(strings) => {
+                    all_strings.extend(strings);
+                }
+                XPathResult::Boolean(b) => return Ok(XPathResult::Boolean(b)),
+            }
+        }
+
+        if !all_strings.is_empty() {
+            Ok(XPathResult::Strings(all_strings))
+        } else {
+            Ok(XPathResult::Nodes(all_nodes))
+        }
+    }
 }
 
 impl<'a> IntoIterator for &'a Selection<'a> {
@@ -194,6 +256,28 @@ pub trait Selectable {
 
     /// Find all elements with an attribute matching a value.
     fn find_by_attr(&self, name: &str, value: &str) -> Selection<'_>;
+
+    /// Evaluate an XPath expression against the document.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`XPathError::Invalid`] if the expression syntax is invalid.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use hp_tree::parse;
+    /// use hp_selector::Selectable;
+    /// use hp_selector::xpath::ast::XPathResult;
+    ///
+    /// let doc = parse("<div><p>Hello</p></div>").unwrap();
+    /// let result = doc.xpath("//p").unwrap();
+    /// match result {
+    ///     XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+    ///     _ => panic!("expected nodes"),
+    /// }
+    /// ```
+    fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError>;
 }
 
 impl Selectable for Document {
@@ -274,6 +358,11 @@ impl Selectable for Document {
             }
         }
         Selection::new(self, nodes)
+    }
+
+    fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError> {
+        let parsed = xpath::parser::parse_xpath(expr)?;
+        Ok(xpath::eval::evaluate(&parsed, self.arena(), self.root_id()))
     }
 }
 
@@ -414,5 +503,46 @@ mod tests {
         let sel = doc.select("p").unwrap();
         let texts: Vec<String> = (&sel).into_iter().map(|n| n.text_content()).collect();
         assert_eq!(texts, vec!["a", "b"]);
+    }
+
+    #[test]
+    fn xpath_descendant() {
+        let doc = parse("<div><p>Hello</p></div>").unwrap();
+        let result = doc.xpath("//p").unwrap();
+        match result {
+            XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+            _ => panic!("expected Nodes"),
+        }
+    }
+
+    #[test]
+    fn xpath_text_extract() {
+        let doc = parse("<div><p>Hello</p></div>").unwrap();
+        let result = doc.xpath("//p/text()").unwrap();
+        match result {
+            XPathResult::Strings(texts) => {
+                assert_eq!(texts.len(), 1);
+                assert_eq!(texts[0], "Hello");
+            }
+            _ => panic!("expected Strings"),
+        }
+    }
+
+    #[test]
+    fn xpath_invalid() {
+        let doc = parse("<div>x</div>").unwrap();
+        assert!(doc.xpath("").is_err());
+        assert!(doc.xpath("bad").is_err());
+    }
+
+    #[test]
+    fn selection_xpath_chaining() {
+        let doc = parse("<ul><li>1</li><li>2</li></ul><ol><li>3</li></ol>").unwrap();
+        let sel = doc.select("ul").unwrap();
+        let result = sel.xpath("//li").unwrap();
+        match result {
+            XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 2),
+            _ => panic!("expected Nodes"),
+        }
     }
 }

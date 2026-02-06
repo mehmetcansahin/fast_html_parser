@@ -2,6 +2,7 @@
 
 use hp_core::tag::Tag;
 use hp_selector::Selectable;
+use hp_selector::xpath::ast::XPathResult;
 use hp_tree::parse;
 
 // ---------------------------------------------------------------
@@ -433,4 +434,300 @@ fn complex_selector_chain() {
     let sel = doc.select("#nav ul > li.active a").unwrap();
     assert_eq!(sel.len(), 1);
     assert_eq!(sel.text(), "Home");
+}
+
+// ---------------------------------------------------------------
+// XPath: descendant search
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_descendant_tag() {
+    let doc = parse("<div><p>Hello</p><p>World</p></div>").unwrap();
+    let result = doc.xpath("//p").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 2),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_descendant_nested() {
+    let doc = parse("<div><section><article><p>deep</p></article></section></div>").unwrap();
+    let result = doc.xpath("//p").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: attribute predicates
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_attr_equals() {
+    let doc = parse("<a href=\"x\">a</a><a href=\"y\">b</a>").unwrap();
+    let result = doc.xpath("//a[@href='x']").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_attr_exists() {
+    let doc = parse("<a href=\"x\">a</a><span>b</span>").unwrap();
+    let result = doc.xpath("//a[@href]").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: contains predicate
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_contains() {
+    let doc = parse("<div class=\"nav-main\">a</div><div class=\"footer\">b</div>").unwrap();
+    let result = doc.xpath("//div[contains(@class, 'nav')]").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: position predicate
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_position() {
+    let doc = parse("<ul><li>1</li><li>2</li><li>3</li></ul>").unwrap();
+    let result = doc.xpath("//li[position()=2]").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_position_shorthand() {
+    let doc = parse("<ul><li>1</li><li>2</li><li>3</li></ul>").unwrap();
+    let result = doc.xpath("//li[1]").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: text extraction
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_text_extract() {
+    let doc = parse("<div><p>Hello</p><p>World</p></div>").unwrap();
+    let result = doc.xpath("//p/text()").unwrap();
+    match result {
+        XPathResult::Strings(texts) => {
+            assert_eq!(texts.len(), 2);
+            assert_eq!(texts[0], "Hello");
+            assert_eq!(texts[1], "World");
+        }
+        _ => panic!("expected Strings"),
+    }
+}
+
+#[test]
+fn xpath_text_nested() {
+    let doc = parse("<p><b>bold</b> text</p>").unwrap();
+    let result = doc.xpath("//p/text()").unwrap();
+    match result {
+        XPathResult::Strings(texts) => {
+            assert_eq!(texts.len(), 1);
+            assert_eq!(texts[0], "bold text");
+        }
+        _ => panic!("expected Strings"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: absolute path
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_absolute_path() {
+    let doc = parse("<html><body><div>content</div></body></html>").unwrap();
+    let result = doc.xpath("/html/body/div").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_absolute_path_with_predicate() {
+    let doc = parse("<html><body><div class=\"main\">a</div><div>b</div></body></html>").unwrap();
+    let result = doc.xpath("/html/body/div[@class='main']").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_absolute_path_text() {
+    let doc = parse("<html><body><p>text</p></body></html>").unwrap();
+    let result = doc.xpath("/html/body/p/text()").unwrap();
+    match result {
+        XPathResult::Strings(texts) => {
+            assert_eq!(texts.len(), 1);
+            assert_eq!(texts[0], "text");
+        }
+        _ => panic!("expected Strings"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: wildcard
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_wildcard() {
+    let doc = parse("<div><p>a</p><span>b</span></div>").unwrap();
+    let result = doc.xpath("//*").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert!(nodes.len() >= 3),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_wildcard_attr() {
+    let doc = parse("<div id=\"main\">a</div><span>b</span>").unwrap();
+    let result = doc.xpath("//*[@id='main']").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: edge cases
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_empty_document() {
+    let doc = parse("").unwrap();
+    let result = doc.xpath("//div").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert!(nodes.is_empty()),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_no_match() {
+    let doc = parse("<div>text</div>").unwrap();
+    let result = doc.xpath("//span").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert!(nodes.is_empty()),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_position_out_of_range() {
+    let doc = parse("<ul><li>1</li></ul>").unwrap();
+    let result = doc.xpath("//li[position()=5]").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert!(nodes.is_empty()),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn xpath_invalid_expr() {
+    let doc = parse("<div>x</div>").unwrap();
+    assert!(doc.xpath("").is_err());
+    assert!(doc.xpath("bad").is_err());
+    assert!(doc.xpath("//foobar").is_err());
+}
+
+// ---------------------------------------------------------------
+// CSS vs XPath comparison tests
+// ---------------------------------------------------------------
+
+#[test]
+fn css_xpath_same_result_tag() {
+    let doc = parse("<div><p>a</p><p>b</p></div>").unwrap();
+    let css = doc.select("p").unwrap();
+    let xpath = doc.xpath("//p").unwrap();
+    match xpath {
+        XPathResult::Nodes(nodes) => assert_eq!(css.len(), nodes.len()),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn css_xpath_same_result_attr() {
+    let doc = parse("<a href=\"x\">a</a><a href=\"y\">b</a>").unwrap();
+    let css = doc.select("[href=\"x\"]").unwrap();
+    let xpath = doc.xpath("//a[@href='x']").unwrap();
+    match xpath {
+        XPathResult::Nodes(nodes) => assert_eq!(css.len(), nodes.len()),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+#[test]
+fn css_xpath_same_result_multiple() {
+    let html = "<div><ul><li>1</li><li>2</li><li>3</li></ul></div>";
+    let doc = parse(html).unwrap();
+    let css = doc.select("li").unwrap();
+    let xpath = doc.xpath("//li").unwrap();
+    match xpath {
+        XPathResult::Nodes(nodes) => assert_eq!(css.len(), nodes.len()),
+        _ => panic!("expected Nodes"),
+    }
+}
+
+// ---------------------------------------------------------------
+// XPath: large HTML
+// ---------------------------------------------------------------
+
+#[test]
+fn xpath_large_html() {
+    let mut html = String::with_capacity(50000);
+    html.push_str("<div>");
+    for i in 0..500 {
+        if i % 5 == 0 {
+            html.push_str(&format!("<p class=\"highlight\">{i}</p>"));
+        } else {
+            html.push_str(&format!("<p>{i}</p>"));
+        }
+    }
+    html.push_str("</div>");
+
+    let doc = parse(&html).unwrap();
+
+    let result = doc.xpath("//p").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 500),
+        _ => panic!("expected Nodes"),
+    }
+
+    let result = doc.xpath("//p[contains(@class, 'highlight')]").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 100),
+        _ => panic!("expected Nodes"),
+    }
+
+    let result = doc.xpath("//p[1]").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected Nodes"),
+    }
 }
