@@ -24,7 +24,7 @@ Detaylı plan: docs/PLAN.md dosyasında. Her faz için bu plana sadık kal.
 - [x] Faz 2: Arena DOM Tree
 - [x] Faz 3: Selector Engine
 - [x] Faz 4: Encoding
-- [ ] Faz 5: Async/Streaming
+- [x] Faz 5: Async/Streaming
 - [ ] Faz 6: API & Yayın
 
 ## Çalışma Prensibi
