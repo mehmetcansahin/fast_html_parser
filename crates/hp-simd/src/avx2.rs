@@ -215,6 +215,47 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
     offset + crate::scalar::skip_whitespace_safe(&input[offset..])
 }
 
+/// Produce a bitmask where bit `i` is set if `block[i] == byte`.
+///
+/// Processes 32 bytes at a time using `_mm256_cmpeq_epi8` +
+/// `_mm256_movemask_epi8`. Handles blocks up to 64 bytes.
+///
+/// # Safety
+///
+/// Caller must ensure the CPU supports AVX2.
+#[target_feature(enable = "avx2")]
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
+    let len = block.len();
+    let ptr = block.as_ptr();
+    let mut result: u64 = 0;
+    let mut offset = 0;
+
+    // SAFETY: all intrinsics below require AVX2, guaranteed by #[target_feature].
+    unsafe {
+        let target = _mm256_set1_epi8(byte as i8);
+
+        while offset + 32 <= len {
+            let chunk = _mm256_loadu_si256(ptr.add(offset) as *const __m256i);
+            let cmp = _mm256_cmpeq_epi8(chunk, target);
+            let mask = _mm256_movemask_epi8(cmp) as u32;
+            result |= (mask as u64) << offset;
+            offset += 32;
+        }
+    }
+
+    // Scalar tail.
+    while offset < len {
+        // SAFETY: offset < len, so ptr.add(offset) is valid.
+        if unsafe { *ptr.add(offset) } == byte {
+            result |= 1u64 << offset;
+        }
+        offset += 1;
+    }
+
+    result
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;

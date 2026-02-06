@@ -201,6 +201,47 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
     offset + crate::scalar::skip_whitespace_safe(&input[offset..])
 }
 
+/// Produce a bitmask where bit `i` is set if `block[i] == byte`.
+///
+/// Processes 16 bytes at a time using NEON `vceqq_u8`, then extracts
+/// a bitmask via [`neon_movemask`]. Handles blocks up to 64 bytes.
+///
+/// # Safety
+///
+/// Caller must ensure the CPU supports NEON (always true on aarch64).
+#[target_feature(enable = "neon")]
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
+    let len = block.len();
+    let ptr = block.as_ptr();
+    let mut result: u64 = 0;
+    let mut offset = 0;
+
+    // SAFETY: all intrinsics below require NEON, guaranteed by #[target_feature].
+    unsafe {
+        let target = vdupq_n_u8(byte);
+
+        while offset + 16 <= len {
+            let chunk = vld1q_u8(ptr.add(offset));
+            let cmp = vceqq_u8(chunk, target);
+            let mask = neon_movemask(cmp);
+            result |= (mask as u64) << offset;
+            offset += 16;
+        }
+    }
+
+    // Scalar tail.
+    while offset < len {
+        // SAFETY: offset < len, so ptr.add(offset) is valid.
+        if unsafe { *ptr.add(offset) } == byte {
+            result |= 1u64 << offset;
+        }
+        offset += 1;
+    }
+
+    result
+}
+
 /// Emulate x86 `_mm_movemask_epi8` on NEON.
 ///
 /// Takes a 128-bit vector where each byte is either 0x00 or 0xFF.
@@ -376,6 +417,49 @@ mod tests {
                 std::str::from_utf8(input)
             );
         }
+    }
+
+    #[test]
+    fn compute_byte_mask_basic() {
+        let input = b"hello world <div>";
+        let mask = unsafe { compute_byte_mask(input, b'<') };
+        assert_eq!(mask, 1 << 12);
+    }
+
+    #[test]
+    fn compute_byte_mask_multiple_hits() {
+        // 20 bytes — crosses 16-byte boundary.
+        let mut input = vec![b'x'; 20];
+        input[3] = b'<';
+        input[17] = b'<';
+        let mask = unsafe { compute_byte_mask(&input, b'<') };
+        assert_eq!(mask, (1 << 3) | (1 << 17));
+    }
+
+    #[test]
+    fn compute_byte_mask_matches_scalar() {
+        let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
+        for &byte in &[b'<', b'>', b'&', b'"', b'\'', b'=', b'/'] {
+            let neon_result = unsafe { compute_byte_mask(input, byte) };
+            let scalar_result = unsafe { crate::scalar::compute_byte_mask(input, byte) };
+            assert_eq!(neon_result, scalar_result, "mismatch for byte 0x{byte:02X}");
+        }
+    }
+
+    #[test]
+    fn compute_byte_mask_64_bytes() {
+        let mut input = vec![b'a'; 64];
+        input[0] = b'<';
+        input[15] = b'<';
+        input[16] = b'<';
+        input[31] = b'<';
+        input[48] = b'<';
+        input[63] = b'<';
+        let mask = unsafe { compute_byte_mask(&input, b'<') };
+        assert_eq!(
+            mask,
+            (1u64 << 0) | (1u64 << 15) | (1u64 << 16) | (1u64 << 31) | (1u64 << 48) | (1u64 << 63)
+        );
     }
 
     #[test]
