@@ -1,0 +1,1410 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Medium Test Document &mdash; 100KB Benchmark</title>
+    <link rel="stylesheet" href="/css/main.css">
+    <link rel="stylesheet" href="/css/components.css">
+    <script src="/js/app.js" defer></script>
+</head>
+<body>
+    <!-- Medium benchmark document with tables, nested divs, and various HTML elements -->
+    <div id="app" class="application-wrapper" data-version="2.1.0">
+        <header class="site-header" role="banner">
+            <div class="header-inner">
+                <h1 class="logo">Benchmark &amp; Testing Platform</h1>
+                <nav class="main-nav" aria-label="Main Navigation">
+                    <ul class="nav-list">
+                        <li class="nav-item"><a href="/page/0" class="nav-link" data-index="0">Page 0 &rarr;</a></li>
+                        <li class="nav-item"><a href="/page/1" class="nav-link" data-index="1">Page 1 &rarr;</a></li>
+                        <li class="nav-item"><a href="/page/2" class="nav-link" data-index="2">Page 2 &rarr;</a></li>
+                        <li class="nav-item"><a href="/page/3" class="nav-link" data-index="3">Page 3 &rarr;</a></li>
+                        <li class="nav-item"><a href="/page/4" class="nav-link" data-index="4">Page 4 &rarr;</a></li>
+                        <li class="nav-item"><a href="/page/5" class="nav-link" data-index="5">Page 5 &rarr;</a></li>
+                        <li class="nav-item"><a href="/page/6" class="nav-link" data-index="6">Page 6 &rarr;</a></li>
+                        <li class="nav-item"><a href="/page/7" class="nav-link" data-index="7">Page 7 &rarr;</a></li>
+                    </ul>
+                </nav>
+            </div>
+        </header>
+
+        <main class="main-content" role="main">
+            <section class="data-section" id="data-table">
+                <h2>Product Catalog &mdash; Full Listing</h2>
+                <table class="data-table sortable" id="products" data-sort="asc" data-page="1">
+                    <thead>
+                        <tr>
+                            <th scope="col" class="col-id">ID</th>
+                            <th scope="col" class="col-name">Product Name</th>
+                            <th scope="col" class="col-cat">Category</th>
+                            <th scope="col" class="col-price">Price</th>
+                            <th scope="col" class="col-stock">In Stock</th>
+                            <th scope="col" class="col-desc">Description</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr class="row-even" data-row-id="0">
+                            <td class="cell-id">1000</td>
+                            <td class="cell-name"><a href="/product/0" title="View Premium Widget #0">Premium Widget #0</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;4.00</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="1">
+                            <td class="cell-id">1001</td>
+                            <td class="cell-name"><a href="/product/1" title="View Standard Gadget #1">Standard Gadget #1</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;11.13</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="2">
+                            <td class="cell-id">1002</td>
+                            <td class="cell-name"><a href="/product/2" title="View Deluxe Tool #2">Deluxe Tool #2</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;18.26</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="3">
+                            <td class="cell-id">1003</td>
+                            <td class="cell-name"><a href="/product/3" title="View Professional Component #3">Professional Component #3</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;25.39</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="4">
+                            <td class="cell-id">1004</td>
+                            <td class="cell-name"><a href="/product/4" title="View Basic Module #4">Basic Module #4</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;32.52</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="5">
+                            <td class="cell-id">1005</td>
+                            <td class="cell-name"><a href="/product/5" title="View Advanced Device #5">Advanced Device #5</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;39.65</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="6">
+                            <td class="cell-id">1006</td>
+                            <td class="cell-name"><a href="/product/6" title="View Premium Widget #6">Premium Widget #6</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;46.78</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="7">
+                            <td class="cell-id">1007</td>
+                            <td class="cell-name"><a href="/product/7" title="View Standard Gadget #7">Standard Gadget #7</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;53.91</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="8">
+                            <td class="cell-id">1008</td>
+                            <td class="cell-name"><a href="/product/8" title="View Deluxe Tool #8">Deluxe Tool #8</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;60.04</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="9">
+                            <td class="cell-id">1009</td>
+                            <td class="cell-name"><a href="/product/9" title="View Professional Component #9">Professional Component #9</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;67.17</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="10">
+                            <td class="cell-id">1010</td>
+                            <td class="cell-name"><a href="/product/10" title="View Basic Module #10">Basic Module #10</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;74.30</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="11">
+                            <td class="cell-id">1011</td>
+                            <td class="cell-name"><a href="/product/11" title="View Advanced Device #11">Advanced Device #11</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;81.43</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="12">
+                            <td class="cell-id">1012</td>
+                            <td class="cell-name"><a href="/product/12" title="View Premium Widget #12">Premium Widget #12</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;88.56</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="13">
+                            <td class="cell-id">1013</td>
+                            <td class="cell-name"><a href="/product/13" title="View Standard Gadget #13">Standard Gadget #13</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;95.69</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="14">
+                            <td class="cell-id">1014</td>
+                            <td class="cell-name"><a href="/product/14" title="View Deluxe Tool #14">Deluxe Tool #14</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;102.82</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="15">
+                            <td class="cell-id">1015</td>
+                            <td class="cell-name"><a href="/product/15" title="View Professional Component #15">Professional Component #15</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;109.95</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="16">
+                            <td class="cell-id">1016</td>
+                            <td class="cell-name"><a href="/product/16" title="View Basic Module #16">Basic Module #16</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;116.08</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="17">
+                            <td class="cell-id">1017</td>
+                            <td class="cell-name"><a href="/product/17" title="View Advanced Device #17">Advanced Device #17</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;123.21</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="18">
+                            <td class="cell-id">1018</td>
+                            <td class="cell-name"><a href="/product/18" title="View Premium Widget #18">Premium Widget #18</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;130.34</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="19">
+                            <td class="cell-id">1019</td>
+                            <td class="cell-name"><a href="/product/19" title="View Standard Gadget #19">Standard Gadget #19</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;137.47</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="20">
+                            <td class="cell-id">1020</td>
+                            <td class="cell-name"><a href="/product/20" title="View Deluxe Tool #20">Deluxe Tool #20</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;144.60</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="21">
+                            <td class="cell-id">1021</td>
+                            <td class="cell-name"><a href="/product/21" title="View Professional Component #21">Professional Component #21</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;151.73</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="22">
+                            <td class="cell-id">1022</td>
+                            <td class="cell-name"><a href="/product/22" title="View Basic Module #22">Basic Module #22</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;158.86</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="23">
+                            <td class="cell-id">1023</td>
+                            <td class="cell-name"><a href="/product/23" title="View Advanced Device #23">Advanced Device #23</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;165.99</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="24">
+                            <td class="cell-id">1024</td>
+                            <td class="cell-name"><a href="/product/24" title="View Premium Widget #24">Premium Widget #24</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;172.12</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="25">
+                            <td class="cell-id">1025</td>
+                            <td class="cell-name"><a href="/product/25" title="View Standard Gadget #25">Standard Gadget #25</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;179.25</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="26">
+                            <td class="cell-id">1026</td>
+                            <td class="cell-name"><a href="/product/26" title="View Deluxe Tool #26">Deluxe Tool #26</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;186.38</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="27">
+                            <td class="cell-id">1027</td>
+                            <td class="cell-name"><a href="/product/27" title="View Professional Component #27">Professional Component #27</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;193.51</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="28">
+                            <td class="cell-id">1028</td>
+                            <td class="cell-name"><a href="/product/28" title="View Basic Module #28">Basic Module #28</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;200.64</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="29">
+                            <td class="cell-id">1029</td>
+                            <td class="cell-name"><a href="/product/29" title="View Advanced Device #29">Advanced Device #29</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;207.77</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="30">
+                            <td class="cell-id">1030</td>
+                            <td class="cell-name"><a href="/product/30" title="View Premium Widget #30">Premium Widget #30</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;214.90</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="31">
+                            <td class="cell-id">1031</td>
+                            <td class="cell-name"><a href="/product/31" title="View Standard Gadget #31">Standard Gadget #31</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;221.03</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="32">
+                            <td class="cell-id">1032</td>
+                            <td class="cell-name"><a href="/product/32" title="View Deluxe Tool #32">Deluxe Tool #32</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;228.16</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="33">
+                            <td class="cell-id">1033</td>
+                            <td class="cell-name"><a href="/product/33" title="View Professional Component #33">Professional Component #33</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;235.29</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="34">
+                            <td class="cell-id">1034</td>
+                            <td class="cell-name"><a href="/product/34" title="View Basic Module #34">Basic Module #34</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;242.42</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="35">
+                            <td class="cell-id">1035</td>
+                            <td class="cell-name"><a href="/product/35" title="View Advanced Device #35">Advanced Device #35</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;249.55</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="36">
+                            <td class="cell-id">1036</td>
+                            <td class="cell-name"><a href="/product/36" title="View Premium Widget #36">Premium Widget #36</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;256.68</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="37">
+                            <td class="cell-id">1037</td>
+                            <td class="cell-name"><a href="/product/37" title="View Standard Gadget #37">Standard Gadget #37</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;263.81</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="38">
+                            <td class="cell-id">1038</td>
+                            <td class="cell-name"><a href="/product/38" title="View Deluxe Tool #38">Deluxe Tool #38</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;270.94</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="39">
+                            <td class="cell-id">1039</td>
+                            <td class="cell-name"><a href="/product/39" title="View Professional Component #39">Professional Component #39</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;277.07</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="40">
+                            <td class="cell-id">1040</td>
+                            <td class="cell-name"><a href="/product/40" title="View Basic Module #40">Basic Module #40</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;284.20</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="41">
+                            <td class="cell-id">1041</td>
+                            <td class="cell-name"><a href="/product/41" title="View Advanced Device #41">Advanced Device #41</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;291.33</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="42">
+                            <td class="cell-id">1042</td>
+                            <td class="cell-name"><a href="/product/42" title="View Premium Widget #42">Premium Widget #42</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;298.46</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="43">
+                            <td class="cell-id">1043</td>
+                            <td class="cell-name"><a href="/product/43" title="View Standard Gadget #43">Standard Gadget #43</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;305.59</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="44">
+                            <td class="cell-id">1044</td>
+                            <td class="cell-name"><a href="/product/44" title="View Deluxe Tool #44">Deluxe Tool #44</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;312.72</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="45">
+                            <td class="cell-id">1045</td>
+                            <td class="cell-name"><a href="/product/45" title="View Professional Component #45">Professional Component #45</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;319.85</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="46">
+                            <td class="cell-id">1046</td>
+                            <td class="cell-name"><a href="/product/46" title="View Basic Module #46">Basic Module #46</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;326.98</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="47">
+                            <td class="cell-id">1047</td>
+                            <td class="cell-name"><a href="/product/47" title="View Advanced Device #47">Advanced Device #47</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;333.11</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="48">
+                            <td class="cell-id">1048</td>
+                            <td class="cell-name"><a href="/product/48" title="View Premium Widget #48">Premium Widget #48</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;340.24</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="49">
+                            <td class="cell-id">1049</td>
+                            <td class="cell-name"><a href="/product/49" title="View Standard Gadget #49">Standard Gadget #49</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;347.37</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="50">
+                            <td class="cell-id">1050</td>
+                            <td class="cell-name"><a href="/product/50" title="View Deluxe Tool #50">Deluxe Tool #50</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;354.50</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="51">
+                            <td class="cell-id">1051</td>
+                            <td class="cell-name"><a href="/product/51" title="View Professional Component #51">Professional Component #51</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;361.63</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="52">
+                            <td class="cell-id">1052</td>
+                            <td class="cell-name"><a href="/product/52" title="View Basic Module #52">Basic Module #52</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;368.76</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="53">
+                            <td class="cell-id">1053</td>
+                            <td class="cell-name"><a href="/product/53" title="View Advanced Device #53">Advanced Device #53</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;375.89</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="54">
+                            <td class="cell-id">1054</td>
+                            <td class="cell-name"><a href="/product/54" title="View Premium Widget #54">Premium Widget #54</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;382.02</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="55">
+                            <td class="cell-id">1055</td>
+                            <td class="cell-name"><a href="/product/55" title="View Standard Gadget #55">Standard Gadget #55</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;389.15</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="56">
+                            <td class="cell-id">1056</td>
+                            <td class="cell-name"><a href="/product/56" title="View Deluxe Tool #56">Deluxe Tool #56</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;396.28</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="57">
+                            <td class="cell-id">1057</td>
+                            <td class="cell-name"><a href="/product/57" title="View Professional Component #57">Professional Component #57</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;403.41</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="58">
+                            <td class="cell-id">1058</td>
+                            <td class="cell-name"><a href="/product/58" title="View Basic Module #58">Basic Module #58</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;410.54</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="59">
+                            <td class="cell-id">1059</td>
+                            <td class="cell-name"><a href="/product/59" title="View Advanced Device #59">Advanced Device #59</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;417.67</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="60">
+                            <td class="cell-id">1060</td>
+                            <td class="cell-name"><a href="/product/60" title="View Premium Widget #60">Premium Widget #60</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;424.80</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="61">
+                            <td class="cell-id">1061</td>
+                            <td class="cell-name"><a href="/product/61" title="View Standard Gadget #61">Standard Gadget #61</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;431.93</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="62">
+                            <td class="cell-id">1062</td>
+                            <td class="cell-name"><a href="/product/62" title="View Deluxe Tool #62">Deluxe Tool #62</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;438.06</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="63">
+                            <td class="cell-id">1063</td>
+                            <td class="cell-name"><a href="/product/63" title="View Professional Component #63">Professional Component #63</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;445.19</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="64">
+                            <td class="cell-id">1064</td>
+                            <td class="cell-name"><a href="/product/64" title="View Basic Module #64">Basic Module #64</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;452.32</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="65">
+                            <td class="cell-id">1065</td>
+                            <td class="cell-name"><a href="/product/65" title="View Advanced Device #65">Advanced Device #65</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;459.45</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="66">
+                            <td class="cell-id">1066</td>
+                            <td class="cell-name"><a href="/product/66" title="View Premium Widget #66">Premium Widget #66</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;466.58</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="67">
+                            <td class="cell-id">1067</td>
+                            <td class="cell-name"><a href="/product/67" title="View Standard Gadget #67">Standard Gadget #67</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;473.71</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="68">
+                            <td class="cell-id">1068</td>
+                            <td class="cell-name"><a href="/product/68" title="View Deluxe Tool #68">Deluxe Tool #68</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;480.84</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="69">
+                            <td class="cell-id">1069</td>
+                            <td class="cell-name"><a href="/product/69" title="View Professional Component #69">Professional Component #69</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;487.97</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="70">
+                            <td class="cell-id">1070</td>
+                            <td class="cell-name"><a href="/product/70" title="View Basic Module #70">Basic Module #70</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;494.10</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="71">
+                            <td class="cell-id">1071</td>
+                            <td class="cell-name"><a href="/product/71" title="View Advanced Device #71">Advanced Device #71</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;1.23</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="72">
+                            <td class="cell-id">1072</td>
+                            <td class="cell-name"><a href="/product/72" title="View Premium Widget #72">Premium Widget #72</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;8.36</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="73">
+                            <td class="cell-id">1073</td>
+                            <td class="cell-name"><a href="/product/73" title="View Standard Gadget #73">Standard Gadget #73</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;15.49</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="74">
+                            <td class="cell-id">1074</td>
+                            <td class="cell-name"><a href="/product/74" title="View Deluxe Tool #74">Deluxe Tool #74</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;22.62</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="75">
+                            <td class="cell-id">1075</td>
+                            <td class="cell-name"><a href="/product/75" title="View Professional Component #75">Professional Component #75</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;29.75</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="76">
+                            <td class="cell-id">1076</td>
+                            <td class="cell-name"><a href="/product/76" title="View Basic Module #76">Basic Module #76</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;36.88</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="77">
+                            <td class="cell-id">1077</td>
+                            <td class="cell-name"><a href="/product/77" title="View Advanced Device #77">Advanced Device #77</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;43.01</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="78">
+                            <td class="cell-id">1078</td>
+                            <td class="cell-name"><a href="/product/78" title="View Premium Widget #78">Premium Widget #78</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;50.14</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="79">
+                            <td class="cell-id">1079</td>
+                            <td class="cell-name"><a href="/product/79" title="View Standard Gadget #79">Standard Gadget #79</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;57.27</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="80">
+                            <td class="cell-id">1080</td>
+                            <td class="cell-name"><a href="/product/80" title="View Deluxe Tool #80">Deluxe Tool #80</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;64.40</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="81">
+                            <td class="cell-id">1081</td>
+                            <td class="cell-name"><a href="/product/81" title="View Professional Component #81">Professional Component #81</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;71.53</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="82">
+                            <td class="cell-id">1082</td>
+                            <td class="cell-name"><a href="/product/82" title="View Basic Module #82">Basic Module #82</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;78.66</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="83">
+                            <td class="cell-id">1083</td>
+                            <td class="cell-name"><a href="/product/83" title="View Advanced Device #83">Advanced Device #83</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;85.79</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="84">
+                            <td class="cell-id">1084</td>
+                            <td class="cell-name"><a href="/product/84" title="View Premium Widget #84">Premium Widget #84</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;92.92</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="85">
+                            <td class="cell-id">1085</td>
+                            <td class="cell-name"><a href="/product/85" title="View Standard Gadget #85">Standard Gadget #85</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;99.05</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="86">
+                            <td class="cell-id">1086</td>
+                            <td class="cell-name"><a href="/product/86" title="View Deluxe Tool #86">Deluxe Tool #86</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;106.18</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="87">
+                            <td class="cell-id">1087</td>
+                            <td class="cell-name"><a href="/product/87" title="View Professional Component #87">Professional Component #87</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;113.31</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="88">
+                            <td class="cell-id">1088</td>
+                            <td class="cell-name"><a href="/product/88" title="View Basic Module #88">Basic Module #88</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;120.44</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="89">
+                            <td class="cell-id">1089</td>
+                            <td class="cell-name"><a href="/product/89" title="View Advanced Device #89">Advanced Device #89</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;127.57</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="90">
+                            <td class="cell-id">1090</td>
+                            <td class="cell-name"><a href="/product/90" title="View Premium Widget #90">Premium Widget #90</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;134.70</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="91">
+                            <td class="cell-id">1091</td>
+                            <td class="cell-name"><a href="/product/91" title="View Standard Gadget #91">Standard Gadget #91</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;141.83</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="92">
+                            <td class="cell-id">1092</td>
+                            <td class="cell-name"><a href="/product/92" title="View Deluxe Tool #92">Deluxe Tool #92</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;148.96</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="93">
+                            <td class="cell-id">1093</td>
+                            <td class="cell-name"><a href="/product/93" title="View Professional Component #93">Professional Component #93</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;155.09</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="94">
+                            <td class="cell-id">1094</td>
+                            <td class="cell-name"><a href="/product/94" title="View Basic Module #94">Basic Module #94</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;162.22</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="95">
+                            <td class="cell-id">1095</td>
+                            <td class="cell-name"><a href="/product/95" title="View Advanced Device #95">Advanced Device #95</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;169.35</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="96">
+                            <td class="cell-id">1096</td>
+                            <td class="cell-name"><a href="/product/96" title="View Premium Widget #96">Premium Widget #96</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;176.48</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="97">
+                            <td class="cell-id">1097</td>
+                            <td class="cell-name"><a href="/product/97" title="View Standard Gadget #97">Standard Gadget #97</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;183.61</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="98">
+                            <td class="cell-id">1098</td>
+                            <td class="cell-name"><a href="/product/98" title="View Deluxe Tool #98">Deluxe Tool #98</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;190.74</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="99">
+                            <td class="cell-id">1099</td>
+                            <td class="cell-name"><a href="/product/99" title="View Professional Component #99">Professional Component #99</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;197.87</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="100">
+                            <td class="cell-id">1100</td>
+                            <td class="cell-name"><a href="/product/100" title="View Basic Module #100">Basic Module #100</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;204.00</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="101">
+                            <td class="cell-id">1101</td>
+                            <td class="cell-name"><a href="/product/101" title="View Advanced Device #101">Advanced Device #101</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;211.13</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="102">
+                            <td class="cell-id">1102</td>
+                            <td class="cell-name"><a href="/product/102" title="View Premium Widget #102">Premium Widget #102</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;218.26</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="103">
+                            <td class="cell-id">1103</td>
+                            <td class="cell-name"><a href="/product/103" title="View Standard Gadget #103">Standard Gadget #103</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;225.39</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="104">
+                            <td class="cell-id">1104</td>
+                            <td class="cell-name"><a href="/product/104" title="View Deluxe Tool #104">Deluxe Tool #104</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;232.52</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="105">
+                            <td class="cell-id">1105</td>
+                            <td class="cell-name"><a href="/product/105" title="View Professional Component #105">Professional Component #105</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;239.65</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="106">
+                            <td class="cell-id">1106</td>
+                            <td class="cell-name"><a href="/product/106" title="View Basic Module #106">Basic Module #106</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;246.78</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="107">
+                            <td class="cell-id">1107</td>
+                            <td class="cell-name"><a href="/product/107" title="View Advanced Device #107">Advanced Device #107</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;253.91</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="108">
+                            <td class="cell-id">1108</td>
+                            <td class="cell-name"><a href="/product/108" title="View Premium Widget #108">Premium Widget #108</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;260.04</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="109">
+                            <td class="cell-id">1109</td>
+                            <td class="cell-name"><a href="/product/109" title="View Standard Gadget #109">Standard Gadget #109</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;267.17</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="110">
+                            <td class="cell-id">1110</td>
+                            <td class="cell-name"><a href="/product/110" title="View Deluxe Tool #110">Deluxe Tool #110</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;274.30</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="111">
+                            <td class="cell-id">1111</td>
+                            <td class="cell-name"><a href="/product/111" title="View Professional Component #111">Professional Component #111</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;281.43</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="112">
+                            <td class="cell-id">1112</td>
+                            <td class="cell-name"><a href="/product/112" title="View Basic Module #112">Basic Module #112</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;288.56</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="113">
+                            <td class="cell-id">1113</td>
+                            <td class="cell-name"><a href="/product/113" title="View Advanced Device #113">Advanced Device #113</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;295.69</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="114">
+                            <td class="cell-id">1114</td>
+                            <td class="cell-name"><a href="/product/114" title="View Premium Widget #114">Premium Widget #114</a></td>
+                            <td class="cell-cat">Electronics</td>
+                            <td class="cell-price">&dollar;302.82</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality premium widget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="115">
+                            <td class="cell-id">1115</td>
+                            <td class="cell-name"><a href="/product/115" title="View Standard Gadget #115">Standard Gadget #115</a></td>
+                            <td class="cell-cat">Clothing</td>
+                            <td class="cell-price">&dollar;309.95</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality standard gadget for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="116">
+                            <td class="cell-id">1116</td>
+                            <td class="cell-name"><a href="/product/116" title="View Deluxe Tool #116">Deluxe Tool #116</a></td>
+                            <td class="cell-cat">Home &amp; Garden</td>
+                            <td class="cell-price">&dollar;316.08</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality deluxe tool for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="117">
+                            <td class="cell-id">1117</td>
+                            <td class="cell-name"><a href="/product/117" title="View Professional Component #117">Professional Component #117</a></td>
+                            <td class="cell-cat">Books &amp; Media</td>
+                            <td class="cell-price">&dollar;323.21</td>
+                            <td class="cell-stock"><span class="badge badge-danger">No</span></td>
+                            <td class="cell-desc">High-quality professional component for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-even" data-row-id="118">
+                            <td class="cell-id">1118</td>
+                            <td class="cell-name"><a href="/product/118" title="View Basic Module #118">Basic Module #118</a></td>
+                            <td class="cell-cat">Sports</td>
+                            <td class="cell-price">&dollar;330.34</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality basic module for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                        <tr class="row-odd" data-row-id="119">
+                            <td class="cell-id">1119</td>
+                            <td class="cell-name"><a href="/product/119" title="View Advanced Device #119">Advanced Device #119</a></td>
+                            <td class="cell-cat">Toys &amp; Games</td>
+                            <td class="cell-price">&dollar;337.47</td>
+                            <td class="cell-stock"><span class="badge badge-success">Yes</span></td>
+                            <td class="cell-desc">High-quality advanced device for everyday use. Features include durability &amp; performance.</td>
+                        </tr>
+                    </tbody>
+                </table>
+            </section>
+
+            <section class="articles-section" id="articles">
+                <h2>Latest Articles &amp; News</h2>
+                <div class="articles-grid">
+                    <article class="card" id="article-0" data-category="cat-0" data-published="2025-01-01">
+                        <div class="card-header">
+                            <img src="/images/article-0.jpg" alt="Article 0 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/0">Understanding Modern Web Development &mdash; Part 1</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 0</span>
+                                <time datetime="2025-01-01">1 Jan 2025</time>
+                                <span class="reading-time">3 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/0" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="0">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-1" data-category="cat-1" data-published="2025-02-02">
+                        <div class="card-header">
+                            <img src="/images/article-1.jpg" alt="Article 1 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/1">Understanding Modern Web Development &mdash; Part 2</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 1</span>
+                                <time datetime="2025-02-02">2 Jan 2025</time>
+                                <span class="reading-time">4 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/1" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="1">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-2" data-category="cat-2" data-published="2025-03-03">
+                        <div class="card-header">
+                            <img src="/images/article-2.jpg" alt="Article 2 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/2">Understanding Modern Web Development &mdash; Part 3</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 2</span>
+                                <time datetime="2025-03-03">3 Jan 2025</time>
+                                <span class="reading-time">5 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/2" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="2">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-3" data-category="cat-3" data-published="2025-04-04">
+                        <div class="card-header">
+                            <img src="/images/article-3.jpg" alt="Article 3 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/3">Understanding Modern Web Development &mdash; Part 4</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 3</span>
+                                <time datetime="2025-04-04">4 Jan 2025</time>
+                                <span class="reading-time">6 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/3" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="3">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-4" data-category="cat-4" data-published="2025-05-05">
+                        <div class="card-header">
+                            <img src="/images/article-4.jpg" alt="Article 4 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/4">Understanding Modern Web Development &mdash; Part 5</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 4</span>
+                                <time datetime="2025-05-05">5 Jan 2025</time>
+                                <span class="reading-time">7 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/4" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="4">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-5" data-category="cat-0" data-published="2025-06-06">
+                        <div class="card-header">
+                            <img src="/images/article-5.jpg" alt="Article 5 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/5">Understanding Modern Web Development &mdash; Part 6</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 5</span>
+                                <time datetime="2025-06-06">6 Jan 2025</time>
+                                <span class="reading-time">8 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/5" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="5">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-6" data-category="cat-1" data-published="2025-07-07">
+                        <div class="card-header">
+                            <img src="/images/article-6.jpg" alt="Article 6 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/6">Understanding Modern Web Development &mdash; Part 7</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 6</span>
+                                <time datetime="2025-07-07">7 Jan 2025</time>
+                                <span class="reading-time">9 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/6" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="6">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-7" data-category="cat-2" data-published="2025-08-08">
+                        <div class="card-header">
+                            <img src="/images/article-7.jpg" alt="Article 7 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/7">Understanding Modern Web Development &mdash; Part 8</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 7</span>
+                                <time datetime="2025-08-08">8 Jan 2025</time>
+                                <span class="reading-time">3 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/7" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="7">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-8" data-category="cat-3" data-published="2025-09-09">
+                        <div class="card-header">
+                            <img src="/images/article-8.jpg" alt="Article 8 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/8">Understanding Modern Web Development &mdash; Part 9</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 8</span>
+                                <time datetime="2025-09-09">9 Jan 2025</time>
+                                <span class="reading-time">4 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/8" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="8">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-9" data-category="cat-4" data-published="2025-10-10">
+                        <div class="card-header">
+                            <img src="/images/article-9.jpg" alt="Article 9 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/9">Understanding Modern Web Development &mdash; Part 10</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 9</span>
+                                <time datetime="2025-10-10">10 Jan 2025</time>
+                                <span class="reading-time">5 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/9" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="9">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-10" data-category="cat-0" data-published="2025-11-11">
+                        <div class="card-header">
+                            <img src="/images/article-10.jpg" alt="Article 10 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/10">Understanding Modern Web Development &mdash; Part 11</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 0</span>
+                                <time datetime="2025-11-11">11 Jan 2025</time>
+                                <span class="reading-time">6 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/10" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="10">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-11" data-category="cat-1" data-published="2025-12-12">
+                        <div class="card-header">
+                            <img src="/images/article-11.jpg" alt="Article 11 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/11">Understanding Modern Web Development &mdash; Part 12</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 1</span>
+                                <time datetime="2025-12-12">12 Jan 2025</time>
+                                <span class="reading-time">7 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/11" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="11">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-12" data-category="cat-2" data-published="2025-01-13">
+                        <div class="card-header">
+                            <img src="/images/article-12.jpg" alt="Article 12 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/12">Understanding Modern Web Development &mdash; Part 13</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 2</span>
+                                <time datetime="2025-01-13">13 Jan 2025</time>
+                                <span class="reading-time">8 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/12" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="12">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-13" data-category="cat-3" data-published="2025-02-14">
+                        <div class="card-header">
+                            <img src="/images/article-13.jpg" alt="Article 13 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/13">Understanding Modern Web Development &mdash; Part 14</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 3</span>
+                                <time datetime="2025-02-14">14 Jan 2025</time>
+                                <span class="reading-time">9 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/13" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="13">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-14" data-category="cat-4" data-published="2025-03-15">
+                        <div class="card-header">
+                            <img src="/images/article-14.jpg" alt="Article 14 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/14">Understanding Modern Web Development &mdash; Part 15</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 4</span>
+                                <time datetime="2025-03-15">15 Jan 2025</time>
+                                <span class="reading-time">3 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/14" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="14">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-15" data-category="cat-0" data-published="2025-04-16">
+                        <div class="card-header">
+                            <img src="/images/article-15.jpg" alt="Article 15 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/15">Understanding Modern Web Development &mdash; Part 16</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 5</span>
+                                <time datetime="2025-04-16">16 Jan 2025</time>
+                                <span class="reading-time">4 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/15" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="15">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-16" data-category="cat-1" data-published="2025-05-17">
+                        <div class="card-header">
+                            <img src="/images/article-16.jpg" alt="Article 16 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/16">Understanding Modern Web Development &mdash; Part 17</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 6</span>
+                                <time datetime="2025-05-17">17 Jan 2025</time>
+                                <span class="reading-time">5 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/16" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="16">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-17" data-category="cat-2" data-published="2025-06-18">
+                        <div class="card-header">
+                            <img src="/images/article-17.jpg" alt="Article 17 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/17">Understanding Modern Web Development &mdash; Part 18</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 7</span>
+                                <time datetime="2025-06-18">18 Jan 2025</time>
+                                <span class="reading-time">6 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/17" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="17">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-18" data-category="cat-3" data-published="2025-07-19">
+                        <div class="card-header">
+                            <img src="/images/article-18.jpg" alt="Article 18 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/18">Understanding Modern Web Development &mdash; Part 19</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 8</span>
+                                <time datetime="2025-07-19">19 Jan 2025</time>
+                                <span class="reading-time">7 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/18" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="18">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                    <article class="card" id="article-19" data-category="cat-4" data-published="2025-08-20">
+                        <div class="card-header">
+                            <img src="/images/article-19.jpg" alt="Article 19 thumbnail" width="300" height="200" loading="lazy">
+                        </div>
+                        <div class="card-body">
+                            <h3 class="card-title"><a href="/article/19">Understanding Modern Web Development &mdash; Part 20</a></h3>
+                            <p class="card-text">This article explores the latest trends in web technology, including performance optimization, accessibility best practices, and modern frameworks. Topics covered: HTML5 semantics, CSS Grid &amp; Flexbox, JavaScript ES2025+, and server-side rendering techniques.</p>
+                            <div class="card-meta">
+                                <span class="author">By Author 9</span>
+                                <time datetime="2025-08-20">20 Jan 2025</time>
+                                <span class="reading-time">8 min read</span>
+                            </div>
+                        </div>
+                        <div class="card-footer">
+                            <a href="/article/19" class="btn btn-primary">Read More &rarr;</a>
+                            <button class="btn btn-outline" data-action="bookmark" data-article-id="19">Bookmark &hearts;</button>
+                        </div>
+                    </article>
+                </div>
+            </section>
+
+            <!-- Contact form section -->
+            <section class="form-section" id="contact">
+                <h2>Contact Us</h2>
+                <form action="/api/contact" method="POST" class="contact-form" novalidate>
+                    <div class="form-group">
+                        <label for="name">Full Name</label>
+                        <input type="text" id="name" name="name" class="form-control" required placeholder="Enter your name&hellip;">
+                    </div>
+                    <div class="form-group">
+                        <label for="email">Email Address</label>
+                        <input type="email" id="email" name="email" class="form-control" required placeholder="you@example.com">
+                    </div>
+                    <div class="form-group">
+                        <label for="message">Message</label>
+                        <textarea id="message" name="message" class="form-control" rows="5" required placeholder="Your message&hellip;"></textarea>
+                    </div>
+                    <button type="submit" class="btn btn-primary">Send Message &rarr;</button>
+                </form>
+            </section>
+        </main>
+
+        <footer class="site-footer" role="contentinfo">
+            <div class="footer-inner">
+                <p>&copy; 2025 Benchmark Corp. All rights reserved. &mdash; Built with &hearts; and HTML.</p>
+                <nav class="footer-nav">
+                    <a href="/privacy">Privacy Policy</a>
+                    <a href="/terms">Terms &amp; Conditions</a>
+                    <a href="/sitemap.xml">Sitemap</a>
+                </nav>
+            </div>
+        </footer>
+    </div>
+</body>
+</html>

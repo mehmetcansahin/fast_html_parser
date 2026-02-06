@@ -20,7 +20,7 @@ Detaylı plan: docs/PLAN.md dosyasında. Her faz için bu plana sadık kal.
 
 ## Mevcut Durum
 - [x] Faz 0: SIMD Abstraksiyon Katmanı
-- [ ] Faz 1: SIMD Tokenizer
+- [x] Faz 1: SIMD Tokenizer
 - [ ] Faz 2: Arena DOM Tree
 - [ ] Faz 3: Selector Engine
 - [ ] Faz 4: Encoding

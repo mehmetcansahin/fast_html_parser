@@ -12,3 +12,7 @@ hp-simd = { path = "../hp-simd" }
 
 [dev-dependencies]
 criterion = { workspace = true }
+
+[[bench]]
+name = "tokenizer_bench"
+harness = false
