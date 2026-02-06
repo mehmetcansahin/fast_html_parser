@@ -62,6 +62,10 @@ pub struct SimdOps {
     /// Return the offset of the first non-whitespace byte.
     pub skip_whitespace: unsafe fn(&[u8]) -> usize,
 
+    /// Produce a u64 bitmask where bit `i` is set if `block[i] == byte`.
+    /// The block must be at most 64 bytes.
+    pub compute_byte_mask: unsafe fn(&[u8], u8) -> u64,
+
     /// The SIMD level backing these function pointers.
     pub level: SimdLevel,
 }
@@ -82,6 +86,7 @@ pub fn ops() -> &'static SimdOps {
                 find_delimiters: crate::avx2::find_delimiters,
                 classify_bytes: crate::avx2::classify_bytes,
                 skip_whitespace: crate::avx2::skip_whitespace,
+                compute_byte_mask: crate::avx2::compute_byte_mask,
                 level,
             },
             #[cfg(target_arch = "x86_64")]
@@ -89,6 +94,7 @@ pub fn ops() -> &'static SimdOps {
                 find_delimiters: crate::sse42::find_delimiters,
                 classify_bytes: crate::sse42::classify_bytes,
                 skip_whitespace: crate::sse42::skip_whitespace,
+                compute_byte_mask: crate::sse42::compute_byte_mask,
                 level,
             },
             #[cfg(target_arch = "aarch64")]
@@ -96,6 +102,7 @@ pub fn ops() -> &'static SimdOps {
                 find_delimiters: crate::neon::find_delimiters,
                 classify_bytes: crate::neon::classify_bytes,
                 skip_whitespace: crate::neon::skip_whitespace,
+                compute_byte_mask: crate::neon::compute_byte_mask,
                 level,
             },
             // Scalar fallback for any architecture or if no SIMD detected.
@@ -103,6 +110,7 @@ pub fn ops() -> &'static SimdOps {
                 find_delimiters: crate::scalar::find_delimiters,
                 classify_bytes: crate::scalar::classify_bytes,
                 skip_whitespace: crate::scalar::skip_whitespace,
+                compute_byte_mask: crate::scalar::compute_byte_mask,
                 level: SimdLevel::Scalar,
             },
         }
@@ -160,6 +168,25 @@ mod tests {
         let input = b"   hello";
         let result = unsafe { (o.skip_whitespace)(input) };
         assert_eq!(result, 3);
+    }
+
+    #[test]
+    fn dispatch_compute_byte_mask() {
+        let o = ops();
+        let input = b"hello <world> & end";
+        let mask = unsafe { (o.compute_byte_mask)(input, b'<') };
+        assert_eq!(mask, 1 << 6);
+    }
+
+    #[test]
+    fn dispatch_compute_byte_mask_matches_scalar() {
+        let o = ops();
+        let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
+        for &byte in &[b'<', b'>', b'&', b'"', b'\'', b'=', b'/'] {
+            let dispatched = unsafe { (o.compute_byte_mask)(input, byte) };
+            let scalar = unsafe { crate::scalar::compute_byte_mask(input, byte) };
+            assert_eq!(dispatched, scalar, "mismatch for byte 0x{byte:02X}");
+        }
     }
 
     #[test]
