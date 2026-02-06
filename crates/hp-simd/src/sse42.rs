@@ -219,6 +219,47 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
     offset + crate::scalar::skip_whitespace_safe(&input[offset..])
 }
 
+/// Produce a bitmask where bit `i` is set if `block[i] == byte`.
+///
+/// Processes 16 bytes at a time using `_mm_cmpeq_epi8` + `_mm_movemask_epi8`.
+/// Handles blocks up to 64 bytes.
+///
+/// # Safety
+///
+/// Caller must ensure the CPU supports SSE4.2.
+#[target_feature(enable = "sse4.2")]
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
+    let len = block.len();
+    let ptr = block.as_ptr();
+    let mut result: u64 = 0;
+    let mut offset = 0;
+
+    // SAFETY: all intrinsics below require SSE4.2, guaranteed by #[target_feature].
+    unsafe {
+        let target = _mm_set1_epi8(byte as i8);
+
+        while offset + 16 <= len {
+            let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
+            let cmp = _mm_cmpeq_epi8(chunk, target);
+            let mask = _mm_movemask_epi8(cmp) as u16;
+            result |= (mask as u64) << offset;
+            offset += 16;
+        }
+    }
+
+    // Scalar tail.
+    while offset < len {
+        // SAFETY: offset < len, so ptr.add(offset) is valid.
+        if unsafe { *ptr.add(offset) } == byte {
+            result |= 1u64 << offset;
+        }
+        offset += 1;
+    }
+
+    result
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;

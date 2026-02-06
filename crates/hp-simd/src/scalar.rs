@@ -68,6 +68,30 @@ pub fn skip_whitespace_safe(input: &[u8]) -> usize {
         .unwrap_or(input.len())
 }
 
+/// Produce a bitmask where bit `i` is set if `block[i] == byte`.
+///
+/// Processes up to 64 bytes. Bits beyond `block.len()` are always 0.
+///
+/// # Safety
+///
+/// This function is safe. The `unsafe fn` signature matches the SIMD
+/// dispatch slot.
+pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
+    compute_byte_mask_safe(block, byte)
+}
+
+/// Safe inner implementation of [`compute_byte_mask`].
+#[inline]
+pub fn compute_byte_mask_safe(block: &[u8], byte: u8) -> u64 {
+    let mut mask = 0u64;
+    for (i, &b) in block.iter().enumerate() {
+        if b == byte {
+            mask |= 1u64 << i;
+        }
+    }
+    mask
+}
+
 /// Returns `true` if `b` is one of the 7 HTML delimiters.
 #[inline(always)]
 fn is_delimiter(b: u8) -> bool {
@@ -172,5 +196,32 @@ mod tests {
     fn skip_whitespace_empty() {
         let result = unsafe { skip_whitespace(b"") };
         assert_eq!(result, 0);
+    }
+
+    #[test]
+    fn compute_byte_mask_basic() {
+        let input = b"hello <world>";
+        let mask = unsafe { compute_byte_mask(input, b'<') };
+        assert_eq!(mask, 1 << 6);
+    }
+
+    #[test]
+    fn compute_byte_mask_multiple() {
+        let input = b"a<b<c";
+        let mask = unsafe { compute_byte_mask(input, b'<') };
+        assert_eq!(mask, (1 << 1) | (1 << 3));
+    }
+
+    #[test]
+    fn compute_byte_mask_none() {
+        let input = b"hello world";
+        let mask = unsafe { compute_byte_mask(input, b'<') };
+        assert_eq!(mask, 0);
+    }
+
+    #[test]
+    fn compute_byte_mask_empty() {
+        let mask = unsafe { compute_byte_mask(b"", b'<') };
+        assert_eq!(mask, 0);
     }
 }
