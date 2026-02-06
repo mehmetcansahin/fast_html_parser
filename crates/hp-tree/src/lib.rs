@@ -16,10 +16,15 @@
 
 /// Arena allocator for nodes, text, and attributes.
 pub mod arena;
+/// Async HTML parser (requires `async-tokio` feature).
+#[cfg(feature = "async-tokio")]
+pub mod async_parser;
 /// Tree builder — token stream to DOM tree.
 pub mod builder;
 /// Cache-line aligned node layout.
 pub mod node;
+/// Streaming and incremental parsing.
+pub mod streaming;
 /// Allocation-free traversal iterators.
 pub mod traverse;
 
@@ -45,6 +50,10 @@ pub enum HtmlError {
     /// Encoding detection or conversion failed.
     #[error("encoding error: {0}")]
     Encoding(#[from] hp_core::error::EncodingError),
+
+    /// I/O error during streaming or async parsing.
+    #[error("I/O error: {0}")]
+    Io(#[from] std::io::Error),
 }
 
 /// Maximum input size (256 MiB).
