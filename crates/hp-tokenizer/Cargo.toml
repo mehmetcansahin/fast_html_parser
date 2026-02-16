@@ -10,7 +10,8 @@ keywords = ["html", "tokenizer", "simd"]
 categories = ["parser-implementations"]
 
 [features]
-default = []
+default = ["entity-decode"]
+entity-decode = []
 async-tokio = []
 async-async-std = []
 

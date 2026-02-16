@@ -59,6 +59,19 @@ impl Arena {
         id
     }
 
+    /// Store the original tag name for an unknown/custom element.
+    pub fn set_unknown_tag_name(&mut self, node: NodeId, tag_name: &str) {
+        if tag_name.is_empty() || self.nodes[node.index()].tag != Tag::Unknown {
+            return;
+        }
+        let offset = self.text_slab.len() as u32;
+        let len = tag_name.len() as u32;
+        self.text_slab.extend_from_slice(tag_name.as_bytes());
+        let n = &mut self.nodes[node.index()];
+        n.text_offset = offset;
+        n.text_len = len;
+    }
+
     /// Allocate a new text node, storing content in the text slab.
     pub fn new_text(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
@@ -170,6 +183,19 @@ impl Arena {
         unsafe { std::str::from_utf8_unchecked(&self.text_slab[start..end]) }
     }
 
+    /// Get the preserved name for an unknown/custom element.
+    #[inline]
+    pub fn unknown_tag_name(&self, node: NodeId) -> Option<&str> {
+        let n = &self.nodes[node.index()];
+        if n.tag != Tag::Unknown || n.text_len == 0 {
+            return None;
+        }
+        let start = n.text_offset as usize;
+        let end = start + n.text_len as usize;
+        // SAFETY: the tag name is sourced from tokenizer `&str` slices.
+        Some(unsafe { std::str::from_utf8_unchecked(&self.text_slab[start..end]) })
+    }
+
     /// Get a reference to a node by id.
     #[inline]
     pub fn get(&self, id: NodeId) -> &Node {
@@ -270,11 +296,11 @@ mod tests {
 
         let tok_attrs = vec![
             TokAttr {
-                name: "href",
+                name: Cow::Borrowed("href"),
                 value: Some(Cow::Borrowed("https://example.com")),
             },
             TokAttr {
-                name: "class",
+                name: Cow::Borrowed("class"),
                 value: Some(Cow::Borrowed("link")),
             },
         ];

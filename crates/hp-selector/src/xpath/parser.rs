@@ -142,10 +142,9 @@ impl<'a> XPathParser<'a> {
                 Predicate::AttrEquals { attr, value } => {
                     Ok(XPathExpr::DescendantWildcardByAttr { attr, value })
                 }
-                Predicate::AttrExists { attr } => Ok(XPathExpr::DescendantWildcardByAttr {
-                    attr,
-                    value: String::new(),
-                }),
+                Predicate::AttrExists { attr } => {
+                    Ok(XPathExpr::DescendantWildcardByAttrExists { attr })
+                }
                 _ => Err(XPathError::Invalid {
                     reason: "unsupported predicate on wildcard".to_string(),
                 }),
@@ -169,11 +168,7 @@ impl<'a> XPathParser<'a> {
                 Ok(XPathExpr::ContainsPredicate { tag, attr, substr })
             }
             Predicate::Position(pos) => Ok(XPathExpr::PositionPredicate { tag, pos }),
-            Predicate::AttrExists { attr } => Ok(XPathExpr::DescendantByAttr {
-                tag,
-                attr,
-                value: String::new(),
-            }),
+            Predicate::AttrExists { attr } => Ok(XPathExpr::DescendantByAttrExists { tag, attr }),
         }
     }
 
@@ -437,10 +432,9 @@ mod tests {
         let expr = parse_xpath("//a[@href]").unwrap();
         assert_eq!(
             expr,
-            XPathExpr::DescendantByAttr {
+            XPathExpr::DescendantByAttrExists {
                 tag: Tag::A,
                 attr: "href".to_string(),
-                value: String::new(),
             }
         );
     }
@@ -557,6 +551,17 @@ mod tests {
             XPathExpr::DescendantWildcardByAttr {
                 attr: "id".to_string(),
                 value: "main".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn parse_wildcard_attr_exists() {
+        let expr = parse_xpath("//*[@id]").unwrap();
+        assert_eq!(
+            expr,
+            XPathExpr::DescendantWildcardByAttrExists {
+                attr: "id".to_string(),
             }
         );
     }

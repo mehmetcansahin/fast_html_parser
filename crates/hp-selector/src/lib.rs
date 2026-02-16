@@ -63,7 +63,9 @@ pub mod parser;
 /// XPath expression support.
 pub mod xpath;
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::sync::Arc;
 
 use hp_core::error::{SelectorError, XPathError};
 use hp_core::tag::Tag;
@@ -73,6 +75,89 @@ use hp_tree::{Document, NodeRef};
 use matcher::{select_all_list, select_first_list};
 use parser::parse_selector;
 use xpath::ast::XPathResult;
+
+/// Maximum number of parsed selector ASTs cached per thread.
+const SELECTOR_CACHE_CAPACITY: usize = 256;
+/// Skip caching unusually long selectors to avoid pinning large keys.
+const MAX_CACHED_SELECTOR_LEN: usize = 512;
+
+struct SelectorCache {
+    map: HashMap<String, Arc<ast::SelectorList>>,
+    order: VecDeque<String>,
+}
+
+impl SelectorCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::with_capacity(SELECTOR_CACHE_CAPACITY),
+            order: VecDeque::with_capacity(SELECTOR_CACHE_CAPACITY),
+        }
+    }
+
+    fn get(&self, css: &str) -> Option<Arc<ast::SelectorList>> {
+        self.map.get(css).map(Arc::clone)
+    }
+
+    fn insert(&mut self, css: &str, list: Arc<ast::SelectorList>) {
+        if self.map.contains_key(css) {
+            self.map.insert(css.to_owned(), list);
+            return;
+        }
+
+        if self.map.len() >= SELECTOR_CACHE_CAPACITY {
+            if let Some(old_key) = self.order.pop_front() {
+                self.map.remove(&old_key);
+            }
+        }
+
+        let key = css.to_owned();
+        self.order.push_back(key.clone());
+        self.map.insert(key, list);
+    }
+}
+
+thread_local! {
+    static SELECTOR_CACHE: RefCell<SelectorCache> = RefCell::new(SelectorCache::new());
+}
+
+#[inline]
+fn parse_selector_cached(css: &str) -> Result<Arc<ast::SelectorList>, SelectorError> {
+    if css.len() > MAX_CACHED_SELECTOR_LEN || is_single_simple_selector(css) {
+        return Ok(Arc::new(parse_selector(css)?));
+    }
+
+    SELECTOR_CACHE.with(|cache| {
+        if let Some(list) = cache.borrow().get(css) {
+            return Ok(list);
+        }
+
+        let parsed = Arc::new(parse_selector(css)?);
+        cache.borrow_mut().insert(css, Arc::clone(&parsed));
+        Ok(parsed)
+    })
+}
+
+#[inline]
+fn is_single_simple_selector(css: &str) -> bool {
+    if is_simple_ident(css) {
+        return true;
+    }
+
+    let bytes = css.as_bytes();
+    if bytes.len() >= 2 && (bytes[0] == b'.' || bytes[0] == b'#') {
+        return is_simple_ident(&css[1..]);
+    }
+
+    false
+}
+
+#[inline]
+fn is_simple_ident(s: &str) -> bool {
+    !s.is_empty()
+        && s.as_bytes()
+            .iter()
+            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
+}
 
 /// A collection of matched nodes from a selector query.
 ///
@@ -137,7 +222,12 @@ impl<'a> Selection<'a> {
     /// Each matched node is used as a subtree root, and results are
     /// deduplicated in document order.
     pub fn select(&self, css: &str) -> Result<Selection<'a>, SelectorError> {
-        let list = parse_selector(css)?;
+        let list = parse_selector_cached(css)?;
+        if self.nodes.len() == 1 {
+            // Single root — DFS produces document-order results, no duplicates possible.
+            let results = select_all_list(self.doc.arena(), self.nodes[0], &list);
+            return Ok(Selection::new(self.doc, results));
+        }
         let mut results = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for &node_id in &self.nodes {
@@ -282,13 +372,13 @@ pub trait Selectable {
 
 impl Selectable for Document {
     fn select(&self, css: &str) -> Result<Selection<'_>, SelectorError> {
-        let list = parse_selector(css)?;
+        let list = parse_selector_cached(css)?;
         let nodes = select_all_list(self.arena(), self.root_id(), &list);
         Ok(Selection::new(self, nodes))
     }
 
     fn select_first(&self, css: &str) -> Result<Option<NodeRef<'_>>, SelectorError> {
-        let list = parse_selector(css)?;
+        let list = parse_selector_cached(css)?;
         let node = select_first_list(self.arena(), self.root_id(), &list);
         Ok(node.map(|id| self.get(id)))
     }
@@ -366,35 +456,90 @@ impl Selectable for Document {
     }
 }
 
-/// Pre-built index for O(1) id lookups.
+/// Pre-built index for O(1) id, class, and tag lookups.
 ///
-/// Build once, reuse for many lookups.
+/// Build once with a single DFS pass, reuse for many lookups.
 pub struct DocumentIndex {
     id_map: HashMap<String, NodeId>,
+    class_map: HashMap<String, Vec<NodeId>>,
+    tag_map: HashMap<Tag, Vec<NodeId>>,
 }
 
 impl DocumentIndex {
-    /// Build an index from a document by scanning all nodes.
+    /// Build an index from a document by scanning all nodes in a single pass.
     pub fn build(doc: &Document) -> Self {
         let arena = doc.arena();
-        let mut id_map = HashMap::new();
+        let mut id_map = HashMap::with_capacity(arena.len() / 8);
+        let mut class_map: HashMap<String, Vec<NodeId>> = HashMap::with_capacity(arena.len() / 4);
+        let mut tag_map: HashMap<Tag, Vec<NodeId>> = HashMap::with_capacity(64);
+
         for i in 0..arena.len() {
-            let id = NodeId(i as u32);
-            let attrs = arena.attrs(id);
+            let node_id = NodeId(i as u32);
+            let n = arena.get(node_id);
+
+            // Skip non-element nodes.
+            if n.flags.has(NodeFlags::IS_TEXT)
+                || n.flags.has(NodeFlags::IS_COMMENT)
+                || n.flags.has(NodeFlags::IS_DOCTYPE)
+            {
+                continue;
+            }
+
+            // Index by tag.
+            tag_map.entry(n.tag).or_default().push(node_id);
+
+            // Index by attributes.
+            let attrs = arena.attrs(node_id);
             for attr in attrs {
                 if attr.name == "id" {
-                    if let Some(ref val) = attr.value {
-                        id_map.insert(val.clone(), id);
+                    if let Some(val) = attr.value.as_deref() {
+                        if let Some(existing) = id_map.get_mut(val) {
+                            *existing = node_id;
+                        } else {
+                            id_map.insert(val.to_owned(), node_id);
+                        }
+                    }
+                }
+                if attr.name == "class" {
+                    if let Some(val) = attr.value.as_deref() {
+                        for class in val.split_whitespace() {
+                            if let Some(ids) = class_map.get_mut(class) {
+                                ids.push(node_id);
+                            } else {
+                                class_map.insert(class.to_owned(), vec![node_id]);
+                            }
+                        }
                     }
                 }
             }
         }
-        Self { id_map }
+
+        Self {
+            id_map,
+            class_map,
+            tag_map,
+        }
     }
 
     /// Look up a node by its `id` attribute in O(1).
     pub fn find_by_id<'a>(&self, doc: &'a Document, id: &str) -> Option<NodeRef<'a>> {
         self.id_map.get(id).map(|&node_id| doc.get(node_id))
+    }
+
+    /// Look up all nodes with a given CSS class in O(1).
+    pub fn find_by_class<'a>(&self, doc: &'a Document, class: &str) -> Vec<NodeRef<'a>> {
+        self.class_map
+            .get(class)
+            .map(|ids| ids.iter().map(|&id| doc.get(id)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Look up all nodes with a given tag in O(1).
+    pub fn find_by_tag<'a>(&self, doc: &'a Document, tag: Tag) -> Vec<NodeRef<'a>> {
+        self.tag_map
+            .get(&tag)
+            .map(|ids| ids.iter().map(|&id| doc.get(id)).collect())
+            .unwrap_or_default()
     }
 }
 
@@ -498,6 +643,38 @@ mod tests {
     }
 
     #[test]
+    fn document_index_find_by_class() {
+        let doc = parse("<div class=\"a b\">x</div><span class=\"b c\">y</span><p>z</p>").unwrap();
+        let index = DocumentIndex::build(&doc);
+
+        let class_b = index.find_by_class(&doc, "b");
+        assert_eq!(class_b.len(), 2);
+
+        let class_a = index.find_by_class(&doc, "a");
+        assert_eq!(class_a.len(), 1);
+        assert_eq!(class_a[0].text_content(), "x");
+
+        let class_missing = index.find_by_class(&doc, "nope");
+        assert!(class_missing.is_empty());
+    }
+
+    #[test]
+    fn document_index_find_by_tag() {
+        let doc = parse("<div>a</div><div>b</div><span>c</span>").unwrap();
+        let index = DocumentIndex::build(&doc);
+
+        let divs = index.find_by_tag(&doc, Tag::Div);
+        assert_eq!(divs.len(), 2);
+
+        let spans = index.find_by_tag(&doc, Tag::Span);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].text_content(), "c");
+
+        let links = index.find_by_tag(&doc, Tag::A);
+        assert!(links.is_empty());
+    }
+
+    #[test]
     fn selection_into_iter() {
         let doc = parse("<div><p>a</p><p>b</p></div>").unwrap();
         let sel = doc.select("p").unwrap();
@@ -544,5 +721,17 @@ mod tests {
             XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 2),
             _ => panic!("expected Nodes"),
         }
+    }
+
+    #[test]
+    fn single_simple_selector_detection() {
+        assert!(is_single_simple_selector("p"));
+        assert!(is_single_simple_selector("my-widget"));
+        assert!(is_single_simple_selector(".content"));
+        assert!(is_single_simple_selector("#main"));
+
+        assert!(!is_single_simple_selector("div p"));
+        assert!(!is_single_simple_selector("div.article"));
+        assert!(!is_single_simple_selector("a[href]"));
     }
 }

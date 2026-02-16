@@ -19,11 +19,12 @@
 //! ```
 
 use encoding_rs::Encoding;
+use hp_core::error::EncodingError;
 use hp_tokenizer::streaming::StreamTokenizer;
 
 use crate::builder::TreeBuilder;
 use crate::node::{Node, NodeId};
-use crate::{Document, HtmlError};
+use crate::{Document, HtmlError, MAX_INPUT_SIZE};
 
 /// Maximum bytes to buffer before encoding detection (matches prescan limit).
 const PRESCAN_LIMIT: usize = 1024;
@@ -70,10 +71,21 @@ pub struct StreamParser {
     tokenizer: StreamTokenizer,
     builder: TreeBuilder,
     decoder: Option<encoding_rs::Decoder>,
+    detected_encoding: Option<&'static Encoding>,
     /// Buffered initial bytes before encoding detection.
     initial_buf: Vec<u8>,
     /// Whether encoding has been detected and initial buffer flushed.
     encoding_detected: bool,
+    /// Total raw input bytes received.
+    seen_input_size: usize,
+    /// Maximum allowed input size.
+    max_input_size: usize,
+    /// Input exceeded `max_input_size`.
+    input_too_large: bool,
+    /// First decoding error seen during streaming decode.
+    decode_error: Option<EncodingError>,
+    /// Approximate input byte offset consumed by decoder.
+    decoded_input_offset: usize,
 }
 
 impl StreamParser {
@@ -83,8 +95,14 @@ impl StreamParser {
             tokenizer: StreamTokenizer::new(),
             builder: TreeBuilder::new(),
             decoder: None,
+            detected_encoding: None,
             initial_buf: Vec::with_capacity(PRESCAN_LIMIT),
             encoding_detected: false,
+            seen_input_size: 0,
+            max_input_size: MAX_INPUT_SIZE,
+            input_too_large: false,
+            decode_error: None,
+            decoded_input_offset: 0,
         }
     }
 
@@ -94,7 +112,13 @@ impl StreamParser {
     /// detection. After that, each chunk is decoded and processed
     /// immediately.
     pub fn feed(&mut self, chunk: &[u8]) {
-        if chunk.is_empty() {
+        if chunk.is_empty() || self.input_too_large {
+            return;
+        }
+
+        self.seen_input_size = self.seen_input_size.saturating_add(chunk.len());
+        if self.seen_input_size > self.max_input_size {
+            self.input_too_large = true;
             return;
         }
 
@@ -115,9 +139,20 @@ impl StreamParser {
     /// If encoding hasn't been detected yet (total input < 1 KB), detection
     /// happens now.
     pub fn finish(mut self) -> Result<Document, HtmlError> {
+        if self.input_too_large {
+            return Err(HtmlError::InputTooLarge {
+                size: self.seen_input_size,
+                max: self.max_input_size,
+            });
+        }
+
         // If encoding was never detected, do it now with whatever we have.
         if !self.encoding_detected {
             self.flush_initial_buf();
+        }
+
+        if let Some(err) = self.decode_error.take() {
+            return Err(HtmlError::Encoding(err));
         }
 
         // Signal end-of-stream to the decoder for any trailing bytes.
@@ -126,10 +161,17 @@ impl StreamParser {
             self.process_text(&trailing);
         }
 
+        if let Some(err) = self.decode_error.take() {
+            return Err(HtmlError::Encoding(err));
+        }
+
         // Flush the tokenizer.
-        let tokens = self.tokenizer.finish();
-        for token in &tokens {
-            self.builder.process(token);
+        {
+            let tokenizer = &mut self.tokenizer;
+            let builder = &mut self.builder;
+            tokenizer.finish_with(|token| {
+                builder.process(token);
+            });
         }
 
         let (arena, root) = self.builder.finish();
@@ -142,6 +184,7 @@ impl StreamParser {
         let encoding = hp_encoding::detect(&buf);
         let bom_len = bom_length(&buf, encoding);
         self.decoder = Some(encoding.new_decoder_without_bom_handling());
+        self.detected_encoding = Some(encoding);
         self.encoding_detected = true;
 
         let data = &buf[bom_len..];
@@ -161,8 +204,15 @@ impl StreamParser {
 
         let mut pos = 0;
         loop {
-            let (result, read, _had_errors) =
+            let (result, read, had_errors) =
                 decoder.decode_to_string(&bytes[pos..], &mut output, last);
+            if had_errors && self.decode_error.is_none() {
+                let encoding = self.detected_encoding.unwrap_or(encoding_rs::UTF_8);
+                self.decode_error = Some(EncodingError::MalformedInput {
+                    encoding: encoding.name(),
+                    offset: self.decoded_input_offset.saturating_add(pos),
+                });
+            }
             pos += read;
             match result {
                 encoding_rs::CoderResult::InputEmpty => break,
@@ -175,15 +225,17 @@ impl StreamParser {
             }
         }
 
+        self.decoded_input_offset = self.decoded_input_offset.saturating_add(bytes.len());
         output
     }
 
     /// Feed decoded text to the tokenizer, then process tokens with the builder.
     fn process_text(&mut self, text: &str) {
-        let tokens = self.tokenizer.feed(text.as_bytes());
-        for token in &tokens {
-            self.builder.process(token);
-        }
+        let tokenizer = &mut self.tokenizer;
+        let builder = &mut self.builder;
+        tokenizer.feed_str_with(text, |token| {
+            builder.process(token);
+        });
     }
 }
 
@@ -297,14 +349,25 @@ impl EarlyStopParser {
         }
 
         // Flush tokenizer.
-        let tokens = self.tokenizer.finish();
-        for token in &tokens {
-            if let Some(node_id) = self.builder.process(token) {
-                let node = self.builder.arena.get(node_id);
-                if (self.predicate)(node) {
-                    return ParseStatus::Found(node_id);
+        {
+            let tokenizer = &mut self.tokenizer;
+            let builder = &mut self.builder;
+            let predicate = &self.predicate;
+            let found = &mut self.found;
+            tokenizer.finish_with(|token| {
+                if found.is_some() {
+                    return;
                 }
-            }
+                if let Some(node_id) = builder.process(token) {
+                    let node = builder.arena.get(node_id);
+                    if predicate(node) {
+                        *found = Some(node_id);
+                    }
+                }
+            });
+        }
+        if let Some(id) = self.found {
+            return ParseStatus::Found(id);
         }
 
         let (arena, root) = self.builder.finish();
@@ -313,17 +376,27 @@ impl EarlyStopParser {
 
     /// Decode, tokenize, build, and check predicate. Returns Found or NeedMore.
     fn process_and_check(&mut self, text: &str) -> ParseStatus {
-        let tokens = self.tokenizer.feed(text.as_bytes());
-        for token in &tokens {
-            if let Some(node_id) = self.builder.process(token) {
-                let node = self.builder.arena.get(node_id);
-                if (self.predicate)(node) {
-                    self.found = Some(node_id);
-                    return ParseStatus::Found(node_id);
+        {
+            let tokenizer = &mut self.tokenizer;
+            let builder = &mut self.builder;
+            let predicate = &self.predicate;
+            let found = &mut self.found;
+            tokenizer.feed_str_with(text, |token| {
+                if found.is_some() {
+                    return;
                 }
-            }
+                if let Some(node_id) = builder.process(token) {
+                    let node = builder.arena.get(node_id);
+                    if predicate(node) {
+                        *found = Some(node_id);
+                    }
+                }
+            });
         }
-        ParseStatus::NeedMore
+        match self.found {
+            Some(id) => ParseStatus::Found(id),
+            None => ParseStatus::NeedMore,
+        }
     }
 
     /// Decode raw bytes using the stateful decoder.

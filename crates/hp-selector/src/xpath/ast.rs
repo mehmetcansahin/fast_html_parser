@@ -21,6 +21,14 @@ pub enum XPathExpr {
         value: String,
     },
 
+    /// `//tag[@attr]` — descendants by tag with attribute existence predicate.
+    DescendantByAttrExists {
+        /// The tag to match.
+        tag: Tag,
+        /// Attribute name.
+        attr: String,
+    },
+
     /// `/path/to/tag` — absolute path from root.
     AbsolutePath(Vec<PathStep>),
 
@@ -55,6 +63,12 @@ pub enum XPathExpr {
         attr: String,
         /// Attribute value.
         value: String,
+    },
+
+    /// `//\*[@attr]` — wildcard with attribute existence predicate.
+    DescendantWildcardByAttrExists {
+        /// Attribute name.
+        attr: String,
     },
 
     /// `..` — parent axis (relative to a context node).

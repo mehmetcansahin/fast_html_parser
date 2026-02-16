@@ -310,7 +310,7 @@ mod tests {
 
     #[test]
     fn find_delimiters_all_types() {
-        for &delim in &[b'<', b'>', b'&', b'"', b'\'', b'=', b'/'] {
+        for &delim in b"<>&\"'=/" {
             let mut input = vec![b'x'; 20];
             input[15] = delim;
             let result = unsafe { find_delimiters(&input) };
@@ -439,7 +439,7 @@ mod tests {
     #[test]
     fn compute_byte_mask_matches_scalar() {
         let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
-        for &byte in &[b'<', b'>', b'&', b'"', b'\'', b'=', b'/'] {
+        for &byte in b"<>&\"'=/" {
             let neon_result = unsafe { compute_byte_mask(input, byte) };
             let scalar_result = unsafe { crate::scalar::compute_byte_mask(input, byte) };
             assert_eq!(neon_result, scalar_result, "mismatch for byte 0x{byte:02X}");

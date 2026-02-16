@@ -194,6 +194,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "fast-html-parser"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "hp-core",
+ "hp-encoding",
+ "hp-selector",
+ "hp-tokenizer",
+ "hp-tree",
+ "tokio",
+]
+
+[[package]]
 name = "half"
 version = "2.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -225,19 +238,6 @@ dependencies = [
  "encoding_rs",
  "hp-core",
  "thiserror",
-]
-
-[[package]]
-name = "hp-parser"
-version = "0.1.0"
-dependencies = [
- "criterion",
- "hp-core",
- "hp-encoding",
- "hp-selector",
- "hp-tokenizer",
- "hp-tree",
- "tokio",
 ]
 
 [[package]]

@@ -5,8 +5,8 @@
 //!
 //! Run: `cargo run --example streaming`
 
-use hp_parser::Tag;
-use hp_parser::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
+use fast_html_parser::Tag;
+use fast_html_parser::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
 
 fn main() {
     // --- parse_stream convenience ---

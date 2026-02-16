@@ -78,7 +78,7 @@ html-parser/
 │   │           ├── parser.rs
 │   │           └── eval.rs
 │   ├── hp-encoding/                # Encoding detection + dönüşüm
-│   └── hp-parser/                  # Facade crate
+│   └── fast-html-parser/          # Facade crate
 │       └── src/
 │           ├── lib.rs              # Public API
 │           └── config.rs           # Builder pattern

@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn find_delimiters_all_types() {
-        for &delim in &[b'<', b'>', b'&', b'"', b'\'', b'=', b'/'] {
+        for &delim in b"<>&\"'=/" {
             let input = [b'x', b'x', delim, b'x'];
             let result = unsafe { find_delimiters(&input) };
             assert_eq!(

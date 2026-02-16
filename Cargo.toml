@@ -7,13 +7,13 @@ members = [
     "crates/hp-tree",
     "crates/hp-selector",
     "crates/hp-encoding",
-    "crates/hp-parser",
+    "crates/fast-html-parser",
 ]
 
 [workspace.package]
 edition = "2024"
 rust-version = "1.85"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 
 [workspace.dependencies]
 thiserror = "2"
@@ -22,3 +22,12 @@ criterion = { version = "0.5", features = ["html_reports"] }
 encoding_rs = "0.8"
 tokio = { version = "1", default-features = false }
 async-std = { version = "1", default-features = false }
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+
+[profile.bench]
+lto = true
+codegen-units = 1
