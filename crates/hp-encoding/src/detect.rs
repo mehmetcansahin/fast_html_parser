@@ -102,11 +102,10 @@ fn prescan_meta(input: &[u8]) -> Option<&'static Encoding> {
 
 /// Extract encoding from `charset="VALUE"` or `charset=VALUE` in a `<meta>` tag.
 fn extract_charset_attr(tag: &[u8]) -> Option<&'static Encoding> {
-    let lower = to_ascii_lowercase_vec(tag);
     let charset_needle = b"charset";
 
-    let idx = find_subsequence(&lower, charset_needle)?;
-    let rest = &lower[idx + charset_needle.len()..];
+    let idx = find_subsequence_ci(tag, charset_needle)?;
+    let rest = &tag[idx + charset_needle.len()..];
 
     // Skip whitespace and '='.
     let rest = skip_ws(rest);
@@ -122,13 +121,11 @@ fn extract_charset_attr(tag: &[u8]) -> Option<&'static Encoding> {
 
 /// Extract encoding from `http-equiv="Content-Type" content="...charset=..."`.
 fn extract_http_equiv_charset(tag: &[u8]) -> Option<&'static Encoding> {
-    let lower = to_ascii_lowercase_vec(tag);
-
     // Must have http-equiv="content-type".
-    if !contains_subsequence(&lower, b"http-equiv") {
+    if !contains_subsequence_ci(tag, b"http-equiv") {
         return None;
     }
-    if !contains_subsequence(&lower, b"content-type") {
+    if !contains_subsequence_ci(tag, b"content-type") {
         return None;
     }
 
@@ -137,9 +134,9 @@ fn extract_http_equiv_charset(tag: &[u8]) -> Option<&'static Encoding> {
     let content_needle = b"content";
     let mut search_start = 0;
     let content_value = loop {
-        let idx = find_subsequence(&lower[search_start..], content_needle)?;
+        let idx = find_subsequence_ci(&tag[search_start..], content_needle)?;
         let abs_idx = search_start + idx;
-        let after = &lower[abs_idx + content_needle.len()..];
+        let after = &tag[abs_idx + content_needle.len()..];
         let after = skip_ws(after);
         if after.first() == Some(&b'=') {
             let rest = skip_ws(&after[1..]);
@@ -180,19 +177,16 @@ fn starts_with_ci(haystack: &[u8], needle: &[u8]) -> bool {
         .all(|(&a, &b)| a.eq_ignore_ascii_case(&b))
 }
 
-/// Convert a byte slice to a lowercase `Vec<u8>`.
-fn to_ascii_lowercase_vec(input: &[u8]) -> Vec<u8> {
-    input.iter().map(|b| b.to_ascii_lowercase()).collect()
+/// Find the first occurrence of `needle` in `haystack` (case-insensitive).
+fn find_subsequence_ci(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w.eq_ignore_ascii_case(needle))
 }
 
-/// Find the first occurrence of `needle` in `haystack`.
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack.windows(needle.len()).position(|w| w == needle)
-}
-
-/// Check if `haystack` contains `needle`.
-fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
-    find_subsequence(haystack, needle).is_some()
+/// Check if `haystack` contains `needle` (case-insensitive).
+fn contains_subsequence_ci(haystack: &[u8], needle: &[u8]) -> bool {
+    find_subsequence_ci(haystack, needle).is_some()
 }
 
 /// Skip leading ASCII whitespace.

@@ -40,6 +40,8 @@ pub struct CompoundSelector {
 pub enum SimpleSelector {
     /// Match by tag name: `div`, `p`, `span`.
     Tag(Tag),
+    /// Match by unknown/custom tag name, e.g. `my-widget`.
+    UnknownTag(String),
     /// Match by class: `.class`.
     Class(String),
     /// Match by id: `#id`.

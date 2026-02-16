@@ -28,7 +28,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `StreamParser` with encoding-aware chunk buffering
   - `EarlyStopParser` with predicate-based early termination
   - Async parsing via Tokio (`async-tokio` feature)
-- **hp-parser**: Facade crate with builder pattern API
+- **fast-html-parser**: Facade crate with builder pattern API
   - `HtmlParser::parse()`, `HtmlParser::parse_bytes()` convenience methods
   - `HtmlParser::builder()` for custom configuration
   - Re-exports of all sub-crate public APIs

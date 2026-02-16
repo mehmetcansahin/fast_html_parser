@@ -57,7 +57,7 @@ pub enum HtmlError {
 }
 
 /// Maximum input size (256 MiB).
-const MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
 
 /// Parse an HTML string into a [`Document`].
 ///
@@ -85,7 +85,7 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
     }
 
     let tokens = hp_tokenizer::tokenize(input);
-    let mut builder = TreeBuilder::new();
+    let mut builder = TreeBuilder::with_capacity_hint(input.len());
     for token in &tokens {
         builder.process(token);
     }
@@ -229,13 +229,28 @@ impl<'a> NodeRef<'a> {
     ///
     /// For element nodes, returns `""`. For text nodes, returns the text.
     pub fn text(&self) -> &'a str {
-        self.arena.text(self.id)
+        let node = self.arena.get(self.id);
+        if node.flags.has(NodeFlags::IS_TEXT)
+            || node.flags.has(NodeFlags::IS_COMMENT)
+            || node.flags.has(NodeFlags::IS_DOCTYPE)
+        {
+            self.arena.text(self.id)
+        } else {
+            ""
+        }
     }
 
     /// Recursively collect all text content from this node and its
     /// descendants.
     pub fn text_content(&self) -> String {
-        let mut result = String::new();
+        let node = self.arena.get(self.id);
+        // Fast path for text nodes.
+        if node.flags.has(NodeFlags::IS_TEXT) {
+            return self.arena.text(self.id).to_string();
+        }
+        // Heuristic: estimate based on text slab size, capped at 4KB.
+        let hint = (self.arena.text_slab.len() / 4).min(4096);
+        let mut result = String::with_capacity(hint);
         self.collect_text(&mut result);
         result
     }
@@ -304,9 +319,12 @@ impl<'a> NodeRef<'a> {
             return;
         }
 
-        // Skip the synthetic root node tag.
-        let tag_name = node.tag.as_str();
-        let is_root_wrapper = tag_name.is_none() && node.depth == 0;
+        let tag_name = node
+            .tag
+            .as_str()
+            .or_else(|| self.arena.unknown_tag_name(self.id));
+        // Skip only the synthetic root node tag created by the builder.
+        let is_root_wrapper = node.depth == 0 && node.parent.is_null();
 
         if !is_root_wrapper {
             if let Some(name) = tag_name {
@@ -665,6 +683,14 @@ mod tests {
         let html = br.outer_html();
         assert!(html.contains("br"), "outer: {html}");
         assert!(html.contains("/>"), "outer: {html}");
+    }
+
+    #[test]
+    fn unknown_tag_outer_html_preserved() {
+        let doc = parse("<my-widget><x-item>ok</x-item></my-widget>").unwrap();
+        let root = doc.root();
+        let outer = root.inner_html();
+        assert_eq!(outer, "<my-widget><x-item>ok</x-item></my-widget>");
     }
 
     // ---- parse_bytes tests ----

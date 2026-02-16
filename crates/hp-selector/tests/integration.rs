@@ -18,6 +18,14 @@ fn select_by_tag() {
 }
 
 #[test]
+fn select_unknown_custom_tag() {
+    let doc = parse("<my-widget><x-item>one</x-item><x-item>two</x-item></my-widget>").unwrap();
+    let sel = doc.select("x-item").unwrap();
+    assert_eq!(sel.len(), 2);
+    assert_eq!(sel.text(), "onetwo");
+}
+
+#[test]
 fn select_by_class() {
     let doc = parse("<div class=\"a\"><span class=\"b\">x</span></div>").unwrap();
     let sel = doc.select(".b").unwrap();

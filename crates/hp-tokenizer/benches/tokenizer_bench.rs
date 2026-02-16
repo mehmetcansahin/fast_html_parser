@@ -51,9 +51,10 @@ fn bench_extract_tokens(c: &mut Criterion) {
         let bytes = html.as_bytes();
         let indexer = StructuralIndexer::new();
         let index = indexer.index(bytes);
+        let text = std::str::from_utf8(bytes).expect("generated benchmark HTML must be UTF-8");
         group.throughput(Throughput::Bytes(bytes.len() as u64));
 
-        group.bench_with_input(BenchmarkId::from_parameter(size), &bytes, |b, &input| {
+        group.bench_with_input(BenchmarkId::from_parameter(size), &text, |b, &input| {
             b.iter(|| {
                 let _ = std::hint::black_box(extract_tokens(input, &index));
             });

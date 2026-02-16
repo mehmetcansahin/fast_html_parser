@@ -182,7 +182,7 @@ mod tests {
     fn dispatch_compute_byte_mask_matches_scalar() {
         let o = ops();
         let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
-        for &byte in &[b'<', b'>', b'&', b'"', b'\'', b'=', b'/'] {
+        for &byte in b"<>&\"'=/" {
             let dispatched = unsafe { (o.compute_byte_mask)(input, byte) };
             let scalar = unsafe { crate::scalar::compute_byte_mask(input, byte) };
             assert_eq!(dispatched, scalar, "mismatch for byte 0x{byte:02X}");

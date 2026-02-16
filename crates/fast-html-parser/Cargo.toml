@@ -1,5 +1,5 @@
 [package]
-name = "hp-parser"
+name = "fast-html-parser"
 version = "0.1.0"
 edition.workspace = true
 rust-version.workspace = true
@@ -11,17 +11,16 @@ categories = ["parser-implementations", "web-programming"]
 
 [features]
 default = ["css-selector", "entity-decode"]
-simd = []
 css-selector = ["dep:hp-selector"]
-xpath = ["dep:hp-selector"]
+xpath = ["dep:hp-selector", "css-selector"]
 encoding = ["dep:hp-encoding"]
 async-tokio = ["hp-tree/async-tokio"]
-entity-decode = []
+entity-decode = ["hp-tree/entity-decode", "hp-tokenizer/entity-decode"]
 
 [dependencies]
 hp-core = { path = "../hp-core" }
-hp-tokenizer = { path = "../hp-tokenizer" }
-hp-tree = { path = "../hp-tree" }
+hp-tokenizer = { path = "../hp-tokenizer", default-features = false }
+hp-tree = { path = "../hp-tree", default-features = false }
 hp-selector = { path = "../hp-selector", optional = true }
 hp-encoding = { path = "../hp-encoding", optional = true }
 
@@ -48,5 +47,5 @@ name = "xpath_query"
 required-features = ["xpath"]
 
 [[example]]
-name = "encoding_detect"
+name = "encoding"
 required-features = ["encoding"]

@@ -4,8 +4,8 @@
 //!
 //! Run: `cargo run --example xpath_query --features xpath`
 
-use hp_parser::prelude::*;
-use hp_parser::xpath::XPathResult;
+use fast_html_parser::prelude::*;
+use fast_html_parser::xpath::XPathResult;
 
 fn main() {
     let html = r#"

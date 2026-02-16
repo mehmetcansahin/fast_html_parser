@@ -4,7 +4,7 @@
 //!
 //! Run: `cargo run --example web_scraping --features css-selector`
 
-use hp_parser::prelude::*;
+use fast_html_parser::prelude::*;
 
 fn main() {
     let html = r#"

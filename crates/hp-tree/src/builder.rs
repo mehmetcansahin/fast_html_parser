@@ -107,9 +107,20 @@ pub struct TreeBuilder {
 }
 
 impl TreeBuilder {
-    /// Create a new tree builder.
+    /// Create a new tree builder with default capacity.
     pub fn new() -> Self {
-        let mut arena = Arena::with_capacity(256, 4096, 64);
+        Self::with_capacity_hint(0)
+    }
+
+    /// Create a tree builder with capacity tuned to the expected input size.
+    ///
+    /// Uses heuristics to estimate node, text, and attribute counts from the
+    /// input byte length, reducing reallocations for large documents.
+    pub fn with_capacity_hint(input_len: usize) -> Self {
+        let node_cap = (input_len / 32).max(256);
+        let text_cap = (input_len / 4).max(4096);
+        let attr_cap = (input_len / 128).max(64);
+        let mut arena = Arena::with_capacity(node_cap, text_cap, attr_cap);
         // Create a synthetic document root.
         let root = arena.new_element(Tag::Unknown, 0);
         Self {
@@ -127,20 +138,21 @@ impl TreeBuilder {
         match token {
             Token::OpenTag {
                 tag,
+                name,
                 attributes,
                 self_closing,
                 ..
-            } => self.handle_open_tag(*tag, attributes, *self_closing),
-            Token::CloseTag { tag, .. } => {
-                self.handle_close_tag(*tag);
+            } => self.handle_open_tag(*tag, name.as_ref(), attributes, *self_closing),
+            Token::CloseTag { tag, name } => {
+                self.handle_close_tag(*tag, name.as_ref());
                 None
             }
             Token::Text { content } => self.handle_text(content.as_ref()),
-            Token::Comment { content } => self.handle_comment(content),
-            Token::Doctype { content } => self.handle_doctype(content),
+            Token::Comment { content } => self.handle_comment(content.as_ref()),
+            Token::Doctype { content } => self.handle_doctype(content.as_ref()),
             Token::CData { content } => {
                 // Treat CDATA as text.
-                self.handle_text(content)
+                self.handle_text(content.as_ref())
             }
         }
     }
@@ -167,6 +179,7 @@ impl TreeBuilder {
     fn handle_open_tag(
         &mut self,
         tag: Tag,
+        name: &str,
         attributes: &[hp_tokenizer::token::Attribute<'_>],
         self_closing: bool,
     ) -> Option<NodeId> {
@@ -181,6 +194,9 @@ impl TreeBuilder {
         let depth = self.current_depth();
         let parent = self.current_parent();
         let node = self.arena.new_element(tag, depth);
+        if tag == Tag::Unknown {
+            self.arena.set_unknown_tag_name(node, name);
+        }
 
         // Set attributes.
         if !attributes.is_empty() {
@@ -207,7 +223,7 @@ impl TreeBuilder {
     }
 
     /// Handle a close tag token.
-    fn handle_close_tag(&mut self, tag: Tag) {
+    fn handle_close_tag(&mut self, tag: Tag, name: &str) {
         // Ignore close tags for void elements.
         if tag.is_void() {
             return;
@@ -217,8 +233,15 @@ impl TreeBuilder {
         // Walk backwards to find the nearest match.
         let mut match_idx = None;
         for i in (1..self.open_elements.len()).rev() {
-            let open_node = &self.arena.nodes[self.open_elements[i].index()];
+            let open_id = self.open_elements[i];
+            let open_node = &self.arena.nodes[open_id.index()];
             if open_node.tag == tag {
+                if tag == Tag::Unknown {
+                    let open_name = self.arena.unknown_tag_name(open_id).unwrap_or("");
+                    if !open_name.eq_ignore_ascii_case(name) {
+                        continue;
+                    }
+                }
                 match_idx = Some(i);
                 break;
             }
@@ -292,7 +315,7 @@ mod tests {
     fn make_open(tag: Tag) -> Token<'static> {
         Token::OpenTag {
             tag,
-            name: tag.as_str().unwrap_or("unknown"),
+            name: Cow::Borrowed(tag.as_str().unwrap_or("unknown")),
             attributes: vec![],
             self_closing: false,
         }
@@ -301,7 +324,7 @@ mod tests {
     fn make_close(tag: Tag) -> Token<'static> {
         Token::CloseTag {
             tag,
-            name: tag.as_str().unwrap_or("unknown"),
+            name: Cow::Borrowed(tag.as_str().unwrap_or("unknown")),
         }
     }
 
@@ -338,7 +361,7 @@ mod tests {
         builder.process(&make_open(Tag::Div));
         builder.process(&Token::OpenTag {
             tag: Tag::Br,
-            name: "br",
+            name: Cow::Borrowed("br"),
             attributes: vec![],
             self_closing: false,
         });
@@ -405,6 +428,33 @@ mod tests {
         let (arena, root) = builder.finish();
         let p = arena.get(root).first_child;
         assert_eq!(arena.get(p).tag, Tag::P);
+    }
+
+    #[test]
+    fn unknown_close_matches_by_name() {
+        let mut builder = TreeBuilder::new();
+        builder.process(&Token::OpenTag {
+            tag: Tag::Unknown,
+            name: Cow::Borrowed("my-widget"),
+            attributes: vec![],
+            self_closing: false,
+        });
+        builder.process(&Token::OpenTag {
+            tag: Tag::Unknown,
+            name: Cow::Borrowed("x-item"),
+            attributes: vec![],
+            self_closing: false,
+        });
+        builder.process(&Token::CloseTag {
+            tag: Tag::Unknown,
+            name: Cow::Borrowed("my-widget"),
+        });
+
+        let (arena, root) = builder.finish();
+        let my_widget = arena.get(root).first_child;
+        let x_item = arena.get(my_widget).first_child;
+        assert_eq!(arena.unknown_tag_name(my_widget), Some("my-widget"));
+        assert_eq!(arena.unknown_tag_name(x_item), Some("x-item"));
     }
 
     #[test]

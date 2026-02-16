@@ -23,13 +23,14 @@ use crate::bloom::{AncestorBloom, build_ancestor_blooms, hash_str, hash_tag};
 /// Check if a node matches a compound selector (all parts must match).
 #[inline]
 fn match_compound(arena: &Arena, node: NodeId, compound: &CompoundSelector) -> bool {
-    compound
-        .parts
-        .iter()
-        .all(|part| match_simple(arena, node, part))
+    match compound.parts.as_slice() {
+        [part] => match_simple(arena, node, part),
+        parts => parts.iter().all(|part| match_simple(arena, node, part)),
+    }
 }
 
 /// Check if a node matches a single simple selector.
+#[inline]
 fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool {
     let n = arena.get(node);
 
@@ -42,6 +43,12 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             }
             n.tag == *tag
         }
+        SimpleSelector::UnknownTag(tag_name) => {
+            n.tag == Tag::Unknown
+                && arena
+                    .unknown_tag_name(node)
+                    .is_some_and(|name| name.eq_ignore_ascii_case(tag_name))
+        }
 
         SimpleSelector::Class(class_name) => {
             let attrs = arena.attrs(node);
@@ -49,7 +56,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
                 a.name == "class"
                     && a.value
                         .as_ref()
-                        .is_some_and(|v| v.split_whitespace().any(|c| c == class_name.as_str()))
+                        .is_some_and(|v| contains_class_token(v, class_name))
             })
         }
 
@@ -77,6 +84,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
 }
 
 /// Match an attribute selector against a node's attributes.
+#[inline]
 fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
     let attrs = arena.attrs(node);
     for attr in attrs {
@@ -110,6 +118,39 @@ fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
             }
         }
     }
+    false
+}
+
+/// Fast ASCII class-token matcher for `class="..."`.
+///
+/// CSS class lists are ASCII whitespace-separated in HTML practice; this avoids
+/// Unicode-aware `split_whitespace()` overhead in the hot path.
+#[inline]
+fn contains_class_token(haystack: &str, needle: &str) -> bool {
+    if needle.is_empty() {
+        return false;
+    }
+    let h = haystack.as_bytes();
+    let n = needle.as_bytes();
+    let mut i = 0usize;
+
+    while i < h.len() {
+        while i < h.len() && h[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if i >= h.len() {
+            break;
+        }
+        let start = i;
+        while i < h.len() && !h[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let len = i - start;
+        if len == n.len() && &h[start..i] == n {
+            return true;
+        }
+    }
+
     false
 }
 
@@ -301,16 +342,42 @@ fn prev_element_sibling(arena: &Arena, node: NodeId) -> Option<NodeId> {
 
 /// Select all nodes matching a single selector (no bloom optimization).
 pub fn select_all(arena: &Arena, root: NodeId, selector: &Selector) -> Vec<NodeId> {
-    let has_descendant = selector
-        .chain
-        .iter()
-        .any(|(c, _)| *c == Combinator::Descendant);
+    select_all_with_blooms(arena, root, selector, None)
+}
+
+/// Select all nodes matching a single selector, optionally reusing precomputed
+/// ancestor blooms.
+fn select_all_with_blooms(
+    arena: &Arena,
+    root: NodeId,
+    selector: &Selector,
+    shared_blooms: Option<&[AncestorBloom]>,
+) -> Vec<NodeId> {
+    if let Some(tag) = simple_tag_selector(selector) {
+        let mut results = Vec::new();
+        collect_tag(arena, root, tag, &mut results);
+        return results;
+    }
+
+    if let Some(id) = simple_id_selector(selector) {
+        let mut results = Vec::new();
+        collect_id(arena, root, id, &mut results);
+        return results;
+    }
+
+    let has_descendant = has_descendant_combinator(selector);
 
     if has_descendant {
-        let blooms = build_ancestor_blooms(arena, root);
+        let local_blooms;
+        let blooms = if let Some(b) = shared_blooms {
+            b
+        } else {
+            local_blooms = build_ancestor_blooms(arena, root);
+            &local_blooms
+        };
         let bloom_hashes = compute_descendant_hashes(selector);
         let mut results = Vec::new();
-        collect_bloom(arena, root, selector, &blooms, &bloom_hashes, &mut results);
+        collect_bloom(arena, root, selector, blooms, &bloom_hashes, &mut results);
         results
     } else {
         let mut results = Vec::new();
@@ -324,10 +391,12 @@ pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<
     if list.selectors.len() == 1 {
         return select_all(arena, root, &list.selectors[0]);
     }
+    let has_any_descendant = list.selectors.iter().any(has_descendant_combinator);
+    let shared_blooms = has_any_descendant.then(|| build_ancestor_blooms(arena, root));
     let mut results = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for sel in &list.selectors {
-        for id in select_all(arena, root, sel) {
+        for id in select_all_with_blooms(arena, root, sel, shared_blooms.as_deref()) {
             if seen.insert(id) {
                 results.push(id);
             }
@@ -336,8 +405,22 @@ pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<
     results
 }
 
+#[inline]
+fn has_descendant_combinator(selector: &Selector) -> bool {
+    selector
+        .chain
+        .iter()
+        .any(|(c, _)| *c == Combinator::Descendant)
+}
+
 /// Select the first matching node.
 pub fn select_first(arena: &Arena, root: NodeId, selector: &Selector) -> Option<NodeId> {
+    if let Some(tag) = simple_tag_selector(selector) {
+        return find_first_tag(arena, root, tag);
+    }
+    if let Some(id) = simple_id_selector(selector) {
+        return find_first_id(arena, root, id);
+    }
     find_first(arena, root, selector)
 }
 
@@ -365,6 +448,42 @@ fn collect_simple(arena: &Arena, node: NodeId, selector: &Selector, results: &mu
     let mut child = n.first_child;
     while !child.is_null() {
         collect_simple(arena, child, selector, results);
+        child = arena.get(child).next_sibling;
+    }
+}
+
+/// DFS collection optimized for a single `#id` selector.
+fn collect_id(arena: &Arena, node: NodeId, target_id: &str, results: &mut Vec<NodeId>) {
+    if node.is_null() {
+        return;
+    }
+
+    let n = arena.get(node);
+    if is_element(n) && node_has_id(arena, node, target_id) {
+        results.push(node);
+    }
+
+    let mut child = n.first_child;
+    while !child.is_null() {
+        collect_id(arena, child, target_id, results);
+        child = arena.get(child).next_sibling;
+    }
+}
+
+/// DFS collection optimized for a single tag selector.
+fn collect_tag(arena: &Arena, node: NodeId, target_tag: Tag, results: &mut Vec<NodeId>) {
+    if node.is_null() {
+        return;
+    }
+
+    let n = arena.get(node);
+    if is_element(n) && n.tag == target_tag {
+        results.push(node);
+    }
+
+    let mut child = n.first_child;
+    while !child.is_null() {
+        collect_tag(arena, child, target_tag, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -412,6 +531,11 @@ fn compute_descendant_hashes(selector: &Selector) -> Vec<u32> {
                 SimpleSelector::Tag(tag) if *tag != Tag::Unknown => {
                     hashes.push(hash_tag(*tag));
                 }
+                // Ancestor blooms store only hashed Tag discriminants, not
+                // unknown/custom element names. Hashing the literal unknown
+                // tag name here causes false negatives for descendant checks
+                // (e.g. `my-widget span`), so skip UnknownTag pre-filtering.
+                SimpleSelector::UnknownTag(_) => {}
                 SimpleSelector::Class(class) => {
                     hashes.push(hash_str(class));
                 }
@@ -446,6 +570,48 @@ fn find_first(arena: &Arena, node: NodeId, selector: &Selector) -> Option<NodeId
     None
 }
 
+/// DFS to find first match optimized for a single `#id` selector.
+fn find_first_id(arena: &Arena, node: NodeId, target_id: &str) -> Option<NodeId> {
+    if node.is_null() {
+        return None;
+    }
+
+    let n = arena.get(node);
+    if is_element(n) && node_has_id(arena, node, target_id) {
+        return Some(node);
+    }
+
+    let mut child = n.first_child;
+    while !child.is_null() {
+        if let Some(found) = find_first_id(arena, child, target_id) {
+            return Some(found);
+        }
+        child = arena.get(child).next_sibling;
+    }
+    None
+}
+
+/// DFS to find first match optimized for a single tag selector.
+fn find_first_tag(arena: &Arena, node: NodeId, target_tag: Tag) -> Option<NodeId> {
+    if node.is_null() {
+        return None;
+    }
+
+    let n = arena.get(node);
+    if is_element(n) && n.tag == target_tag {
+        return Some(node);
+    }
+
+    let mut child = n.first_child;
+    while !child.is_null() {
+        if let Some(found) = find_first_tag(arena, child, target_tag) {
+            return Some(found);
+        }
+        child = arena.get(child).next_sibling;
+    }
+    None
+}
+
 /// DFS to find first matching node for a selector list.
 fn find_first_list(arena: &Arena, node: NodeId, list: &SelectorList) -> Option<NodeId> {
     if node.is_null() {
@@ -467,6 +633,36 @@ fn find_first_list(arena: &Arena, node: NodeId, list: &SelectorList) -> Option<N
     None
 }
 
+#[inline]
+fn simple_id_selector(selector: &Selector) -> Option<&str> {
+    if !selector.chain.is_empty() {
+        return None;
+    }
+    match selector.subject.parts.as_slice() {
+        [SimpleSelector::Id(id)] => Some(id.as_str()),
+        _ => None,
+    }
+}
+
+#[inline]
+fn simple_tag_selector(selector: &Selector) -> Option<Tag> {
+    if !selector.chain.is_empty() {
+        return None;
+    }
+    match selector.subject.parts.as_slice() {
+        [SimpleSelector::Tag(tag)] if *tag != Tag::Unknown => Some(*tag),
+        _ => None,
+    }
+}
+
+#[inline]
+fn node_has_id(arena: &Arena, node: NodeId, target_id: &str) -> bool {
+    arena
+        .attrs(node)
+        .iter()
+        .any(|a| a.name == "id" && a.value.as_deref() == Some(target_id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -485,6 +681,20 @@ mod tests {
     }
 
     #[test]
+    fn match_tag_multiple_nodes() {
+        let ids = parse_and_match("<div><p>a</p><p>b</p></div>", "p");
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn match_tag_first_is_document_order() {
+        let doc = hp_tree::parse("<div><p>a</p><p>b</p></div>").unwrap();
+        let list = parse_selector("p").unwrap();
+        let first = select_first_list(doc.arena(), doc.root_id(), &list).unwrap();
+        assert_eq!(doc.get(first).text_content(), "a");
+    }
+
+    #[test]
     fn match_class() {
         let ids = parse_and_match("<div class=\"a\"><span class=\"b\">x</span></div>", ".b");
         assert_eq!(ids.len(), 1);
@@ -497,6 +707,20 @@ mod tests {
     }
 
     #[test]
+    fn match_id_duplicates() {
+        let ids = parse_and_match("<div id=\"dup\">a</div><span id=\"dup\">b</span>", "#dup");
+        assert_eq!(ids.len(), 2);
+    }
+
+    #[test]
+    fn match_id_first_is_document_order() {
+        let doc = hp_tree::parse("<div id=\"dup\">a</div><span id=\"dup\">b</span>").unwrap();
+        let list = parse_selector("#dup").unwrap();
+        let first = select_first_list(doc.arena(), doc.root_id(), &list).unwrap();
+        assert_eq!(doc.get(first).text_content(), "a");
+    }
+
+    #[test]
     fn match_universal() {
         let ids = parse_and_match("<div><p>text</p></div>", "*");
         // root (Unknown), div, p — all elements match *
@@ -506,6 +730,15 @@ mod tests {
     #[test]
     fn match_descendant() {
         let ids = parse_and_match("<div><p>a</p></div><p>b</p>", "div p");
+        assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn match_descendant_with_unknown_ancestor() {
+        let ids = parse_and_match(
+            "<my-widget><span>a</span></my-widget><span>b</span>",
+            "my-widget span",
+        );
         assert_eq!(ids.len(), 1);
     }
 
@@ -645,5 +878,19 @@ mod tests {
         assert!(matches_nth(3, 0, 3));
         assert!(matches_nth(3, 0, 6));
         assert!(!matches_nth(3, 0, 1));
+    }
+
+    #[test]
+    fn class_token_exact_word() {
+        assert!(contains_class_token("a b c", "b"));
+        assert!(!contains_class_token("a bc d", "b"));
+        assert!(!contains_class_token("abc", "b"));
+    }
+
+    #[test]
+    fn class_token_ascii_whitespace() {
+        assert!(contains_class_token("a\tb\nc", "b"));
+        assert!(contains_class_token("  a   b  ", "a"));
+        assert!(!contains_class_token("  a   b  ", "c"));
     }
 }

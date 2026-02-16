@@ -4,7 +4,7 @@
 //!
 //! Run: `cargo run --example basic_parse`
 
-use hp_parser::HtmlParser;
+use fast_html_parser::HtmlParser;
 
 fn main() {
     let html = r#"
