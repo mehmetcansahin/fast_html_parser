@@ -43,8 +43,8 @@ pub struct StreamTokenizer {
     indexer: StructuralIndexer,
     /// Residual bytes from the previous chunk (partial tag).
     residual: Vec<u8>,
-    /// Whether we are currently inside a tag (between `<` and `>`).
-    in_tag: bool,
+    /// Reusable working buffer to avoid per-feed allocation.
+    working: Vec<u8>,
 }
 
 impl StreamTokenizer {
@@ -53,11 +53,11 @@ impl StreamTokenizer {
         Self {
             indexer: StructuralIndexer::new(),
             residual: Vec::with_capacity(256),
-            in_tag: false,
+            working: Vec::with_capacity(4096),
         }
     }
 
-    /// Feed a chunk of input and return any complete tokens.
+    /// Feed a chunk of UTF-8 input and return any complete tokens.
     ///
     /// Tokens are returned as owned (`'static` lifetime) since the chunk
     /// data may not live long enough. Text content is cloned into `Cow::Owned`.
@@ -66,8 +66,10 @@ impl StreamTokenizer {
             return Vec::new();
         }
 
-        // Combine residual + new chunk.
-        let mut working = Vec::with_capacity(self.residual.len() + chunk.len());
+        // Combine residual + new chunk into reusable working buffer.
+        // Take ownership to avoid borrow conflicts with process_chunk.
+        let mut working = std::mem::take(&mut self.working);
+        working.clear();
         working.extend_from_slice(&self.residual);
         working.extend_from_slice(chunk);
         self.residual.clear();
@@ -80,20 +82,91 @@ impl StreamTokenizer {
             // No complete tag boundary — buffer everything.
             if working.len() > MAX_RESIDUAL {
                 // Too large to buffer — force-process what we have.
-                return self.process_chunk(&working);
+                let tokens = self.process_chunk(&working);
+                self.working = working;
+                return tokens;
             }
-            self.residual = working;
+            // Swap: working becomes the residual, residual (now empty) becomes the
+            // reusable working buffer — no new allocation.
+            std::mem::swap(&mut self.residual, &mut working);
+            self.working = working;
             return Vec::new();
         }
 
         // Process the safe portion.
-        let safe_part = &working[..split];
-        let tokens = self.process_chunk(safe_part);
+        let tokens = self.process_chunk(&working[..split]);
 
         // Buffer the rest.
-        self.residual = working[split..].to_vec();
+        self.residual.extend_from_slice(&working[split..]);
+
+        // Return the working buffer for reuse.
+        self.working = working;
 
         tokens
+    }
+
+    /// Feed a UTF-8 chunk and process complete tokens via callback without cloning.
+    ///
+    /// This path is intended for internal high-throughput consumers (e.g. tree
+    /// building) that can consume tokens immediately.
+    pub fn feed_str_with(&mut self, chunk: &str, mut on_token: impl FnMut(&Token<'_>)) {
+        if chunk.is_empty() {
+            return;
+        }
+
+        // Combine residual + new chunk into reusable working buffer.
+        let mut working = std::mem::take(&mut self.working);
+        working.clear();
+        working.extend_from_slice(&self.residual);
+        working.extend_from_slice(chunk.as_bytes());
+        self.residual.clear();
+
+        let split = find_safe_split(&working);
+
+        if split == 0 {
+            if working.len() > MAX_RESIDUAL {
+                // Too large to buffer — force-process what we have.
+                match std::str::from_utf8(&working) {
+                    Ok(text) => {
+                        let tokens = self.process_chunk_borrowed(text);
+                        for token in &tokens {
+                            on_token(token);
+                        }
+                    }
+                    Err(_) => {
+                        let text = String::from_utf8_lossy(&working).into_owned();
+                        let tokens = self.process_chunk_borrowed(&text);
+                        for token in &tokens {
+                            on_token(token);
+                        }
+                    }
+                }
+                self.working = working;
+                return;
+            }
+            std::mem::swap(&mut self.residual, &mut working);
+            self.working = working;
+            return;
+        }
+
+        match std::str::from_utf8(&working[..split]) {
+            Ok(text) => {
+                let tokens = self.process_chunk_borrowed(text);
+                for token in &tokens {
+                    on_token(token);
+                }
+            }
+            Err(_) => {
+                let text = String::from_utf8_lossy(&working[..split]).into_owned();
+                let tokens = self.process_chunk_borrowed(&text);
+                for token in &tokens {
+                    on_token(token);
+                }
+            }
+        }
+
+        self.residual.extend_from_slice(&working[split..]);
+        self.working = working;
     }
 
     /// Signal end of input and flush any remaining buffered data.
@@ -105,25 +178,50 @@ impl StreamTokenizer {
         self.process_chunk(&remaining)
     }
 
-    /// Process a complete chunk through the structural indexer + extractor.
-    fn process_chunk(&mut self, data: &[u8]) -> Vec<Token<'static>> {
-        let index = self.indexer.index(data);
-        let tokens = extract_tokens(data, &index);
-
-        // Update in_tag state.
-        for &b in data.iter().rev() {
-            if b == b'>' {
-                self.in_tag = false;
-                break;
+    /// Signal end of input and flush buffered tokens via callback without cloning.
+    pub fn finish_with(&mut self, mut on_token: impl FnMut(&Token<'_>)) {
+        if self.residual.is_empty() {
+            return;
+        }
+        let remaining = std::mem::take(&mut self.residual);
+        match std::str::from_utf8(&remaining) {
+            Ok(text) => {
+                let tokens = self.process_chunk_borrowed(text);
+                for token in &tokens {
+                    on_token(token);
+                }
             }
-            if b == b'<' {
-                self.in_tag = true;
-                break;
+            Err(_) => {
+                let text = String::from_utf8_lossy(&remaining).into_owned();
+                let tokens = self.process_chunk_borrowed(&text);
+                for token in &tokens {
+                    on_token(token);
+                }
             }
         }
+    }
 
-        // Convert to 'static lifetime by cloning string data.
-        tokens.into_iter().map(to_owned_token).collect()
+    /// Process a complete chunk through the structural indexer + extractor.
+    fn process_chunk(&mut self, data: &[u8]) -> Vec<Token<'static>> {
+        match std::str::from_utf8(data) {
+            Ok(text) => {
+                let index = self.indexer.index(text.as_bytes());
+                let tokens = extract_tokens(text, &index);
+                tokens.into_iter().map(to_owned_token).collect()
+            }
+            Err(_) => {
+                let text = String::from_utf8_lossy(data).into_owned();
+                let index = self.indexer.index(text.as_bytes());
+                let tokens = extract_tokens(&text, &index);
+                tokens.into_iter().map(to_owned_token).collect()
+            }
+        }
+    }
+
+    /// Process a complete UTF-8 chunk and return borrowed tokens.
+    fn process_chunk_borrowed<'a>(&mut self, data: &'a str) -> Vec<Token<'a>> {
+        let index = self.indexer.index(data.as_bytes());
+        extract_tokens(data, &index)
     }
 }
 
@@ -134,15 +232,139 @@ impl Default for StreamTokenizer {
 }
 
 /// Find the last safe split point in the buffer.
-/// Returns the byte index right after the last `>` that appears to close a tag.
+/// Returns the byte index right after the last completed markup construct.
 fn find_safe_split(data: &[u8]) -> usize {
-    // Walk backwards to find the last '>'.
-    for i in (0..data.len()).rev() {
-        if data[i] == b'>' {
-            return i + 1;
+    #[derive(Clone, Copy)]
+    enum Mode {
+        Data,
+        Tag { quote: Option<u8> },
+        Doctype { quote: Option<u8> },
+        Comment,
+        CData,
+    }
+
+    let mut mode = Mode::Data;
+    let mut i = 0usize;
+    let mut last_safe = 0usize;
+
+    while i < data.len() {
+        match mode {
+            Mode::Data => {
+                if data[i] == b'<' {
+                    // <!-- ... -->
+                    if i + 3 < data.len() && &data[i..i + 4] == b"<!--" {
+                        mode = Mode::Comment;
+                        i += 4;
+                        continue;
+                    }
+
+                    // <![CDATA[ ... ]]>
+                    if i + 8 < data.len() && &data[i..i + 9] == b"<![CDATA[" {
+                        mode = Mode::CData;
+                        i += 9;
+                        continue;
+                    }
+
+                    if i + 1 < data.len() {
+                        let next = data[i + 1];
+                        // <!DOCTYPE ...> or other <! ... >
+                        if next == b'!' {
+                            mode = Mode::Doctype { quote: None };
+                            i += 2;
+                            continue;
+                        }
+                        // Normal open/close tags. Ignore stray '<' in text.
+                        if next == b'/'
+                            || next.is_ascii_alphabetic()
+                            || next == b'_'
+                            || next == b'?'
+                        {
+                            mode = Mode::Tag { quote: None };
+                            i += 1;
+                            continue;
+                        }
+                    }
+                }
+                i += 1;
+            }
+            Mode::Tag { mut quote } => {
+                if let Some(q) = quote {
+                    if data[i] == q {
+                        quote = None;
+                    }
+                    mode = Mode::Tag { quote };
+                    i += 1;
+                    continue;
+                }
+                match data[i] {
+                    b'"' | b'\'' => {
+                        mode = Mode::Tag {
+                            quote: Some(data[i]),
+                        };
+                        i += 1;
+                    }
+                    b'>' => {
+                        last_safe = i + 1;
+                        mode = Mode::Data;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            Mode::Doctype { mut quote } => {
+                if let Some(q) = quote {
+                    if data[i] == q {
+                        quote = None;
+                    }
+                    mode = Mode::Doctype { quote };
+                    i += 1;
+                    continue;
+                }
+                match data[i] {
+                    b'"' | b'\'' => {
+                        mode = Mode::Doctype {
+                            quote: Some(data[i]),
+                        };
+                        i += 1;
+                    }
+                    b'>' => {
+                        last_safe = i + 1;
+                        mode = Mode::Data;
+                        i += 1;
+                    }
+                    _ => i += 1,
+                }
+            }
+            Mode::Comment => {
+                if i + 2 < data.len()
+                    && data[i] == b'-'
+                    && data[i + 1] == b'-'
+                    && data[i + 2] == b'>'
+                {
+                    last_safe = i + 3;
+                    mode = Mode::Data;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
+            Mode::CData => {
+                if i + 2 < data.len()
+                    && data[i] == b']'
+                    && data[i + 1] == b']'
+                    && data[i + 2] == b'>'
+                {
+                    last_safe = i + 3;
+                    mode = Mode::Data;
+                    i += 3;
+                } else {
+                    i += 1;
+                }
+            }
         }
     }
-    0
+
+    last_safe
 }
 
 /// Convert a borrowed token to an owned ('static) token.
@@ -155,25 +377,25 @@ fn to_owned_token(token: Token<'_>) -> Token<'static> {
             self_closing,
         } => Token::OpenTag {
             tag,
-            name: leak_str(name),
+            name: std::borrow::Cow::Owned(name.into_owned()),
             attributes: attributes.into_iter().map(to_owned_attr).collect(),
             self_closing,
         },
         Token::CloseTag { tag, name } => Token::CloseTag {
             tag,
-            name: leak_str(name),
+            name: std::borrow::Cow::Owned(name.into_owned()),
         },
         Token::Text { content } => Token::Text {
             content: std::borrow::Cow::Owned(content.into_owned()),
         },
         Token::Comment { content } => Token::Comment {
-            content: leak_str(content),
+            content: std::borrow::Cow::Owned(content.into_owned()),
         },
         Token::Doctype { content } => Token::Doctype {
-            content: leak_str(content),
+            content: std::borrow::Cow::Owned(content.into_owned()),
         },
         Token::CData { content } => Token::CData {
-            content: leak_str(content),
+            content: std::borrow::Cow::Owned(content.into_owned()),
         },
     }
 }
@@ -181,19 +403,9 @@ fn to_owned_token(token: Token<'_>) -> Token<'static> {
 /// Convert a borrowed attribute to owned.
 fn to_owned_attr(attr: crate::token::Attribute<'_>) -> crate::token::Attribute<'static> {
     crate::token::Attribute {
-        name: leak_str(attr.name),
+        name: std::borrow::Cow::Owned(attr.name.into_owned()),
         value: attr.value.map(|v| std::borrow::Cow::Owned(v.into_owned())),
     }
-}
-
-/// Convert a `&str` into a `&'static str` by boxing + leaking.
-/// This is acceptable for streaming use where tokens are consumed and
-/// the total leaked memory is bounded by document size.
-fn leak_str(s: &str) -> &'static str {
-    if s.is_empty() {
-        return "";
-    }
-    Box::leak(s.to_string().into_boxed_str())
 }
 
 #[cfg(test)]

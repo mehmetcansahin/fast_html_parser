@@ -32,31 +32,33 @@ pub fn decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
 
 /// Slow path: actually decode entities.
 fn decode_entities_slow(input: &str) -> Cow<'_, str> {
-    let bytes = input.as_bytes();
-    let len = bytes.len();
-    let mut result = String::with_capacity(len);
-    let mut i = 0;
+    let mut result = String::with_capacity(input.len());
+    let mut cursor = 0usize;
 
-    while i < len {
-        if bytes[i] == b'&' {
-            // Look for the closing ';'.
-            if let Some(semi_offset) = bytes[i + 1..].iter().position(|&b| b == b';') {
-                let semi = i + 1 + semi_offset;
-                let entity_body = &input[i + 1..semi];
+    while let Some(rel_amp) = input[cursor..].find('&') {
+        let amp = cursor + rel_amp;
+        // Preserve all UTF-8 before '&' verbatim.
+        result.push_str(&input[cursor..amp]);
 
-                if let Some(decoded) = try_decode_entity(entity_body) {
-                    result.push_str(&decoded);
-                    i = semi + 1;
-                    continue;
-                }
+        // Look for the closing ';' after '&'.
+        if let Some(rel_semi) = input[amp + 1..].find(';') {
+            let semi = amp + 1 + rel_semi;
+            let entity_body = &input[amp + 1..semi];
+            if let Some(decoded) = try_decode_entity(entity_body) {
+                result.push_str(&decoded);
+                cursor = semi + 1;
+                continue;
             }
-            // Unrecognized entity — pass through literally.
-            result.push('&');
-            i += 1;
-        } else {
-            result.push(bytes[i] as char);
-            i += 1;
         }
+
+        // Unrecognized entity — keep '&' and continue scanning.
+        result.push('&');
+        cursor = amp + 1;
+    }
+
+    // Append remaining tail.
+    if cursor < input.len() {
+        result.push_str(&input[cursor..]);
     }
 
     Cow::Owned(result)

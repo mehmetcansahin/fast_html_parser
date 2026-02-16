@@ -312,7 +312,11 @@ impl<'a> Parser<'a> {
                 Some(b) if b.is_ascii_alphabetic() || b == b'_' => {
                     let name = self.read_ident()?;
                     let tag = Tag::from_bytes(name.as_bytes());
-                    parts.push(SimpleSelector::Tag(tag));
+                    if tag == Tag::Unknown {
+                        parts.push(SimpleSelector::UnknownTag(name));
+                    } else {
+                        parts.push(SimpleSelector::Tag(tag));
+                    }
                 }
                 _ => break,
             }

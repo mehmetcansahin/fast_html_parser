@@ -1,4 +1,4 @@
-//! # hp-parser — SIMD-Optimized HTML Parser
+//! # fast-html-parser — SIMD-Optimized HTML Parser
 //!
 //! A high-performance HTML parser designed for web scraping workloads.
 //! Uses SIMD instructions (SSE4.2, AVX2, NEON) for tokenization and builds
@@ -7,7 +7,7 @@
 //! ## Quick Start
 //!
 //! ```
-//! use hp_parser::HtmlParser;
+//! use fast_html_parser::HtmlParser;
 //!
 //! let doc = HtmlParser::parse("<div><p>Hello</p></div>").unwrap();
 //! assert_eq!(doc.root().text_content(), "Hello");
@@ -16,7 +16,7 @@
 //! ## Builder Pattern
 //!
 //! ```
-//! use hp_parser::HtmlParser;
+//! use fast_html_parser::HtmlParser;
 //!
 //! let doc = HtmlParser::builder()
 //!     .max_input_size(64 * 1024 * 1024) // 64 MiB
@@ -28,7 +28,7 @@
 //! ## CSS Selectors
 //!
 //! ```
-//! use hp_parser::prelude::*;
+//! use fast_html_parser::prelude::*;
 //!
 //! let doc = HtmlParser::parse("<ul><li>one</li><li>two</li></ul>").unwrap();
 //! let items = doc.select("li").unwrap();
@@ -38,7 +38,7 @@
 //! ## Streaming
 //!
 //! ```
-//! use hp_parser::streaming::parse_stream;
+//! use fast_html_parser::streaming::parse_stream;
 //!
 //! let html = b"<div><p>Hello</p></div>";
 //! let doc = parse_stream(html.chunks(8)).unwrap();
@@ -54,7 +54,6 @@
 //! | `xpath` | No | XPath expression support |
 //! | `encoding` | No | Auto-detect encoding from raw bytes |
 //! | `async-tokio` | No | Async parsing via Tokio |
-//! | `simd` | No | SIMD acceleration marker |
 
 // ---------------------------------------------------------------------------
 // Re-exports: core types
@@ -88,7 +87,7 @@ pub mod streaming {
 // ---------------------------------------------------------------------------
 
 /// CSS selector and XPath engine.
-#[cfg(feature = "css-selector")]
+#[cfg(any(feature = "css-selector", feature = "xpath"))]
 pub use hp_selector::{DocumentIndex, Selectable, Selection};
 
 /// XPath types (re-exported from selector crate).
@@ -116,13 +115,13 @@ pub mod async_parser {
 /// Convenience prelude that imports the most commonly used types.
 ///
 /// ```
-/// use hp_parser::prelude::*;
+/// use fast_html_parser::prelude::*;
 /// ```
 pub mod prelude {
     pub use hp_tree::node::NodeId;
     pub use hp_tree::{Document, HtmlError, NodeRef};
 
-    #[cfg(feature = "css-selector")]
+    #[cfg(any(feature = "css-selector", feature = "xpath"))]
     pub use hp_selector::{Selectable, Selection};
 
     pub use crate::HtmlParser;
@@ -140,7 +139,7 @@ const DEFAULT_MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
 /// # Example
 ///
 /// ```
-/// use hp_parser::HtmlParser;
+/// use fast_html_parser::HtmlParser;
 ///
 /// let parser = HtmlParser::builder()
 ///     .max_input_size(128 * 1024 * 1024)
@@ -202,7 +201,7 @@ impl ParserBuilder {
 /// # Example
 ///
 /// ```
-/// use hp_parser::HtmlParser;
+/// use fast_html_parser::HtmlParser;
 ///
 /// // One-shot convenience
 /// let doc = HtmlParser::parse("<p>Hello</p>").unwrap();
@@ -235,7 +234,7 @@ impl HtmlParser {
     /// # Example
     ///
     /// ```
-    /// use hp_parser::HtmlParser;
+    /// use fast_html_parser::HtmlParser;
     ///
     /// let doc = HtmlParser::parse("<div><p>Hello</p></div>").unwrap();
     /// assert_eq!(doc.root().text_content(), "Hello");
@@ -254,7 +253,7 @@ impl HtmlParser {
     /// # Example
     ///
     /// ```
-    /// use hp_parser::HtmlParser;
+    /// use fast_html_parser::HtmlParser;
     ///
     /// let doc = HtmlParser::parse_bytes(b"<p>Hello</p>").unwrap();
     /// assert_eq!(doc.root().text_content(), "Hello");
@@ -301,7 +300,7 @@ impl HtmlParser {
 /// # Example
 ///
 /// ```
-/// let doc = hp_parser::parse("<p>Quick</p>").unwrap();
+/// let doc = fast_html_parser::parse("<p>Quick</p>").unwrap();
 /// assert_eq!(doc.root().text_content(), "Quick");
 /// ```
 pub fn parse(input: &str) -> Result<Document, HtmlError> {
@@ -313,7 +312,7 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
 /// # Example
 ///
 /// ```
-/// let doc = hp_parser::parse_bytes(b"<p>Quick</p>").unwrap();
+/// let doc = fast_html_parser::parse_bytes(b"<p>Quick</p>").unwrap();
 /// assert_eq!(doc.root().text_content(), "Quick");
 /// ```
 pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {

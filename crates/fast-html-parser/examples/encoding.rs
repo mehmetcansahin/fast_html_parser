@@ -2,10 +2,10 @@
 //!
 //! Demonstrates parsing raw bytes with different encodings.
 //!
-//! Run: `cargo run --example encoding_detect --features encoding`
+//! Run: `cargo run --example encoding --features encoding`
 
-use hp_parser::HtmlParser;
-use hp_parser::encoding::detect;
+use fast_html_parser::HtmlParser;
+use fast_html_parser::encoding::detect;
 
 fn main() {
     // UTF-8 (default)

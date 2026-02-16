@@ -18,7 +18,7 @@ pub enum Token<'a> {
         /// Interned tag name.
         tag: Tag,
         /// Raw tag name slice from the input.
-        name: &'a str,
+        name: Cow<'a, str>,
         /// Attribute list (may be empty).
         attributes: Vec<Attribute<'a>>,
         /// Whether the tag is self-closing (`<br/>`).
@@ -30,7 +30,7 @@ pub enum Token<'a> {
         /// Interned tag name.
         tag: Tag,
         /// Raw tag name slice from the input.
-        name: &'a str,
+        name: Cow<'a, str>,
     },
 
     /// Text content between tags.
@@ -42,19 +42,19 @@ pub enum Token<'a> {
     /// An HTML comment, e.g. `<!-- comment -->`.
     Comment {
         /// The comment body (without `<!--` and `-->`).
-        content: &'a str,
+        content: Cow<'a, str>,
     },
 
     /// A DOCTYPE declaration, e.g. `<!DOCTYPE html>`.
     Doctype {
         /// The content after `DOCTYPE`.
-        content: &'a str,
+        content: Cow<'a, str>,
     },
 
     /// A CDATA section, e.g. `<![CDATA[...]]>`.
     CData {
         /// The CDATA content (without `<![CDATA[` and `]]>`).
-        content: &'a str,
+        content: Cow<'a, str>,
     },
 }
 
@@ -62,7 +62,7 @@ pub enum Token<'a> {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Attribute<'a> {
     /// Attribute name, borrowed from input.
-    pub name: &'a str,
+    pub name: Cow<'a, str>,
     /// Attribute value, entity-decoded if needed.
     /// `None` for boolean attributes (e.g. `disabled`).
     pub value: Option<Cow<'a, str>>,
@@ -85,17 +85,17 @@ mod tests {
     #[test]
     fn attribute_with_value() {
         let attr = Attribute {
-            name: "class",
+            name: Cow::Borrowed("class"),
             value: Some(Cow::Borrowed("foo")),
         };
-        assert_eq!(attr.name, "class");
+        assert_eq!(attr.name.as_ref(), "class");
         assert_eq!(attr.value.as_deref(), Some("foo"));
     }
 
     #[test]
     fn boolean_attribute() {
         let attr = Attribute {
-            name: "disabled",
+            name: Cow::Borrowed("disabled"),
             value: None,
         };
         assert!(attr.value.is_none());

@@ -24,7 +24,7 @@ fn well_formed_open_tag() {
             ..
         } => {
             assert_eq!(*tag, Tag::Div);
-            assert_eq!(*name, "div");
+            assert_eq!(name.as_ref(), "div");
             assert!(attributes.is_empty());
         }
         other => panic!("expected OpenTag, got {other:?}"),
@@ -38,7 +38,7 @@ fn well_formed_close_tag() {
     match &tokens[0] {
         Token::CloseTag { tag, name } => {
             assert_eq!(*tag, Tag::Div);
-            assert_eq!(*name, "div");
+            assert_eq!(name.as_ref(), "div");
         }
         other => panic!("expected CloseTag, got {other:?}"),
     }
@@ -72,7 +72,7 @@ fn well_formed_doctype() {
     let doctype = tokens.iter().find(|t| matches!(t, Token::Doctype { .. }));
     match doctype {
         Some(Token::Doctype { content }) => {
-            assert_eq!(*content, "html");
+            assert_eq!(content.as_ref(), "html");
         }
         other => panic!("expected Doctype, got {other:?}"),
     }
@@ -87,9 +87,9 @@ fn well_formed_attribute() {
         } => {
             assert_eq!(*tag, Tag::A);
             assert_eq!(attributes.len(), 2);
-            assert_eq!(attributes[0].name, "href");
+            assert_eq!(attributes[0].name.as_ref(), "href");
             assert_eq!(attributes[0].value.as_deref(), Some("https://example.com"));
-            assert_eq!(attributes[1].name, "class");
+            assert_eq!(attributes[1].name.as_ref(), "class");
             assert_eq!(attributes[1].value.as_deref(), Some("link"));
         }
         other => panic!("expected OpenTag, got {other:?}"),
@@ -122,7 +122,7 @@ fn well_formed_full_document() {
     let tag_names: Vec<&str> = tokens
         .iter()
         .filter_map(|t| match t {
-            Token::OpenTag { name, .. } => Some(*name),
+            Token::OpenTag { name, .. } => Some(name.as_ref()),
             _ => None,
         })
         .collect();
@@ -398,7 +398,7 @@ fn case_insensitive_tags() {
     match &tokens[0] {
         Token::OpenTag { tag, name, .. } => {
             assert_eq!(*tag, Tag::Div);
-            assert_eq!(*name, "DIV");
+            assert_eq!(name.as_ref(), "DIV");
         }
         other => panic!("expected OpenTag, got {other:?}"),
     }

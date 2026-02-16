@@ -53,8 +53,7 @@ use token::Token;
 /// assert!(tokens.iter().any(|t| matches!(t, Token::CloseTag { .. })));
 /// ```
 pub fn tokenize<'a>(input: &'a str) -> Vec<Token<'a>> {
-    let bytes = input.as_bytes();
     let indexer = StructuralIndexer::new();
-    let index = indexer.index(bytes);
-    extract_tokens(bytes, &index)
+    let index = indexer.index(input.as_bytes());
+    extract_tokens(input, &index)
 }

@@ -5,16 +5,30 @@
 //! attributes, comments, and text content. This hybrid approach combines
 //! SIMD-accelerated delimiter finding with scalar content parsing.
 
+use std::borrow::Cow;
+
 use hp_core::tag::Tag;
 
-use crate::entity::decode_entities;
 use crate::structural::StructuralIndex;
 use crate::token::{Attribute, Token};
 
-/// Extract tokens from pre-indexed input.
+#[cfg(feature = "entity-decode")]
+#[inline]
+fn maybe_decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
+    crate::entity::decode_entities(input)
+}
+
+#[cfg(not(feature = "entity-decode"))]
+#[inline]
+fn maybe_decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
+    Cow::Borrowed(input)
+}
+
+/// Extract tokens from pre-indexed UTF-8 input.
 ///
-/// `input` must be the same byte slice that was passed to
-/// [`StructuralIndexer::index`](crate::structural::StructuralIndexer::index).
+/// `input` must be the same text that was passed to
+/// [`StructuralIndexer::index`](crate::structural::StructuralIndexer::index)
+/// as bytes.
 ///
 /// # Example
 ///
@@ -22,13 +36,13 @@ use crate::token::{Attribute, Token};
 /// use hp_tokenizer::structural::StructuralIndexer;
 /// use hp_tokenizer::extract::extract_tokens;
 ///
-/// let html = b"<div>hello</div>";
+/// let html = "<div>hello</div>";
 /// let indexer = StructuralIndexer::new();
-/// let index = indexer.index(html);
+/// let index = indexer.index(html.as_bytes());
 /// let tokens = extract_tokens(html, &index);
 /// assert!(tokens.len() >= 3); // OpenTag, Text, CloseTag
 /// ```
-pub fn extract_tokens<'a>(input: &'a [u8], index: &StructuralIndex) -> Vec<Token<'a>> {
+pub fn extract_tokens<'a>(input: &'a str, index: &StructuralIndex) -> Vec<Token<'a>> {
     let mut tokens = Vec::with_capacity(index.estimated_token_count());
     let mut parser = Parser::new(input);
 
@@ -40,6 +54,15 @@ pub fn extract_tokens<'a>(input: &'a [u8], index: &StructuralIndex) -> Vec<Token
     parser.flush_trailing(&mut tokens);
 
     tokens
+}
+
+/// Extract tokens from pre-indexed raw bytes after UTF-8 validation.
+pub fn extract_tokens_bytes<'a>(
+    input: &'a [u8],
+    index: &StructuralIndex,
+) -> Result<Vec<Token<'a>>, std::str::Utf8Error> {
+    let input = std::str::from_utf8(input)?;
+    Ok(extract_tokens(input, index))
 }
 
 /// Parsing mode — tracks what the parser is currently inside.
@@ -61,6 +84,7 @@ enum Mode {
 
 /// Direct input parser driven by structural delimiter positions.
 struct Parser<'a> {
+    input_str: &'a str,
     input: &'a [u8],
     mode: Mode,
     /// Position after the last emitted token (start of next text region).
@@ -74,9 +98,10 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a [u8]) -> Self {
+    fn new(input: &'a str) -> Self {
         Self {
-            input,
+            input_str: input,
+            input: input.as_bytes(),
             mode: Mode::Data,
             cursor: 0,
             tag_open_pos: 0,
@@ -160,7 +185,9 @@ impl<'a> Parser<'a> {
                 } else {
                     ""
                 };
-                tokens.push(Token::Comment { content });
+                tokens.push(Token::Comment {
+                    content: Cow::Borrowed(content),
+                });
                 self.cursor = pos + 1;
                 self.mode = Mode::Data;
             }
@@ -180,7 +207,9 @@ impl<'a> Parser<'a> {
                 } else {
                     content
                 };
-            tokens.push(Token::Doctype { content });
+            tokens.push(Token::Doctype {
+                content: Cow::Borrowed(content),
+            });
             self.cursor = pos + 1;
             self.mode = Mode::Data;
         }
@@ -197,7 +226,9 @@ impl<'a> Parser<'a> {
             } else {
                 ""
             };
-            tokens.push(Token::CData { content });
+            tokens.push(Token::CData {
+                content: Cow::Borrowed(content),
+            });
             self.cursor = pos + 1;
             self.mode = Mode::Data;
         }
@@ -232,7 +263,10 @@ impl<'a> Parser<'a> {
             }
             let name = self.str_slice(name_start, pos);
             let tag = Tag::from_bytes(&self.input[name_start..pos]);
-            tokens.push(Token::CloseTag { tag, name });
+            tokens.push(Token::CloseTag {
+                tag,
+                name: Cow::Borrowed(name),
+            });
             return;
         }
 
@@ -263,7 +297,7 @@ impl<'a> Parser<'a> {
 
         tokens.push(Token::OpenTag {
             tag,
-            name,
+            name: Cow::Borrowed(name),
             attributes: attrs,
             self_closing,
         });
@@ -277,7 +311,12 @@ impl<'a> Parser<'a> {
 
     /// Parse attributes from the region between tag name and `>`.
     fn parse_attributes(&self, start: usize, end: usize) -> Vec<Attribute<'a>> {
-        let mut attrs = Vec::new();
+        let estimated = if end > start {
+            ((end - start) / 15).clamp(2, 16)
+        } else {
+            2
+        };
+        let mut attrs = Vec::with_capacity(estimated);
         let mut pos = start;
 
         loop {
@@ -334,9 +373,9 @@ impl<'a> Parser<'a> {
                         pos += 1; // skip closing quote
                     }
                     let raw_value = self.str_slice(val_start, val_end);
-                    let value = decode_entities(raw_value);
+                    let value = maybe_decode_entities(raw_value);
                     attrs.push(Attribute {
-                        name: attr_name,
+                        name: Cow::Borrowed(attr_name),
                         value: Some(value),
                     });
                 } else {
@@ -346,16 +385,16 @@ impl<'a> Parser<'a> {
                         pos += 1;
                     }
                     let raw_value = self.str_slice(val_start, pos);
-                    let value = decode_entities(raw_value);
+                    let value = maybe_decode_entities(raw_value);
                     attrs.push(Attribute {
-                        name: attr_name,
+                        name: Cow::Borrowed(attr_name),
                         value: Some(value),
                     });
                 }
             } else {
                 // Boolean attribute (no value).
                 attrs.push(Attribute {
-                    name: attr_name,
+                    name: Cow::Borrowed(attr_name),
                     value: None,
                 });
             }
@@ -369,7 +408,7 @@ impl<'a> Parser<'a> {
         if pos > self.cursor {
             let raw = self.str_slice(self.cursor, pos);
             if !raw.is_empty() {
-                let content = decode_entities(raw);
+                let content = maybe_decode_entities(raw);
                 tokens.push(Token::Text { content });
             }
         }
@@ -382,7 +421,7 @@ impl<'a> Parser<'a> {
         if end > self.cursor {
             let raw = self.str_slice(self.cursor, end);
             if !raw.is_empty() {
-                let content = decode_entities(raw);
+                let content = maybe_decode_entities(raw);
                 tokens.push(Token::Text { content });
             }
         }
@@ -419,20 +458,15 @@ impl<'a> Parser<'a> {
     /// Get a `&str` slice from the input.
     #[inline]
     fn str_slice(&self, start: usize, end: usize) -> &'a str {
-        let start = start.min(self.input.len());
-        let end = end.min(self.input.len());
-        if start >= end {
+        if start >= end || end > self.input.len() {
             return "";
         }
-        #[cfg(debug_assertions)]
-        {
-            std::str::from_utf8(&self.input[start..end]).unwrap_or("")
-        }
-        #[cfg(not(debug_assertions))]
-        {
-            // SAFETY: Caller guarantees input is valid UTF-8.
-            unsafe { std::str::from_utf8_unchecked(&self.input[start..end]) }
-        }
+        debug_assert!(self.input_str.is_char_boundary(start));
+        debug_assert!(self.input_str.is_char_boundary(end));
+        // SAFETY: `start/end` are derived from ASCII delimiter boundaries
+        // and parser cursor positions, which are UTF-8 char boundaries for
+        // a validated `&str` input.
+        unsafe { self.input_str.get_unchecked(start..end) }
     }
 }
 
@@ -447,21 +481,21 @@ mod tests {
     use super::*;
     use crate::structural::StructuralIndexer;
 
-    fn tokenize(html: &[u8]) -> Vec<Token<'_>> {
+    fn tokenize(html: &str) -> Vec<Token<'_>> {
         let indexer = StructuralIndexer::new();
-        let index = indexer.index(html);
+        let index = indexer.index(html.as_bytes());
         extract_tokens(html, &index)
     }
 
     #[test]
     fn simple_div() {
-        let tokens = tokenize(b"<div>hello</div>");
+        let tokens = tokenize("<div>hello</div>");
         assert!(tokens.len() >= 3, "got {tokens:?}");
 
         match &tokens[0] {
             Token::OpenTag { tag, name, .. } => {
                 assert_eq!(*tag, Tag::Div);
-                assert_eq!(*name, "div");
+                assert_eq!(name.as_ref(), "div");
             }
             other => panic!("expected OpenTag, got {other:?}"),
         }
@@ -476,7 +510,7 @@ mod tests {
         match &tokens[2] {
             Token::CloseTag { tag, name } => {
                 assert_eq!(*tag, Tag::Div);
-                assert_eq!(*name, "div");
+                assert_eq!(name.as_ref(), "div");
             }
             other => panic!("expected CloseTag, got {other:?}"),
         }
@@ -484,7 +518,7 @@ mod tests {
 
     #[test]
     fn self_closing_br() {
-        let tokens = tokenize(b"<br/>");
+        let tokens = tokenize("<br/>");
         assert!(!tokens.is_empty(), "got {tokens:?}");
         match &tokens[0] {
             Token::OpenTag {
@@ -499,14 +533,14 @@ mod tests {
 
     #[test]
     fn tag_with_attributes() {
-        let tokens = tokenize(b"<a href=\"url\" class=\"link\">text</a>");
+        let tokens = tokenize("<a href=\"url\" class=\"link\">text</a>");
 
         match &tokens[0] {
             Token::OpenTag { attributes, .. } => {
                 assert_eq!(attributes.len(), 2, "attrs: {attributes:?}");
-                assert_eq!(attributes[0].name, "href");
+                assert_eq!(attributes[0].name.as_ref(), "href");
                 assert_eq!(attributes[0].value.as_deref(), Some("url"));
-                assert_eq!(attributes[1].name, "class");
+                assert_eq!(attributes[1].name.as_ref(), "class");
                 assert_eq!(attributes[1].value.as_deref(), Some("link"));
             }
             other => panic!("expected OpenTag, got {other:?}"),
@@ -515,11 +549,11 @@ mod tests {
 
     #[test]
     fn boolean_attribute() {
-        let tokens = tokenize(b"<input disabled>");
+        let tokens = tokenize("<input disabled>");
         match &tokens[0] {
             Token::OpenTag { attributes, .. } => {
                 assert_eq!(attributes.len(), 1, "attrs: {attributes:?}");
-                assert_eq!(attributes[0].name, "disabled");
+                assert_eq!(attributes[0].name.as_ref(), "disabled");
                 assert!(attributes[0].value.is_none());
             }
             other => panic!("expected OpenTag, got {other:?}"),
@@ -528,7 +562,7 @@ mod tests {
 
     #[test]
     fn text_only() {
-        let tokens = tokenize(b"just plain text");
+        let tokens = tokenize("just plain text");
         assert_eq!(tokens.len(), 1);
         match &tokens[0] {
             Token::Text { content } => {
@@ -540,13 +574,13 @@ mod tests {
 
     #[test]
     fn empty_input() {
-        let tokens = tokenize(b"");
+        let tokens = tokenize("");
         assert!(tokens.is_empty());
     }
 
     #[test]
     fn entity_in_text() {
-        let tokens = tokenize(b"a &amp; b");
+        let tokens = tokenize("a &amp; b");
         match &tokens[0] {
             Token::Text { content } => {
                 assert_eq!(content.as_ref(), "a & b");
@@ -557,7 +591,7 @@ mod tests {
 
     #[test]
     fn comment() {
-        let tokens = tokenize(b"<!-- hello -->");
+        let tokens = tokenize("<!-- hello -->");
         assert!(!tokens.is_empty(), "got {tokens:?}");
         let has_comment = tokens.iter().any(|t| matches!(t, Token::Comment { .. }));
         assert!(has_comment, "should have a comment token: {tokens:?}");
@@ -565,7 +599,7 @@ mod tests {
 
     #[test]
     fn doctype() {
-        let tokens = tokenize(b"<!DOCTYPE html>");
+        let tokens = tokenize("<!DOCTYPE html>");
         assert!(!tokens.is_empty(), "got {tokens:?}");
         let has_doctype = tokens.iter().any(|t| matches!(t, Token::Doctype { .. }));
         assert!(has_doctype, "should have a doctype token: {tokens:?}");
@@ -573,13 +607,13 @@ mod tests {
 
     #[test]
     fn nested_tags() {
-        let tokens = tokenize(b"<div><span>text</span></div>");
+        let tokens = tokenize("<div><span>text</span></div>");
 
         let names: Vec<&str> = tokens
             .iter()
             .filter_map(|t| match t {
-                Token::OpenTag { name, .. } => Some(*name),
-                Token::CloseTag { name, .. } => Some(*name),
+                Token::OpenTag { name, .. } => Some(name.as_ref()),
+                Token::CloseTag { name, .. } => Some(name.as_ref()),
                 _ => None,
             })
             .collect();
@@ -590,7 +624,7 @@ mod tests {
 
     #[test]
     fn entity_in_attribute() {
-        let tokens = tokenize(b"<div title=\"a &amp; b\">x</div>");
+        let tokens = tokenize("<div title=\"a &amp; b\">x</div>");
         match &tokens[0] {
             Token::OpenTag { attributes, .. } => {
                 assert_eq!(attributes.len(), 1);
@@ -602,17 +636,17 @@ mod tests {
 
     #[test]
     fn multiple_attributes_mixed() {
-        let tokens = tokenize(b"<div id=\"main\" class='header' disabled data-x=42>");
+        let tokens = tokenize("<div id=\"main\" class='header' disabled data-x=42>");
         match &tokens[0] {
             Token::OpenTag { attributes, .. } => {
                 assert_eq!(attributes.len(), 4, "attrs: {attributes:?}");
-                assert_eq!(attributes[0].name, "id");
+                assert_eq!(attributes[0].name.as_ref(), "id");
                 assert_eq!(attributes[0].value.as_deref(), Some("main"));
-                assert_eq!(attributes[1].name, "class");
+                assert_eq!(attributes[1].name.as_ref(), "class");
                 assert_eq!(attributes[1].value.as_deref(), Some("header"));
-                assert_eq!(attributes[2].name, "disabled");
+                assert_eq!(attributes[2].name.as_ref(), "disabled");
                 assert!(attributes[2].value.is_none());
-                assert_eq!(attributes[3].name, "data-x");
+                assert_eq!(attributes[3].name.as_ref(), "data-x");
                 assert_eq!(attributes[3].value.as_deref(), Some("42"));
             }
             other => panic!("expected OpenTag, got {other:?}"),
@@ -621,7 +655,7 @@ mod tests {
 
     #[test]
     fn script_raw_text() {
-        let tokens = tokenize(b"<script>var x = 1 < 2;</script>");
+        let tokens = tokenize("<script>var x = 1 < 2;</script>");
         let text_tokens: Vec<_> = tokens
             .iter()
             .filter(|t| matches!(t, Token::Text { .. }))
@@ -640,7 +674,7 @@ mod tests {
 
     #[test]
     fn comment_content() {
-        let tokens = tokenize(b"<!-- this is a comment -->");
+        let tokens = tokenize("<!-- this is a comment -->");
         match tokens.iter().find(|t| matches!(t, Token::Comment { .. })) {
             Some(Token::Comment { content }) => {
                 assert_eq!(content.trim(), "this is a comment");
@@ -651,10 +685,10 @@ mod tests {
 
     #[test]
     fn doctype_content() {
-        let tokens = tokenize(b"<!DOCTYPE html>");
+        let tokens = tokenize("<!DOCTYPE html>");
         match tokens.iter().find(|t| matches!(t, Token::Doctype { .. })) {
             Some(Token::Doctype { content }) => {
-                assert_eq!(*content, "html");
+                assert_eq!(content.as_ref(), "html");
             }
             other => panic!("expected Doctype, got {other:?}"),
         }

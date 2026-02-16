@@ -4,10 +4,10 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
-use hp_parser::HtmlParser;
+use fast_html_parser::HtmlParser;
 #[cfg(feature = "css-selector")]
-use hp_parser::Selectable;
-use hp_parser::streaming::parse_stream;
+use fast_html_parser::Selectable;
+use fast_html_parser::streaming::parse_stream;
 
 const SMALL_HTML: &str = include_str!("../testdata/small_1kb.html");
 const MEDIUM_HTML: &str = include_str!("../testdata/medium_100kb.html");

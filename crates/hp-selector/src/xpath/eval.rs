@@ -17,15 +17,18 @@ pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
         }
 
         XPathExpr::DescendantByAttr { tag, attr, value } => {
-            let nodes = find_descendants_by_tag(arena, root, *tag);
-            let filtered = filter_by_attr(arena, &nodes, attr, value);
-            XPathResult::Nodes(filtered)
+            let nodes = find_descendants_by_tag_and_attr(arena, root, *tag, attr, Some(value));
+            XPathResult::Nodes(nodes)
+        }
+
+        XPathExpr::DescendantByAttrExists { tag, attr } => {
+            let nodes = find_descendants_by_tag_and_attr_exists(arena, root, *tag, attr);
+            XPathResult::Nodes(nodes)
         }
 
         XPathExpr::ContainsPredicate { tag, attr, substr } => {
-            let nodes = find_descendants_by_tag(arena, root, *tag);
-            let filtered = filter_by_contains(arena, &nodes, attr, substr);
-            XPathResult::Nodes(filtered)
+            let nodes = find_descendants_by_tag_and_contains(arena, root, *tag, attr, substr);
+            XPathResult::Nodes(nodes)
         }
 
         XPathExpr::PositionPredicate { tag, pos } => {
@@ -60,13 +63,13 @@ pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
         }
 
         XPathExpr::DescendantWildcardByAttr { attr, value } => {
-            let nodes = find_all_elements(arena, root);
-            let filtered = if value.is_empty() {
-                filter_by_attr_exists(arena, &nodes, attr)
-            } else {
-                filter_by_attr(arena, &nodes, attr, value)
-            };
-            XPathResult::Nodes(filtered)
+            let nodes = find_all_elements_by_attr(arena, root, attr, Some(value));
+            XPathResult::Nodes(nodes)
+        }
+
+        XPathExpr::DescendantWildcardByAttrExists { attr } => {
+            let nodes = find_all_elements_by_attr(arena, root, attr, None);
+            XPathResult::Nodes(nodes)
         }
 
         XPathExpr::Parent => {
@@ -93,91 +96,142 @@ fn is_element(n: &hp_tree::node::Node) -> bool {
         && !n.flags.has(NodeFlags::IS_DOCTYPE)
 }
 
-/// DFS: find all descendant elements with a specific tag.
-fn find_descendants_by_tag(arena: &Arena, root: NodeId, tag: Tag) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    dfs_collect_tag(arena, root, tag, &mut results);
-    results
-}
-
-/// DFS helper for tag collection.
-fn dfs_collect_tag(arena: &Arena, node: NodeId, tag: Tag, results: &mut Vec<NodeId>) {
+/// Generic DFS: collect descendant nodes that satisfy `predicate`.
+fn dfs_collect(
+    arena: &Arena,
+    node: NodeId,
+    predicate: &dyn Fn(&Arena, NodeId, &hp_tree::node::Node) -> bool,
+    results: &mut Vec<NodeId>,
+) {
     if node.is_null() {
         return;
     }
     let n = arena.get(node);
-    if is_element(n) && n.tag == tag {
+    if predicate(arena, node, n) {
         results.push(node);
     }
     let mut child = n.first_child;
     while !child.is_null() {
-        dfs_collect_tag(arena, child, tag, results);
+        dfs_collect(arena, child, predicate, results);
         child = arena.get(child).next_sibling;
     }
+}
+
+/// DFS: find all descendant elements with a specific tag.
+fn find_descendants_by_tag(arena: &Arena, root: NodeId, tag: Tag) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    dfs_collect(
+        arena,
+        root,
+        &|_, _, n| is_element(n) && n.tag == tag,
+        &mut results,
+    );
+    results
+}
+
+/// DFS: find descendants by tag with exact attribute match (single pass).
+fn find_descendants_by_tag_and_attr(
+    arena: &Arena,
+    root: NodeId,
+    tag: Tag,
+    attr: &str,
+    value: Option<&str>,
+) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    dfs_collect(
+        arena,
+        root,
+        &|a, id, n| {
+            is_element(n)
+                && n.tag == tag
+                && a.attrs(id)
+                    .iter()
+                    .any(|at| at.name == attr && at.value.as_deref() == value)
+        },
+        &mut results,
+    );
+    results
+}
+
+/// DFS: find descendants by tag with attribute existence (single pass).
+fn find_descendants_by_tag_and_attr_exists(
+    arena: &Arena,
+    root: NodeId,
+    tag: Tag,
+    attr: &str,
+) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    dfs_collect(
+        arena,
+        root,
+        &|a, id, n| is_element(n) && n.tag == tag && a.attrs(id).iter().any(|at| at.name == attr),
+        &mut results,
+    );
+    results
+}
+
+/// DFS: find descendants by tag with contains predicate (single pass).
+fn find_descendants_by_tag_and_contains(
+    arena: &Arena,
+    root: NodeId,
+    tag: Tag,
+    attr: &str,
+    substr: &str,
+) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    dfs_collect(
+        arena,
+        root,
+        &|a, id, n| {
+            is_element(n)
+                && n.tag == tag
+                && a.attrs(id).iter().any(|at| {
+                    at.name == attr && at.value.as_ref().is_some_and(|v| v.contains(substr))
+                })
+        },
+        &mut results,
+    );
+    results
+}
+
+/// DFS: find all descendant elements with optional attribute filter (single pass).
+fn find_all_elements_by_attr(
+    arena: &Arena,
+    root: NodeId,
+    attr: &str,
+    value: Option<&str>,
+) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    dfs_collect(
+        arena,
+        root,
+        &|a, id, n| {
+            if !is_element(n) || n.depth == 0 {
+                return false;
+            }
+            match value {
+                Some(val) => a
+                    .attrs(id)
+                    .iter()
+                    .any(|at| at.name == attr && at.value.as_deref() == Some(val)),
+                None => a.attrs(id).iter().any(|at| at.name == attr),
+            }
+        },
+        &mut results,
+    );
+    results
 }
 
 /// DFS: find all descendant elements.
 fn find_all_elements(arena: &Arena, root: NodeId) -> Vec<NodeId> {
     let mut results = Vec::new();
-    dfs_collect_all(arena, root, &mut results);
+    dfs_collect(
+        arena,
+        root,
+        &|_, _, n| is_element(n) && n.depth > 0,
+        &mut results,
+    );
     results
-}
-
-/// DFS helper for collecting all elements.
-fn dfs_collect_all(arena: &Arena, node: NodeId, results: &mut Vec<NodeId>) {
-    if node.is_null() {
-        return;
-    }
-    let n = arena.get(node);
-    // Skip root synthetic node but include its children.
-    if is_element(n) && n.depth > 0 {
-        results.push(node);
-    }
-    let mut child = n.first_child;
-    while !child.is_null() {
-        dfs_collect_all(arena, child, results);
-        child = arena.get(child).next_sibling;
-    }
-}
-
-/// Filter nodes by exact attribute match. Empty value means attr-exists.
-fn filter_by_attr(arena: &Arena, nodes: &[NodeId], attr: &str, value: &str) -> Vec<NodeId> {
-    if value.is_empty() {
-        return filter_by_attr_exists(arena, nodes, attr);
-    }
-    nodes
-        .iter()
-        .filter(|&&id| {
-            arena
-                .attrs(id)
-                .iter()
-                .any(|a| a.name == attr && a.value.as_deref() == Some(value))
-        })
-        .copied()
-        .collect()
-}
-
-/// Filter nodes by attribute existence.
-fn filter_by_attr_exists(arena: &Arena, nodes: &[NodeId], attr: &str) -> Vec<NodeId> {
-    nodes
-        .iter()
-        .filter(|&&id| arena.attrs(id).iter().any(|a| a.name == attr))
-        .copied()
-        .collect()
-}
-
-/// Filter nodes by attribute contains (substring match).
-fn filter_by_contains(arena: &Arena, nodes: &[NodeId], attr: &str, substr: &str) -> Vec<NodeId> {
-    nodes
-        .iter()
-        .filter(|&&id| {
-            arena
-                .attrs(id)
-                .iter()
-                .any(|a| a.name == attr && a.value.as_ref().is_some_and(|v| v.contains(substr)))
-        })
-        .copied()
-        .collect()
 }
 
 /// Evaluate an absolute path from the root.
