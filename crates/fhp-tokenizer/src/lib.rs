@@ -22,7 +22,7 @@ pub mod entity;
 pub mod extract;
 /// Branchless state machine for token extraction.
 pub mod state_machine;
-/// Streaming (chunk-based) tokenizer.
+/// Streaming (chunk-based) tokenizer — see [`crate::streaming::StreamTokenizer`].
 pub mod streaming;
 /// Structural character indexer — SIMD-powered bitmask generation (stage 1).
 pub mod structural;

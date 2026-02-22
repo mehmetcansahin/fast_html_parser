@@ -1,6 +1,6 @@
 //! XPath expression parser.
 //!
-//! Parses a subset of XPath 1.0 into [`XPathExpr`] AST nodes.
+//! Parses a subset of XPath 1.0 into [`XPathExpr`](crate::xpath::ast::XPathExpr) AST nodes.
 //!
 //! # Supported syntax
 //!

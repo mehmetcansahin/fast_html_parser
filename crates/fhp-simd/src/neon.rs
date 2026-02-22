@@ -204,7 +204,7 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
 /// Produce a bitmask where bit `i` is set if `block[i] == byte`.
 ///
 /// Processes 16 bytes at a time using NEON `vceqq_u8`, then extracts
-/// a bitmask via [`neon_movemask`]. Handles blocks up to 64 bytes.
+/// a bitmask via an internal movemask helper. Handles blocks up to 64 bytes.
 ///
 /// # Safety
 ///

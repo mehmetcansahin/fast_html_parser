@@ -1,6 +1,6 @@
 //! Streaming (chunk-based) tokenizer.
 //!
-//! [`StreamTokenizer`] processes input in arbitrary-sized chunks, carrying
+//! [`StreamTokenizer`](crate::streaming::StreamTokenizer) processes input in arbitrary-sized chunks, carrying
 //! state across chunk boundaries. This enables parsing large files or
 //! network streams without loading the entire document into memory.
 

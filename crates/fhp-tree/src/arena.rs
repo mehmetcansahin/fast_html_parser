@@ -1,8 +1,8 @@
 //! Arena allocator for DOM nodes, text, and attributes.
 //!
-//! All nodes live in a single contiguous [`Vec<Node>`], giving cache-friendly
+//! All nodes live in a single contiguous `Vec<Node>`, giving cache-friendly
 //! traversal. Text content and attributes are stored in separate slabs,
-//! referenced by offset+length from each [`Node`].
+//! referenced by offset+length from each [`Node`](crate::node::Node).
 
 use std::borrow::Cow;
 

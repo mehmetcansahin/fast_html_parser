@@ -10,9 +10,9 @@
 //! - `//tag/text()` — text extraction
 //! - `..` — parent axis
 
-/// XPath expression AST types.
+/// XPath expression AST types — [`XPathExpr`](crate::xpath::ast::XPathExpr) and related enums.
 pub mod ast;
-/// XPath expression evaluator.
+/// XPath expression evaluator — walks the DOM matching an [`XPathExpr`](crate::xpath::ast::XPathExpr).
 pub mod eval;
-/// XPath expression parser.
+/// XPath expression parser — parses strings into [`XPathExpr`](crate::xpath::ast::XPathExpr) nodes.
 pub mod parser;
