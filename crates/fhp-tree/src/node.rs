@@ -1,6 +1,6 @@
 //! Cache-line aligned node layout and supporting types.
 //!
-//! Each [`Node`] occupies exactly 64 bytes (one cache line), split into a hot
+//! Each [`Node`](crate::node::Node) occupies exactly 64 bytes (one cache line), split into a hot
 //! first half (tree links, tag, depth) and a cold second half (attribute
 //! metadata, padding).
 

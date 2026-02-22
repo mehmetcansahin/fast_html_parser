@@ -14,18 +14,18 @@
 //! assert!(root.children().count() > 0);
 //! ```
 
-/// Arena allocator for nodes, text, and attributes.
+/// Arena allocator for [`Node`](crate::node::Node)s, text, and attributes.
 pub mod arena;
 /// Async HTML parser (requires `async-tokio` feature).
 #[cfg(feature = "async-tokio")]
 pub mod async_parser;
-/// Tree builder — token stream to DOM tree.
+/// Tree builder — converts a [`Token`](fhp_tokenizer::token::Token) stream into a DOM tree.
 pub mod builder;
-/// Cache-line aligned node layout.
+/// Cache-line aligned [`Node`](crate::node::Node) layout.
 pub mod node;
-/// Streaming and incremental parsing.
+/// Streaming and incremental parsing — [`StreamParser`](crate::streaming::StreamParser) and [`EarlyStopParser`](crate::streaming::EarlyStopParser).
 pub mod streaming;
-/// Allocation-free traversal iterators.
+/// Allocation-free traversal iterators (uses [`VecDeque`](std::collections::VecDeque) for BFS).
 pub mod traverse;
 
 use fhp_core::tag::Tag;

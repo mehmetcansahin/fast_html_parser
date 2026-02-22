@@ -1,11 +1,11 @@
 //! Streaming and incremental HTML parsing.
 //!
-//! [`StreamParser`] builds a DOM tree incrementally from byte chunks,
+//! [`StreamParser`](crate::streaming::StreamParser) builds a DOM tree incrementally from byte chunks,
 //! handling encoding detection automatically. It buffers the first 1 KB
 //! of input (matching the meta prescan limit) before detecting encoding,
 //! then decodes and tokenizes all data into the tree.
 //!
-//! [`EarlyStopParser`] adds predicate-based early termination — the parse
+//! [`EarlyStopParser`](crate::streaming::EarlyStopParser) adds predicate-based early termination — the parse
 //! stops as soon as a matching node is found, saving work on large documents.
 //!
 //! # Example

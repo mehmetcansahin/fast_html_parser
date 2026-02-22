@@ -1,6 +1,6 @@
 //! XPath expression evaluator.
 //!
-//! Walks the DOM tree and collects nodes or text matching an [`XPathExpr`].
+//! Walks the DOM tree and collects nodes or text matching an [`XPathExpr`](crate::xpath::ast::XPathExpr).
 
 use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;

@@ -2,7 +2,7 @@
 //!
 //! All iterators borrow the arena and produce [`NodeId`] values.
 //! [`DepthFirst`] and [`Children`] are fully allocation-free.
-//! [`BreadthFirst`] uses a [`VecDeque`] internally.
+//! [`BreadthFirst`] uses a [`VecDeque`](std::collections::VecDeque) internally.
 
 use std::collections::VecDeque;
 
