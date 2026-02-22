@@ -1,6 +1,6 @@
 //! Tree construction from a token stream.
 //!
-//! [`TreeBuilder`] consumes [`Token`]s and builds an arena-based DOM tree.
+//! [`TreeBuilder`](crate::builder::TreeBuilder) consumes [`Token`](fhp_tokenizer::token::Token)s and builds an arena-based DOM tree.
 //! It handles implicit close rules, void elements, and common malformed-HTML
 //! recovery strategies.
 
