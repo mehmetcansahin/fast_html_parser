@@ -93,12 +93,12 @@ The parser is organized as a workspace of focused crates:
 
 | Crate | Purpose |
 |---|---|
-| `hp-core` | Interned HTML tags (PHF), entity table, error types |
-| `hp-simd` | SIMD abstraction layer with runtime dispatch |
-| `hp-tokenizer` | Two-phase tokenizer (structural indexing + token extraction) |
-| `hp-tree` | Arena-based DOM tree with 64-byte aligned nodes |
-| `hp-selector` | CSS selector engine with bloom filter + XPath evaluator |
-| `hp-encoding` | Encoding detection and conversion via encoding_rs |
+| `fhp-core` | Interned HTML tags (PHF), entity table, error types |
+| `fhp-simd` | SIMD abstraction layer with runtime dispatch |
+| `fhp-tokenizer` | Two-phase tokenizer (structural indexing + token extraction) |
+| `fhp-tree` | Arena-based DOM tree with 64-byte aligned nodes |
+| `fhp-selector` | CSS selector engine with bloom filter + XPath evaluator |
+| `fhp-encoding` | Encoding detection and conversion via encoding_rs |
 | `fast-html-parser` | Facade crate that re-exports everything |
 
 ## Performance
