@@ -1,12 +1,12 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/hp-core",
-    "crates/hp-simd",
-    "crates/hp-tokenizer",
-    "crates/hp-tree",
-    "crates/hp-selector",
-    "crates/hp-encoding",
+    "crates/fhp-core",
+    "crates/fhp-simd",
+    "crates/fhp-tokenizer",
+    "crates/fhp-tree",
+    "crates/fhp-selector",
+    "crates/fhp-encoding",
     "crates/fast-html-parser",
 ]
 

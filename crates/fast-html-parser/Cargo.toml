@@ -11,18 +11,18 @@ categories = ["parser-implementations", "web-programming"]
 
 [features]
 default = ["css-selector", "entity-decode"]
-css-selector = ["dep:hp-selector"]
-xpath = ["dep:hp-selector", "css-selector"]
-encoding = ["dep:hp-encoding"]
-async-tokio = ["hp-tree/async-tokio"]
-entity-decode = ["hp-tree/entity-decode", "hp-tokenizer/entity-decode"]
+css-selector = ["dep:fhp-selector"]
+xpath = ["dep:fhp-selector", "css-selector"]
+encoding = ["dep:fhp-encoding"]
+async-tokio = ["fhp-tree/async-tokio"]
+entity-decode = ["fhp-tree/entity-decode", "fhp-tokenizer/entity-decode"]
 
 [dependencies]
-hp-core = { path = "../hp-core" }
-hp-tokenizer = { path = "../hp-tokenizer", default-features = false }
-hp-tree = { path = "../hp-tree", default-features = false }
-hp-selector = { path = "../hp-selector", optional = true }
-hp-encoding = { path = "../hp-encoding", optional = true }
+fhp-core = { path = "../fhp-core" }
+fhp-tokenizer = { path = "../fhp-tokenizer", default-features = false }
+fhp-tree = { path = "../fhp-tree", default-features = false }
+fhp-selector = { path = "../fhp-selector", optional = true }
+fhp-encoding = { path = "../fhp-encoding", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
