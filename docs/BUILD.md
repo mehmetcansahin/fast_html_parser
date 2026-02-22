@@ -86,16 +86,16 @@ Bu fazı eksiksiz implement et:
 
 1. WORKSPACE KURULUMU
    - Kök Cargo.toml → workspace members: ["crates/*"]
-   - crates/hp-core/ → lib.rs, error.rs (thiserror), tag.rs (interned Tag enum + PHF), entity.rs (PHF entity tablosu)
-   - crates/hp-simd/ → lib.rs, dispatch.rs, scalar.rs, sse42.rs, avx2.rs, neon.rs
+   - crates/fhp-core/ → lib.rs, error.rs (thiserror), tag.rs (interned Tag enum + PHF), entity.rs (PHF entity tablosu)
+   - crates/fhp-simd/ → lib.rs, dispatch.rs, scalar.rs, sse42.rs, avx2.rs, neon.rs
 
-2. hp-core CRATE
+2. fhp-core CRATE
    - Tag enum: bilinen HTML tag'leri u8 olarak, from_bytes() ile PHF lookup
    - Tag::is_void() → branchless bit check
    - EntityTable: &amp; → &, &lt; → < vb. PHF ile compile-time hash
    - HtmlError enum: thiserror ile
 
-3. hp-simd CRATE
+3. fhp-simd CRATE
    - SimdLevel enum: Scalar, Sse42, Avx2, Neon
    - detect() fonksiyonu: runtime CPUID kontrolü
    - SimdOps struct: function pointer dispatch (OnceLock ile lazy init)
@@ -172,10 +172,10 @@ docs/PLAN.md dosyasını oku, "Faz 1 — SIMD-Accelerated Tokenizer" bölümün�
 
 Faz 1'in ilk yarısını implement et — StructuralIndexer:
 
-1. crates/hp-tokenizer/ crate'ini oluştur, Cargo.toml'da hp-core ve hp-simd bağımlılığı ekle
+1. crates/fhp-tokenizer/ crate'ini oluştur, Cargo.toml'da fhp-core ve fhp-simd bağımlılığı ekle
 
 2. STRUCTURAL INDEXER (Aşama 1)
-   - StructuralIndexer struct: hp-simd dispatch kullanarak
+   - StructuralIndexer struct: fhp-simd dispatch kullanarak
    - index(&self, input: &[u8]) -> StructuralIndex
    - 64-byte bloklar halinde input'u tara
    - Her blok için bitmask üret: lt_mask, gt_mask, amp_mask, quot_mask
@@ -203,7 +203,7 @@ Faz 1'in ilk yarısını implement et — StructuralIndexer:
 ### Faz 1a Kontrol
 
 ```bash
-cargo test -p hp-tokenizer
+cargo test -p fhp-tokenizer
 git log --oneline -1
 ```
 
@@ -218,7 +218,7 @@ Aynı oturumda devam edebilirsin (`clauded --continue`) veya yeni oturum aç:
 ```
 docs/PLAN.md dosyasını oku, Faz 1 Aşama 2 bölümünü.
 
-Mevcut hp-tokenizer'daki StructuralIndexer üzerine token extraction'ı ekle:
+Mevcut fhp-tokenizer'daki StructuralIndexer üzerine token extraction'ı ekle:
 
 1. TOKEN TİPLERİ
    - Token<'a> enum: OpenTag, CloseTag, Attribute, Text, Comment, Doctype, CData
@@ -240,7 +240,7 @@ Mevcut hp-tokenizer'daki StructuralIndexer üzerine token extraction'ı ekle:
 4. ENTITY DECODING
    - decode_entities<'a>(input: &'a str) -> Cow<'a, str>
    - SIMD ile '&' varlık kontrolü — yoksa Cow::Borrowed döndür
-   - Varsa hp-core entity tablosundan decode → Cow::Owned
+   - Varsa fhp-core entity tablosundan decode → Cow::Owned
 
 5. STREAMING API
    - StreamTokenizer struct: state + residual buffer (ArrayVec<u8, 64>)
@@ -291,7 +291,7 @@ docs/PLAN.md dosyasını oku, "Faz 2 — Cache-Optimized Arena DOM Tree" bölüm
 
 Bu fazı eksiksiz implement et:
 
-1. crates/hp-tree/ crate'ini oluştur, hp-core ve hp-tokenizer bağımlılığı ekle
+1. crates/fhp-tree/ crate'ini oluştur, fhp-core ve fhp-tokenizer bağımlılığı ekle
 
 2. NODE LAYOUT (64-byte, cache-line aligned)
    - #[repr(C, align(64))] pub struct Node
@@ -389,7 +389,7 @@ docs/PLAN.md dosyasını oku, "Faz 3 — Selector Engine" bölümünü.
 
 CSS Selector kısmını implement et:
 
-1. crates/hp-selector/ crate'ini oluştur, hp-core ve hp-tree bağımlılığı ekle
+1. crates/fhp-selector/ crate'ini oluştur, fhp-core ve fhp-tree bağımlılığı ekle
 
 2. CSS SELECTOR PARSER
    - Selector string → SelectorAST parse
@@ -448,7 +448,7 @@ Aynı oturumda veya yeni oturumda:
 ```
 docs/PLAN.md dosyasını oku, Faz 3 XPath kısmını.
 
-Mevcut hp-selector crate'ine XPath desteği ekle:
+Mevcut fhp-selector crate'ine XPath desteği ekle:
 
 1. XPATH PARSER
    - XPath string → XPathExpr AST
@@ -481,7 +481,7 @@ Mevcut hp-selector crate'ine XPath desteği ekle:
 ### Faz 3 Kontrol
 
 ```bash
-cargo test -p hp-selector
+cargo test -p fhp-selector
 git tag faz-3-complete
 ```
 
@@ -500,7 +500,7 @@ docs/PLAN.md dosyasını oku, "Faz 4 — Encoding Katmanı" bölümünü.
 
 Bu fazı implement et:
 
-1. crates/hp-encoding/ crate'ini oluştur, encoding_rs bağımlılığı ekle
+1. crates/fhp-encoding/ crate'ini oluştur, encoding_rs bağımlılığı ekle
 
 2. ENCODING DETECTION
    - detect(input: &[u8]) -> &'static Encoding
@@ -516,7 +516,7 @@ Bu fazı implement et:
    - Streaming variant: DecodingReader wrap (chunk-based decode)
 
 4. PARSER ENTEGRASYONU
-   - fast-html-parser (henüz yok ama hp-tree'deki parse fonksiyonunu güncelle):
+   - fast-html-parser (henüz yok ama fhp-tree'deki parse fonksiyonunu güncelle):
      raw bytes → encoding detect → UTF-8'e çevir → tokenize → tree build
    - from_bytes(input: &[u8]) -> Result<Document, HtmlError>
 
@@ -536,7 +536,7 @@ Bu fazı implement et:
 ### Faz 4 Kontrol
 
 ```bash
-cargo test -p hp-encoding
+cargo test -p fhp-encoding
 git tag faz-4-complete
 ```
 
@@ -555,7 +555,7 @@ docs/PLAN.md dosyasını oku, "Faz 5 — Async + Streaming Entegrasyonu" bölüm
 
 Bu fazı implement et:
 
-1. FEATURE FLAGS (hp-tree ve hp-tokenizer Cargo.toml'larına ekle)
+1. FEATURE FLAGS (fhp-tree ve fhp-tokenizer Cargo.toml'larına ekle)
    - async-tokio = ["dep:tokio"]
    - async-async-std = ["dep:async-std"]
 
@@ -632,8 +632,8 @@ Son fazı implement et:
    simd = []
    css-selector = []
    xpath = []
-   encoding = ["dep:hp-encoding"]
-   async-tokio = ["hp-tree/async-tokio"]
+   encoding = ["dep:fhp-encoding"]
+   async-tokio = ["fhp-tree/async-tokio"]
    entity-decode = []
 
 3. EXAMPLES

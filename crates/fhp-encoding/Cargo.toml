@@ -1,0 +1,15 @@
+[package]
+name = "fhp-encoding"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Encoding detection and conversion for the HTML parser"
+repository = "https://github.com/nicatdcw/fast-html-parser"
+keywords = ["encoding", "html", "charset", "utf8"]
+categories = ["encoding"]
+
+[dependencies]
+fhp-core = { path = "../fhp-core" }
+encoding_rs = { workspace = true }
+thiserror = { workspace = true }

@@ -39,13 +39,13 @@
 html-parser/
 ├── Cargo.toml                      # [workspace]
 ├── crates/
-│   ├── hp-core/                    # Ortak tipler, interned tags, entity tablosu
+│   ├── fhp-core/                    # Ortak tipler, interned tags, entity tablosu
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── tag.rs              # Interned tag enum (u8 → tag mapping)
 │   │       ├── entity.rs           # PHF entity tablosu
 │   │       └── error.rs
-│   ├── hp-simd/                    # SIMD abstraksiyon katmanı
+│   ├── fhp-simd/                    # SIMD abstraksiyon katmanı
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── dispatch.rs         # Runtime feature detection + dispatch
@@ -53,21 +53,21 @@ html-parser/
 │   │       ├── sse42.rs            # SSE4.2 intrinsics
 │   │       ├── avx2.rs             # AVX2 intrinsics
 │   │       └── neon.rs             # ARM NEON intrinsics
-│   ├── hp-tokenizer/               # SIMD-accelerated tokenizer
+│   ├── fhp-tokenizer/               # SIMD-accelerated tokenizer
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── scanner.rs          # SIMD byte scanner
 │   │       ├── state_machine.rs    # Branchless state transitions
 │   │       ├── token.rs            # Token tipleri
 │   │       └── streaming.rs        # Chunk-based feed API
-│   ├── hp-tree/                    # Arena-based DOM tree
+│   ├── fhp-tree/                    # Arena-based DOM tree
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── arena.rs            # Cache-aligned arena allocator
 │   │       ├── node.rs             # Flat node layout
 │   │       ├── builder.rs          # Tree construction
 │   │       └── traverse.rs         # Iterator'lar
-│   ├── hp-selector/                # CSS selector + XPath engine
+│   ├── fhp-selector/                # CSS selector + XPath engine
 │   │   └── src/
 │   │       ├── lib.rs
 │   │       ├── css/
@@ -77,7 +77,7 @@ html-parser/
 │   │       └── xpath/
 │   │           ├── parser.rs
 │   │           └── eval.rs
-│   ├── hp-encoding/                # Encoding detection + dönüşüm
+│   ├── fhp-encoding/                # Encoding detection + dönüşüm
 │   └── fast-html-parser/          # Facade crate
 │       └── src/
 │           ├── lib.rs              # Public API
@@ -106,7 +106,7 @@ Tüm pipeline buna bağlı. Önce bu yazılmalı.
 ### 0.1 Runtime Feature Detection + Dispatch
 
 ```rust
-// hp-simd/src/dispatch.rs
+// fhp-simd/src/dispatch.rs
 
 /// Desteklenen SIMD seviyesi
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -385,7 +385,7 @@ struct Transition {
 String karşılaştırma yerine `u8` karşılaştırma — 10-50x daha hızlı:
 
 ```rust
-// hp-core/src/tag.rs
+// fhp-core/src/tag.rs
 
 /// Bilinen HTML tag'leri. u8 olarak saklanır → comparison tek instruction.
 #[repr(u8)]
@@ -796,7 +796,7 @@ impl EarlyStopParser<'_> {
 default = ["css-selector", "entity-decode"]
 simd = []                                   # SIMD acceleration (runtime dispatch)
 css-selector = []
-xpath = ["dep:hp-selector"]
+xpath = ["dep:fhp-selector"]
 encoding = ["dep:encoding_rs"]
 async-tokio = ["dep:tokio"]
 async-async-std = ["dep:async-std"]
@@ -874,7 +874,7 @@ fn bench_tokenize(c: &mut Criterion) {
 
 | Risk | Etki | Azaltma |
 |---|---|---|
-| SIMD portability karmaşıklığı | 3 backend maintain etmek zor | `hp-simd` crate'ini iyi soyutla; her backend aynı trait'i impl etsin |
+| SIMD portability karmaşıklığı | 3 backend maintain etmek zor | `fhp-simd` crate'ini iyi soyutla; her backend aynı trait'i impl etsin |
 | Bozuk HTML edge case'leri | Sonsuz çeşitlilik | Fuzzing + gerçek site HTML'leriyle sürekli test |
 | Zero-copy lifetime karmaşıklığı | API ergonomisi düşer | `OwnedDocument` varyantı sun, `Cow` kullan |
 | XPath scope creep | Süre uzar | Baştan alt küme tanımla, v2'ye bırak |

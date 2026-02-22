@@ -1,0 +1,22 @@
+[package]
+name = "fhp-selector"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "CSS selector engine for the HTML parser"
+repository = "https://github.com/nicatdcw/fast-html-parser"
+keywords = ["css", "selector", "xpath", "html"]
+categories = ["parser-implementations", "web-programming"]
+
+[dependencies]
+fhp-core = { path = "../fhp-core" }
+fhp-tree = { path = "../fhp-tree" }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "selector_bench"
+harness = false

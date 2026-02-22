@@ -60,26 +60,26 @@
 // ---------------------------------------------------------------------------
 
 /// Core types: interned tags, entity table, error definitions.
-pub use hp_core as core_types;
+pub use fhp_core as core_types;
 
 /// Interned HTML tag enum.
-pub use hp_core::tag::Tag;
+pub use fhp_core::tag::Tag;
 
 /// Tokenizer (low-level).
-pub use hp_tokenizer as tokenizer;
+pub use fhp_tokenizer as tokenizer;
 
 /// DOM tree types.
-pub use hp_tree as tree;
+pub use fhp_tree as tree;
 
 /// Parsed document and node reference.
-pub use hp_tree::{Document, HtmlError, NodeRef};
+pub use fhp_tree::{Document, HtmlError, NodeRef};
 
 /// Node identity type.
-pub use hp_tree::node::NodeId;
+pub use fhp_tree::node::NodeId;
 
 /// Streaming and incremental parsing.
 pub mod streaming {
-    pub use hp_tree::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
+    pub use fhp_tree::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
 }
 
 // ---------------------------------------------------------------------------
@@ -88,24 +88,24 @@ pub mod streaming {
 
 /// CSS selector and XPath engine.
 #[cfg(any(feature = "css-selector", feature = "xpath"))]
-pub use hp_selector::{DocumentIndex, Selectable, Selection};
+pub use fhp_selector::{DocumentIndex, Selectable, Selection};
 
 /// XPath types (re-exported from selector crate).
 #[cfg(feature = "xpath")]
 pub mod xpath {
-    pub use hp_selector::xpath::ast::XPathResult;
+    pub use fhp_selector::xpath::ast::XPathResult;
 }
 
 /// Encoding detection and conversion.
 #[cfg(feature = "encoding")]
 pub mod encoding {
-    pub use hp_encoding::{Encoding, decode, decode_or_detect, detect};
+    pub use fhp_encoding::{Encoding, decode, decode_or_detect, detect};
 }
 
 /// Async parser (requires `async-tokio` feature).
 #[cfg(feature = "async-tokio")]
 pub mod async_parser {
-    pub use hp_tree::async_parser::{AsyncParser, parse_async};
+    pub use fhp_tree::async_parser::{AsyncParser, parse_async};
 }
 
 // ---------------------------------------------------------------------------
@@ -118,11 +118,11 @@ pub mod async_parser {
 /// use fast_html_parser::prelude::*;
 /// ```
 pub mod prelude {
-    pub use hp_tree::node::NodeId;
-    pub use hp_tree::{Document, HtmlError, NodeRef};
+    pub use fhp_tree::node::NodeId;
+    pub use fhp_tree::{Document, HtmlError, NodeRef};
 
     #[cfg(any(feature = "css-selector", feature = "xpath"))]
-    pub use hp_selector::{Selectable, Selection};
+    pub use fhp_selector::{Selectable, Selection};
 
     pub use crate::HtmlParser;
 }
@@ -225,7 +225,7 @@ impl HtmlParser {
 
     /// Parse an HTML string with default settings.
     ///
-    /// This is a convenience wrapper around `hp_tree::parse()`.
+    /// This is a convenience wrapper around `fhp_tree::parse()`.
     ///
     /// # Errors
     ///
@@ -240,7 +240,7 @@ impl HtmlParser {
     /// assert_eq!(doc.root().text_content(), "Hello");
     /// ```
     pub fn parse(input: &str) -> Result<Document, HtmlError> {
-        hp_tree::parse(input)
+        fhp_tree::parse(input)
     }
 
     /// Parse raw bytes with default settings, auto-detecting encoding.
@@ -259,7 +259,7 @@ impl HtmlParser {
     /// assert_eq!(doc.root().text_content(), "Hello");
     /// ```
     pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
-        hp_tree::parse_bytes(input)
+        fhp_tree::parse_bytes(input)
     }
 
     /// Parse an HTML string with the current configuration.
@@ -275,7 +275,7 @@ impl HtmlParser {
                 max: self.max_input_size,
             });
         }
-        hp_tree::parse(input)
+        fhp_tree::parse(input)
     }
 
     /// Parse raw bytes with the current configuration, auto-detecting encoding.
@@ -291,7 +291,7 @@ impl HtmlParser {
                 max: self.max_input_size,
             });
         }
-        hp_tree::parse_bytes(input)
+        fhp_tree::parse_bytes(input)
     }
 }
 
