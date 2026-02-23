@@ -17,6 +17,9 @@ Thumbs.db
 lcov.info
 coverage/
 
+# Docs
+/docs/
+
 # Misc
 .env
 *.bak
