@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! # fast-html-parser — SIMD-Optimized HTML Parser
 //!
 //! A high-performance HTML parser designed for web scraping workloads.
@@ -88,22 +89,26 @@ pub mod streaming {
 
 /// CSS selector and XPath engine.
 #[cfg(any(feature = "css-selector", feature = "xpath"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "css-selector", feature = "xpath"))))]
 pub use fhp_selector::{DocumentIndex, Selectable, Selection};
 
 /// XPath types (re-exported from selector crate).
 #[cfg(feature = "xpath")]
+#[cfg_attr(docsrs, doc(cfg(feature = "xpath")))]
 pub mod xpath {
     pub use fhp_selector::xpath::ast::XPathResult;
 }
 
 /// Encoding detection and conversion.
 #[cfg(feature = "encoding")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub mod encoding {
     pub use fhp_encoding::{Encoding, decode, decode_or_detect, detect};
 }
 
 /// Async parser (requires `async-tokio` feature).
 #[cfg(feature = "async-tokio")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async-tokio")))]
 pub mod async_parser {
     pub use fhp_tree::async_parser::{AsyncParser, parse_async};
 }
@@ -122,6 +127,7 @@ pub mod prelude {
     pub use fhp_tree::{Document, HtmlError, NodeRef};
 
     #[cfg(any(feature = "css-selector", feature = "xpath"))]
+    #[cfg_attr(docsrs, doc(cfg(any(feature = "css-selector", feature = "xpath"))))]
     pub use fhp_selector::{Selectable, Selection};
 
     pub use crate::HtmlParser;
