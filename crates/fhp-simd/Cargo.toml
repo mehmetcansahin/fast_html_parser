@@ -8,11 +8,11 @@ description = "SIMD abstraction layer with runtime dispatch for the HTML parser"
 homepage.workspace = true
 repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-simd"
-keywords = ["simd", "html", "parser"]
+keywords = ["simd", "html", "parser", "neon", "avx2"]
 categories = ["algorithms"]
 
 [dependencies]
-fhp-core = { path = "../fhp-core" }
+fhp-core = { version = "0.1", path = "../fhp-core" }
 
 [dev-dependencies]
 criterion = { workspace = true }

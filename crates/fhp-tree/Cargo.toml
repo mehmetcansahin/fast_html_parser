@@ -8,7 +8,7 @@ description = "Cache-optimized arena-based DOM tree for the HTML parser"
 homepage.workspace = true
 repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-tree"
-keywords = ["html", "dom", "parser", "arena"]
+keywords = ["html", "dom", "parser", "arena", "tree"]
 categories = ["parser-implementations"]
 
 [features]
@@ -18,9 +18,9 @@ async-tokio = ["dep:tokio"]
 async-async-std = ["dep:async-std"]
 
 [dependencies]
-fhp-core = { path = "../fhp-core" }
-fhp-encoding = { path = "../fhp-encoding" }
-fhp-tokenizer = { path = "../fhp-tokenizer", default-features = false }
+fhp-core = { version = "0.1", path = "../fhp-core" }
+fhp-encoding = { version = "0.1", path = "../fhp-encoding" }
+fhp-tokenizer = { version = "0.1", path = "../fhp-tokenizer", default-features = false }
 thiserror = { workspace = true }
 encoding_rs = { workspace = true }
 tokio = { workspace = true, features = ["io-util"], optional = true }

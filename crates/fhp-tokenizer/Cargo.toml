@@ -8,7 +8,7 @@ description = "SIMD-accelerated HTML tokenizer with structural indexing"
 homepage.workspace = true
 repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-tokenizer"
-keywords = ["html", "tokenizer", "simd"]
+keywords = ["html", "tokenizer", "simd", "parser", "lexer"]
 categories = ["parser-implementations"]
 
 [features]
@@ -18,8 +18,8 @@ async-tokio = []
 async-async-std = []
 
 [dependencies]
-fhp-core = { path = "../fhp-core" }
-fhp-simd = { path = "../fhp-simd" }
+fhp-core = { version = "0.1", path = "../fhp-core" }
+fhp-simd = { version = "0.1", path = "../fhp-simd" }
 
 [dev-dependencies]
 criterion = { workspace = true }
