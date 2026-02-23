@@ -228,6 +228,16 @@ impl Tag {
         (self as u8) < VOID_COUNT
     }
 
+    /// Returns `true` if this is a raw text element (`<script>`, `<style>`).
+    ///
+    /// Raw text elements' content must not be entity-escaped during
+    /// serialization, and the tokenizer enters a special raw-text mode for
+    /// them.
+    #[inline(always)]
+    pub const fn is_raw_text(self) -> bool {
+        matches!(self, Tag::Script | Tag::Style)
+    }
+
     /// Returns the canonical lowercase tag name, or `None` for [`Tag::Unknown`].
     #[inline]
     pub const fn as_str(self) -> Option<&'static str> {
@@ -361,6 +371,16 @@ mod tests {
     fn tag_display() {
         assert_eq!(Tag::Div.to_string(), "div");
         assert_eq!(Tag::Unknown.to_string(), "(unknown)");
+    }
+
+    #[test]
+    fn raw_text_elements() {
+        assert!(Tag::Script.is_raw_text());
+        assert!(Tag::Style.is_raw_text());
+        assert!(!Tag::Div.is_raw_text());
+        assert!(!Tag::Textarea.is_raw_text());
+        assert!(!Tag::Title.is_raw_text());
+        assert!(!Tag::Unknown.is_raw_text());
     }
 
     #[test]
