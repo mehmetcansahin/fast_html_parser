@@ -49,6 +49,75 @@ pub fn decode_numeric(digits: &str, is_hex: bool) -> Option<char> {
     char::from_u32(codepoint)
 }
 
+/// Escape HTML text content: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`.
+///
+/// Writes the escaped output into `out`. Unescaped segments are flushed in
+/// bulk for performance — only special characters cause a pause.
+///
+/// # Examples
+///
+/// ```
+/// use fhp_core::entity::escape_text;
+///
+/// let mut buf = String::new();
+/// escape_text("1 < 2 & 3 > 0", &mut buf);
+/// assert_eq!(buf, "1 &lt; 2 &amp; 3 &gt; 0");
+/// ```
+pub fn escape_text(input: &str, out: &mut String) {
+    let bytes = input.as_bytes();
+    let mut last = 0;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        let replacement = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            _ => continue,
+        };
+
+        out.push_str(&input[last..i]);
+        out.push_str(replacement);
+        last = i + 1;
+    }
+
+    out.push_str(&input[last..]);
+}
+
+/// Escape HTML attribute values: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`.
+///
+/// Writes the escaped output into `out`. Like [`escape_text`], unescaped
+/// segments are flushed in bulk.
+///
+/// # Examples
+///
+/// ```
+/// use fhp_core::entity::escape_attr;
+///
+/// let mut buf = String::new();
+/// escape_attr("x&y=\"z\"", &mut buf);
+/// assert_eq!(buf, "x&amp;y=&quot;z&quot;");
+/// ```
+pub fn escape_attr(input: &str, out: &mut String) {
+    let bytes = input.as_bytes();
+    let mut last = 0;
+
+    for (i, &b) in bytes.iter().enumerate() {
+        let replacement = match b {
+            b'&' => "&amp;",
+            b'<' => "&lt;",
+            b'>' => "&gt;",
+            b'"' => "&quot;",
+            _ => continue,
+        };
+
+        out.push_str(&input[last..i]);
+        out.push_str(replacement);
+        last = i + 1;
+    }
+
+    out.push_str(&input[last..]);
+}
+
 /// Compile-time perfect-hash map of the most common HTML named entities.
 ///
 /// This covers the ~250 most-used entities. The full HTML5 spec defines
@@ -376,5 +445,80 @@ mod tests {
         assert_eq!(decode_named("mdash"), Some("\u{2014}"));
         assert_eq!(decode_named("euro"), Some("\u{20AC}"));
         assert_eq!(decode_named("trade"), Some("\u{2122}"));
+    }
+
+    // ---- escape_text tests ----
+
+    #[test]
+    fn escape_text_special_chars() {
+        let mut buf = String::new();
+        escape_text("&", &mut buf);
+        assert_eq!(buf, "&amp;");
+
+        buf.clear();
+        escape_text("<", &mut buf);
+        assert_eq!(buf, "&lt;");
+
+        buf.clear();
+        escape_text(">", &mut buf);
+        assert_eq!(buf, "&gt;");
+    }
+
+    #[test]
+    fn escape_text_mixed() {
+        let mut buf = String::new();
+        escape_text("1 < 2 & 3 > 0", &mut buf);
+        assert_eq!(buf, "1 &lt; 2 &amp; 3 &gt; 0");
+    }
+
+    #[test]
+    fn escape_text_plain() {
+        let mut buf = String::new();
+        escape_text("hello world", &mut buf);
+        assert_eq!(buf, "hello world");
+    }
+
+    #[test]
+    fn escape_text_empty() {
+        let mut buf = String::new();
+        escape_text("", &mut buf);
+        assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn escape_text_all_special() {
+        let mut buf = String::new();
+        escape_text("&<>", &mut buf);
+        assert_eq!(buf, "&amp;&lt;&gt;");
+    }
+
+    // ---- escape_attr tests ----
+
+    #[test]
+    fn escape_attr_quote() {
+        let mut buf = String::new();
+        escape_attr("say \"hello\"", &mut buf);
+        assert_eq!(buf, "say &quot;hello&quot;");
+    }
+
+    #[test]
+    fn escape_attr_mixed() {
+        let mut buf = String::new();
+        escape_attr("x&y=\"z\"", &mut buf);
+        assert_eq!(buf, "x&amp;y=&quot;z&quot;");
+    }
+
+    #[test]
+    fn escape_attr_plain() {
+        let mut buf = String::new();
+        escape_attr("plain", &mut buf);
+        assert_eq!(buf, "plain");
+    }
+
+    #[test]
+    fn escape_attr_empty() {
+        let mut buf = String::new();
+        escape_attr("", &mut buf);
+        assert_eq!(buf, "");
     }
 }

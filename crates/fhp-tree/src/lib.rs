@@ -163,6 +163,24 @@ impl Document {
         &self.arena
     }
 
+    /// Serialize the entire document back to an HTML string.
+    ///
+    /// This produces the outer HTML of the root node, which includes all
+    /// children with proper entity escaping for text and attribute values.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fhp_tree::parse;
+    ///
+    /// let doc = parse("<p>Hello &amp; world</p>").unwrap();
+    /// let html = doc.to_html();
+    /// assert!(html.contains("&amp;"));
+    /// ```
+    pub fn to_html(&self) -> String {
+        self.root().outer_html()
+    }
+
     /// Total number of nodes in the document.
     pub fn node_count(&self) -> usize {
         self.arena.len()
@@ -301,7 +319,20 @@ impl<'a> NodeRef<'a> {
         let node = self.arena.get(self.id);
 
         if node.flags.has(NodeFlags::IS_TEXT) {
-            out.push_str(self.arena.text(self.id));
+            let text = self.arena.text(self.id);
+            // Script/style children must not be escaped (raw text per HTML spec).
+            let parent_id = node.parent;
+            let is_raw_text = if !parent_id.is_null() {
+                let parent_tag = self.arena.get(parent_id).tag;
+                matches!(parent_tag, Tag::Script | Tag::Style)
+            } else {
+                false
+            };
+            if is_raw_text {
+                out.push_str(text);
+            } else {
+                fhp_core::entity::escape_text(text, out);
+            }
             return;
         }
 
@@ -338,13 +369,13 @@ impl<'a> NodeRef<'a> {
                     out.push_str(&attr.name);
                     if let Some(ref val) = attr.value {
                         out.push_str("=\"");
-                        out.push_str(val);
+                        fhp_core::entity::escape_attr(val, out);
                         out.push('"');
                     }
                 }
 
                 if node.flags.has(NodeFlags::IS_VOID) {
-                    out.push_str(" />");
+                    out.push('>');
                     return;
                 }
                 out.push('>');
@@ -681,8 +712,7 @@ mod tests {
         let root = doc.root();
         let br = root.first_child().unwrap();
         let html = br.outer_html();
-        assert!(html.contains("br"), "outer: {html}");
-        assert!(html.contains("/>"), "outer: {html}");
+        assert_eq!(html, "<br>", "outer: {html}");
     }
 
     #[test]
@@ -733,5 +763,112 @@ mod tests {
     fn parse_bytes_empty() {
         let doc = parse_bytes(b"").unwrap();
         assert!(!doc.root().has_children());
+    }
+
+    // ---- serialization / escaping tests ----
+
+    #[test]
+    fn text_escaping_in_inner_html() {
+        // Input uses entities; parser decodes them; serializer must re-encode.
+        let doc = parse("<p>1 &lt; 2 &amp; 3 &gt; 0</p>").unwrap();
+        let p = doc.root().first_child().unwrap();
+        assert_eq!(p.text_content(), "1 < 2 & 3 > 0");
+        let inner = p.inner_html();
+        assert_eq!(inner, "1 &lt; 2 &amp; 3 &gt; 0");
+    }
+
+    #[test]
+    fn attr_escaping_in_outer_html() {
+        let doc = parse("<a href=\"x&y\">link</a>").unwrap();
+        let a = doc.root().first_child().unwrap();
+        let outer = a.outer_html();
+        assert!(
+            outer.contains("x&amp;y"),
+            "attribute value should be escaped: {outer}"
+        );
+    }
+
+    #[test]
+    fn script_raw_text_not_escaped() {
+        let doc = parse("<script>if (a < b && c > d) {}</script>").unwrap();
+        let script = doc.root().first_child().unwrap();
+        let inner = script.inner_html();
+        assert_eq!(inner, "if (a < b && c > d) {}");
+    }
+
+    #[test]
+    fn style_raw_text_not_escaped() {
+        let doc = parse("<style>a > b { color: red; }</style>").unwrap();
+        let style = doc.root().first_child().unwrap();
+        let inner = style.inner_html();
+        assert_eq!(inner, "a > b { color: red; }");
+    }
+
+    #[test]
+    fn void_elements_no_closing_slash() {
+        let doc = parse("<div><br><img src=\"x.png\"><hr></div>").unwrap();
+        let div = doc.root().first_child().unwrap();
+        let inner = div.inner_html();
+        assert!(inner.contains("<br>"), "br: {inner}");
+        assert!(inner.contains("<img "), "img: {inner}");
+        assert!(inner.contains("<hr>"), "hr: {inner}");
+        assert!(!inner.contains("/>"), "should not contain />: {inner}");
+    }
+
+    #[test]
+    fn comment_not_escaped() {
+        let doc = parse("<!-- <b>not bold</b> & stuff -->").unwrap();
+        let html = doc.to_html();
+        assert!(
+            html.contains("<!-- <b>not bold</b> & stuff -->"),
+            "comment should be verbatim: {html}"
+        );
+    }
+
+    #[test]
+    fn doctype_not_escaped() {
+        let doc = parse("<!DOCTYPE html><p>ok</p>").unwrap();
+        let html = doc.to_html();
+        assert!(
+            html.contains("<!DOCTYPE html>"),
+            "doctype should be verbatim: {html}"
+        );
+    }
+
+    #[test]
+    fn document_to_html() {
+        let doc = parse("<!DOCTYPE html><html><body><p>Hello</p></body></html>").unwrap();
+        let html = doc.to_html();
+        assert!(html.contains("<!DOCTYPE html>"), "html: {html}");
+        assert!(html.contains("<p>Hello</p>"), "html: {html}");
+    }
+
+    #[test]
+    fn round_trip_structure() {
+        let input = "<div><p>Hello</p><span>World</span></div>";
+        let doc1 = parse(input).unwrap();
+        let html = doc1.to_html();
+        let doc2 = parse(&html).unwrap();
+        assert_eq!(doc1.root().text_content(), doc2.root().text_content());
+        assert_eq!(doc1.node_count(), doc2.node_count());
+    }
+
+    #[test]
+    fn round_trip_with_special_chars() {
+        let input = "<p>1 &lt; 2 &amp; 3 &gt; 0</p>";
+        let doc1 = parse(input).unwrap();
+        assert_eq!(doc1.root().text_content(), "1 < 2 & 3 > 0");
+
+        let html = doc1.to_html();
+        let doc2 = parse(&html).unwrap();
+        assert_eq!(doc2.root().text_content(), "1 < 2 & 3 > 0");
+    }
+
+    #[test]
+    fn unknown_tag_preserved_in_to_html() {
+        let doc = parse("<my-widget>content</my-widget>").unwrap();
+        let html = doc.to_html();
+        assert!(html.contains("<my-widget>"), "html: {html}");
+        assert!(html.contains("</my-widget>"), "html: {html}");
     }
 }
