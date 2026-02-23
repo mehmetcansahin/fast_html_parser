@@ -1,7 +1,7 @@
 # HTML Parser — SIMD-Optimized
 
 ## Proje Planı
-Detaylı plan: docs/PLAN.md dosyasında. Her faz için bu plana sadık kal.
+Tüm fazlar tamamlandı. Proje yayın aşamasında.
 
 ## Kurallar
 - Rust edition 2024 kullan
