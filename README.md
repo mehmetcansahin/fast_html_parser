@@ -1,5 +1,11 @@
 # fast-html-parser
 
+[![CI](https://github.com/nicatdcw/fast-html-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/nicatdcw/fast-html-parser/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/fast-html-parser.svg)](https://crates.io/crates/fast-html-parser)
+[![docs.rs](https://docs.rs/fast-html-parser/badge.svg)](https://docs.rs/fast-html-parser)
+[![License](https://img.shields.io/crates/l/fast-html-parser.svg)](LICENSE-MIT)
+[![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
+
 SIMD-optimized HTML parser for Rust, built for web scraping workloads.
 
 Uses SIMD instructions (SSE4.2, AVX2, NEON) for tokenization and builds a cache-line aligned arena-based DOM tree for fast traversal.
@@ -134,4 +140,13 @@ cargo run --example encoding --features encoding
 
 ## License
 
-Licensed under [MIT License](LICENSE-MIT).
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or http://www.apache.org/licenses/LICENSE-2.0)
+- MIT License ([LICENSE-MIT](LICENSE-MIT) or http://opensource.org/licenses/MIT)
+
+at your option.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in the work by you, as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.

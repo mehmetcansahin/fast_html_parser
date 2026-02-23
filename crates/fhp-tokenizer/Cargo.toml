@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "SIMD-accelerated HTML tokenizer with structural indexing"
+homepage.workspace = true
 repository = "https://github.com/nicatdcw/fast-html-parser"
+documentation = "https://docs.rs/fhp-tokenizer"
 keywords = ["html", "tokenizer", "simd"]
 categories = ["parser-implementations"]
 

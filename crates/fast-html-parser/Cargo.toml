@@ -5,7 +5,10 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 description = "SIMD-optimized HTML parser for web scraping — fast tokenization, CSS selectors, XPath, encoding detection"
+homepage.workspace = true
 repository = "https://github.com/nicatdcw/fast-html-parser"
+documentation = "https://docs.rs/fast-html-parser"
+readme = "../../README.md"
 keywords = ["html", "parser", "simd", "web-scraping", "css-selector"]
 categories = ["parser-implementations", "web-programming"]
 
@@ -49,3 +52,7 @@ required-features = ["xpath"]
 [[example]]
 name = "encoding"
 required-features = ["encoding"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
