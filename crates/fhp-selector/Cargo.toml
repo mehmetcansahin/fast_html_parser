@@ -8,12 +8,12 @@ description = "CSS selector engine for the HTML parser"
 homepage.workspace = true
 repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-selector"
-keywords = ["css", "selector", "xpath", "html"]
+keywords = ["css", "selector", "xpath", "html", "parser"]
 categories = ["parser-implementations", "web-programming"]
 
 [dependencies]
-fhp-core = { path = "../fhp-core" }
-fhp-tree = { path = "../fhp-tree" }
+fhp-core = { version = "0.1", path = "../fhp-core" }
+fhp-tree = { version = "0.1", path = "../fhp-tree" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

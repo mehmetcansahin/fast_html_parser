@@ -8,7 +8,7 @@ description = "Core types for the HTML parser: interned tags, entity table, erro
 homepage.workspace = true
 repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-core"
-keywords = ["html", "parser", "core"]
+keywords = ["html", "parser", "core", "tags", "entities"]
 categories = ["parser-implementations"]
 
 [dependencies]
