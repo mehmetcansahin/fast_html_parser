@@ -20,6 +20,9 @@ coverage/
 # Docs
 /docs/
 
+# Claude
+.claude/
+
 # Misc
 .env
 *.bak
