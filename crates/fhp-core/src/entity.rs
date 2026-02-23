@@ -63,27 +63,12 @@ pub fn decode_numeric(digits: &str, is_hex: bool) -> Option<char> {
 /// escape_text("1 < 2 & 3 > 0", &mut buf);
 /// assert_eq!(buf, "1 &lt; 2 &amp; 3 &gt; 0");
 /// ```
+#[inline]
 pub fn escape_text(input: &str, out: &mut String) {
-    let bytes = input.as_bytes();
-    let mut last = 0;
-
-    for (i, &b) in bytes.iter().enumerate() {
-        let replacement = match b {
-            b'&' => "&amp;",
-            b'<' => "&lt;",
-            b'>' => "&gt;",
-            _ => continue,
-        };
-
-        out.push_str(&input[last..i]);
-        out.push_str(replacement);
-        last = i + 1;
-    }
-
-    out.push_str(&input[last..]);
+    escape_impl::<false>(input, out);
 }
 
-/// Escape HTML attribute values: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`.
+/// Escape HTML attribute values: `&` → `&amp;`, `<` → `&lt;`, `>` → `&gt;`, `"` → `&quot;`, `'` → `&#39;`.
 ///
 /// Writes the escaped output into `out`. Like [`escape_text`], unescaped
 /// segments are flushed in bulk.
@@ -97,7 +82,17 @@ pub fn escape_text(input: &str, out: &mut String) {
 /// escape_attr("x&y=\"z\"", &mut buf);
 /// assert_eq!(buf, "x&amp;y=&quot;z&quot;");
 /// ```
+#[inline]
 pub fn escape_attr(input: &str, out: &mut String) {
+    escape_impl::<true>(input, out);
+}
+
+/// Shared escape implementation. When `ESCAPE_QUOTES` is true, `"` and `'`
+/// are also escaped (for attribute values).
+#[inline(always)]
+fn escape_impl<const ESCAPE_QUOTES: bool>(input: &str, out: &mut String) {
+    out.reserve(input.len());
+
     let bytes = input.as_bytes();
     let mut last = 0;
 
@@ -106,7 +101,8 @@ pub fn escape_attr(input: &str, out: &mut String) {
             b'&' => "&amp;",
             b'<' => "&lt;",
             b'>' => "&gt;",
-            b'"' => "&quot;",
+            b'"' if ESCAPE_QUOTES => "&quot;",
+            b'\'' if ESCAPE_QUOTES => "&#39;",
             _ => continue,
         };
 
@@ -516,9 +512,23 @@ mod tests {
     }
 
     #[test]
+    fn escape_attr_single_quote() {
+        let mut buf = String::new();
+        escape_attr("it's", &mut buf);
+        assert_eq!(buf, "it&#39;s");
+    }
+
+    #[test]
     fn escape_attr_empty() {
         let mut buf = String::new();
         escape_attr("", &mut buf);
         assert_eq!(buf, "");
+    }
+
+    #[test]
+    fn escape_text_does_not_escape_quotes() {
+        let mut buf = String::new();
+        escape_text("say \"hello\" it's", &mut buf);
+        assert_eq!(buf, "say \"hello\" it's");
     }
 }

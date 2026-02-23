@@ -303,7 +303,7 @@ impl<'a> Parser<'a> {
         });
 
         // Enter raw text mode for script/style.
-        if tag == Tag::Script || tag == Tag::Style {
+        if tag.is_raw_text() {
             self.mode = Mode::InRawText;
             self.raw_text_tag = tag;
         }

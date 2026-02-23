@@ -320,14 +320,10 @@ impl<'a> NodeRef<'a> {
 
         if node.flags.has(NodeFlags::IS_TEXT) {
             let text = self.arena.text(self.id);
-            // Script/style children must not be escaped (raw text per HTML spec).
+            // Raw text elements (script/style) must not be escaped per HTML spec.
             let parent_id = node.parent;
-            let is_raw_text = if !parent_id.is_null() {
-                let parent_tag = self.arena.get(parent_id).tag;
-                matches!(parent_tag, Tag::Script | Tag::Style)
-            } else {
-                false
-            };
+            let is_raw_text = !parent_id.is_null()
+                && self.arena.get(parent_id).tag.is_raw_text();
             if is_raw_text {
                 out.push_str(text);
             } else {
