@@ -53,9 +53,9 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
         SimpleSelector::Class(class_name) => {
             let attrs = arena.attrs(node);
             attrs.iter().any(|a| {
-                a.name == "class"
-                    && a.value
-                        .as_ref()
+                arena.attr_name(a) == "class"
+                    && arena
+                        .attr_value(a)
                         .is_some_and(|v| contains_class_token(v, class_name))
             })
         }
@@ -64,7 +64,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             let attrs = arena.attrs(node);
             attrs
                 .iter()
-                .any(|a| a.name == "id" && a.value.as_deref() == Some(id.as_str()))
+                .any(|a| arena.attr_name(a) == "id" && arena.attr_value(a) == Some(id.as_str()))
         }
 
         SimpleSelector::Universal => {
@@ -88,32 +88,33 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
 fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
     let attrs = arena.attrs(node);
     for attr in attrs {
-        if attr.name != sel.name {
+        if arena.attr_name(attr) != sel.name {
             continue;
         }
+        let val = arena.attr_value(attr);
         match sel.op {
             AttrOp::Exists => return true,
             AttrOp::Equals => {
-                return attr.value.as_deref() == sel.value.as_deref();
+                return val == sel.value.as_deref();
             }
             AttrOp::Includes => {
-                if let (Some(val), Some(sel_val)) = (&attr.value, &sel.value) {
-                    return val.split_whitespace().any(|w| w == sel_val.as_str());
+                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
+                    return v.split_whitespace().any(|w| w == sel_val.as_str());
                 }
             }
             AttrOp::StartsWith => {
-                if let (Some(val), Some(sel_val)) = (&attr.value, &sel.value) {
-                    return val.starts_with(sel_val.as_str());
+                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
+                    return v.starts_with(sel_val.as_str());
                 }
             }
             AttrOp::EndsWith => {
-                if let (Some(val), Some(sel_val)) = (&attr.value, &sel.value) {
-                    return val.ends_with(sel_val.as_str());
+                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
+                    return v.ends_with(sel_val.as_str());
                 }
             }
             AttrOp::Substring => {
-                if let (Some(val), Some(sel_val)) = (&attr.value, &sel.value) {
-                    return val.contains(sel_val.as_str());
+                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
+                    return v.contains(sel_val.as_str());
                 }
             }
         }
@@ -660,7 +661,7 @@ fn node_has_id(arena: &Arena, node: NodeId, target_id: &str) -> bool {
     arena
         .attrs(node)
         .iter()
-        .any(|a| a.name == "id" && a.value.as_deref() == Some(target_id))
+        .any(|a| arena.attr_name(a) == "id" && arena.attr_value(a) == Some(target_id))
 }
 
 #[cfg(test)]

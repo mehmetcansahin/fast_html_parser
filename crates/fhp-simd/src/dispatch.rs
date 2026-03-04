@@ -7,7 +7,7 @@
 
 use std::sync::OnceLock;
 
-use crate::DelimiterResult;
+use crate::{AllMasks, DelimiterResult};
 
 /// Supported SIMD instruction set level, ordered from least to most capable.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -66,6 +66,10 @@ pub struct SimdOps {
     /// The block must be at most 64 bytes.
     pub compute_byte_mask: unsafe fn(&[u8], u8) -> u64,
 
+    /// Compute all seven delimiter bitmasks in a single pass.
+    /// Loads each 16-byte chunk once, producing all masks simultaneously.
+    pub compute_all_masks: unsafe fn(&[u8]) -> AllMasks,
+
     /// The SIMD level backing these function pointers.
     pub level: SimdLevel,
 }
@@ -87,6 +91,7 @@ pub fn ops() -> &'static SimdOps {
                 classify_bytes: crate::avx2::classify_bytes,
                 skip_whitespace: crate::avx2::skip_whitespace,
                 compute_byte_mask: crate::avx2::compute_byte_mask,
+                compute_all_masks: crate::scalar::compute_all_masks,
                 level,
             },
             #[cfg(target_arch = "x86_64")]
@@ -95,6 +100,7 @@ pub fn ops() -> &'static SimdOps {
                 classify_bytes: crate::sse42::classify_bytes,
                 skip_whitespace: crate::sse42::skip_whitespace,
                 compute_byte_mask: crate::sse42::compute_byte_mask,
+                compute_all_masks: crate::scalar::compute_all_masks,
                 level,
             },
             #[cfg(target_arch = "aarch64")]
@@ -103,6 +109,7 @@ pub fn ops() -> &'static SimdOps {
                 classify_bytes: crate::neon::classify_bytes,
                 skip_whitespace: crate::neon::skip_whitespace,
                 compute_byte_mask: crate::neon::compute_byte_mask,
+                compute_all_masks: crate::neon::compute_all_masks,
                 level,
             },
             // Scalar fallback for any architecture or if no SIMD detected.
@@ -111,6 +118,7 @@ pub fn ops() -> &'static SimdOps {
                 classify_bytes: crate::scalar::classify_bytes,
                 skip_whitespace: crate::scalar::skip_whitespace,
                 compute_byte_mask: crate::scalar::compute_byte_mask,
+                compute_all_masks: crate::scalar::compute_all_masks,
                 level: SimdLevel::Scalar,
             },
         }
@@ -196,5 +204,20 @@ mod tests {
         let dispatched = unsafe { (o.classify_bytes)(input) };
         let scalar = unsafe { crate::scalar::classify_bytes(input) };
         assert_eq!(dispatched, scalar);
+    }
+
+    #[test]
+    fn dispatch_compute_all_masks() {
+        let o = ops();
+        let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
+        let dispatched = unsafe { (o.compute_all_masks)(input) };
+        let scalar = crate::scalar::compute_all_masks_safe(input);
+        assert_eq!(dispatched.lt, scalar.lt, "lt mismatch");
+        assert_eq!(dispatched.gt, scalar.gt, "gt mismatch");
+        assert_eq!(dispatched.amp, scalar.amp, "amp mismatch");
+        assert_eq!(dispatched.quot, scalar.quot, "quot mismatch");
+        assert_eq!(dispatched.apos, scalar.apos, "apos mismatch");
+        assert_eq!(dispatched.eq, scalar.eq, "eq mismatch");
+        assert_eq!(dispatched.slash, scalar.slash, "slash mismatch");
     }
 }

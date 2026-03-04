@@ -146,7 +146,7 @@ fn find_descendants_by_tag_and_attr(
                 && n.tag == tag
                 && a.attrs(id)
                     .iter()
-                    .any(|at| at.name == attr && at.value.as_deref() == value)
+                    .any(|at| a.attr_name(at) == attr && a.attr_value(at) == value)
         },
         &mut results,
     );
@@ -164,7 +164,9 @@ fn find_descendants_by_tag_and_attr_exists(
     dfs_collect(
         arena,
         root,
-        &|a, id, n| is_element(n) && n.tag == tag && a.attrs(id).iter().any(|at| at.name == attr),
+        &|a, id, n| {
+            is_element(n) && n.tag == tag && a.attrs(id).iter().any(|at| a.attr_name(at) == attr)
+        },
         &mut results,
     );
     results
@@ -186,7 +188,7 @@ fn find_descendants_by_tag_and_contains(
             is_element(n)
                 && n.tag == tag
                 && a.attrs(id).iter().any(|at| {
-                    at.name == attr && at.value.as_ref().is_some_and(|v| v.contains(substr))
+                    a.attr_name(at) == attr && a.attr_value(at).is_some_and(|v| v.contains(substr))
                 })
         },
         &mut results,
@@ -213,8 +215,8 @@ fn find_all_elements_by_attr(
                 Some(val) => a
                     .attrs(id)
                     .iter()
-                    .any(|at| at.name == attr && at.value.as_deref() == Some(val)),
-                None => a.attrs(id).iter().any(|at| at.name == attr),
+                    .any(|at| a.attr_name(at) == attr && a.attr_value(at) == Some(val)),
+                None => a.attrs(id).iter().any(|at| a.attr_name(at) == attr),
             }
         },
         &mut results,
@@ -298,12 +300,12 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
         Predicate::AttrEquals { attr, value } => arena
             .attrs(node)
             .iter()
-            .any(|a| a.name == *attr && a.value.as_deref() == Some(value)),
+            .any(|a| arena.attr_name(a) == *attr && arena.attr_value(a) == Some(value)),
 
         Predicate::Contains { attr, substr } => arena.attrs(node).iter().any(|a| {
-            a.name == *attr
-                && a.value
-                    .as_ref()
+            arena.attr_name(a) == *attr
+                && arena
+                    .attr_value(a)
                     .is_some_and(|v| v.contains(substr.as_str()))
         }),
 
@@ -329,7 +331,10 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
             false
         }
 
-        Predicate::AttrExists { attr } => arena.attrs(node).iter().any(|a| a.name == *attr),
+        Predicate::AttrExists { attr } => arena
+            .attrs(node)
+            .iter()
+            .any(|a| arena.attr_name(a) == *attr),
     }
 }
 

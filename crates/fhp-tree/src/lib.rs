@@ -84,11 +84,9 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
         });
     }
 
-    let tokens = fhp_tokenizer::tokenize(input);
     let mut builder = TreeBuilder::with_capacity_hint(input.len());
-    for token in &tokens {
-        builder.process(token);
-    }
+    builder.set_source(input);
+    fhp_tokenizer::tokenize_into(input, &mut builder);
     let (arena, root) = builder.finish();
 
     Ok(Document { arena, root })
@@ -322,8 +320,7 @@ impl<'a> NodeRef<'a> {
             let text = self.arena.text(self.id);
             // Raw text elements (script/style) must not be escaped per HTML spec.
             let parent_id = node.parent;
-            let is_raw_text = !parent_id.is_null()
-                && self.arena.get(parent_id).tag.is_raw_text();
+            let is_raw_text = !parent_id.is_null() && self.arena.get(parent_id).tag.is_raw_text();
             if is_raw_text {
                 out.push_str(text);
             } else {
@@ -362,8 +359,8 @@ impl<'a> NodeRef<'a> {
                 let attrs = self.arena.attrs(self.id);
                 for attr in attrs {
                     out.push(' ');
-                    out.push_str(&attr.name);
-                    if let Some(ref val) = attr.value {
+                    out.push_str(self.arena.attr_name(attr));
+                    if let Some(val) = self.arena.attr_value(attr) {
                         out.push_str("=\"");
                         fhp_core::entity::escape_attr(val, out);
                         out.push('"');
@@ -404,8 +401,8 @@ impl<'a> NodeRef<'a> {
         self.arena
             .attrs(self.id)
             .iter()
-            .find(|a| a.name == name)
-            .and_then(|a| a.value.as_deref())
+            .find(|a| self.arena.attr_name(a) == name)
+            .and_then(|a| self.arena.attr_value(a))
     }
 
     /// Check if the node has a given CSS class.

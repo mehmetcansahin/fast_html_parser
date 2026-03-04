@@ -115,15 +115,16 @@ fn build_recursive(
         // Add class names and id.
         let attrs = arena.attrs(node);
         for attr in attrs {
-            if attr.name == "class" {
-                if let Some(ref val) = attr.value {
+            let name = arena.attr_name(attr);
+            if name == "class" {
+                if let Some(val) = arena.attr_value(attr) {
                     for class in val.split_whitespace() {
                         child_bloom.insert(hash_str(class));
                     }
                 }
             }
-            if attr.name == "id" {
-                if let Some(ref val) = attr.value {
+            if name == "id" {
+                if let Some(val) = arena.attr_value(attr) {
                     child_bloom.insert(hash_str(val));
                 }
             }

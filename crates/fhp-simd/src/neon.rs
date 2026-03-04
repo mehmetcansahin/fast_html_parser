@@ -242,6 +242,78 @@ pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
     result
 }
 
+/// Compute all seven delimiter bitmasks in a single pass over the block.
+///
+/// Loads each 16-byte chunk once and produces all 7 masks simultaneously.
+/// For a 64-byte block this reduces NEON loads from 28 (7×4) to 4.
+///
+/// # Safety
+///
+/// Caller must ensure the CPU supports NEON (always true on aarch64).
+#[target_feature(enable = "neon")]
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn compute_all_masks(block: &[u8]) -> crate::AllMasks {
+    let len = block.len();
+    let ptr = block.as_ptr();
+    let mut masks = crate::AllMasks::default();
+    let mut offset = 0;
+
+    // SAFETY: all intrinsics below require NEON, guaranteed by #[target_feature].
+    unsafe {
+        // Broadcast each delimiter into a 128-bit register.
+        let v_lt = vdupq_n_u8(b'<');
+        let v_gt = vdupq_n_u8(b'>');
+        let v_amp = vdupq_n_u8(b'&');
+        let v_quot = vdupq_n_u8(b'"');
+        let v_apos = vdupq_n_u8(b'\'');
+        let v_eq = vdupq_n_u8(b'=');
+        let v_slash = vdupq_n_u8(b'/');
+
+        while offset + 16 <= len {
+            // Single load per 16-byte chunk.
+            let chunk = vld1q_u8(ptr.add(offset));
+
+            // 7 comparisons on the same loaded chunk.
+            let m_lt = neon_movemask(vceqq_u8(chunk, v_lt)) as u64;
+            let m_gt = neon_movemask(vceqq_u8(chunk, v_gt)) as u64;
+            let m_amp = neon_movemask(vceqq_u8(chunk, v_amp)) as u64;
+            let m_quot = neon_movemask(vceqq_u8(chunk, v_quot)) as u64;
+            let m_apos = neon_movemask(vceqq_u8(chunk, v_apos)) as u64;
+            let m_eq = neon_movemask(vceqq_u8(chunk, v_eq)) as u64;
+            let m_slash = neon_movemask(vceqq_u8(chunk, v_slash)) as u64;
+
+            masks.lt |= m_lt << offset;
+            masks.gt |= m_gt << offset;
+            masks.amp |= m_amp << offset;
+            masks.quot |= m_quot << offset;
+            masks.apos |= m_apos << offset;
+            masks.eq |= m_eq << offset;
+            masks.slash |= m_slash << offset;
+
+            offset += 16;
+        }
+    }
+
+    // Scalar tail for remaining bytes.
+    while offset < len {
+        let b = block[offset];
+        let bit = 1u64 << offset;
+        match b {
+            b'<' => masks.lt |= bit,
+            b'>' => masks.gt |= bit,
+            b'&' => masks.amp |= bit,
+            b'"' => masks.quot |= bit,
+            b'\'' => masks.apos |= bit,
+            b'=' => masks.eq |= bit,
+            b'/' => masks.slash |= bit,
+            _ => {}
+        }
+        offset += 1;
+    }
+
+    masks
+}
+
 /// Emulate x86 `_mm_movemask_epi8` on NEON.
 ///
 /// Takes a 128-bit vector where each byte is either 0x00 or 0xFF.
@@ -488,5 +560,37 @@ mod tests {
             let mask = neon_movemask(v);
             assert_eq!(mask, (1 << 0) | (1 << 8));
         }
+    }
+
+    #[test]
+    fn compute_all_masks_matches_scalar() {
+        let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
+        let neon_masks = unsafe { compute_all_masks(input) };
+        let scalar_masks = crate::scalar::compute_all_masks_safe(input);
+        assert_eq!(neon_masks.lt, scalar_masks.lt, "lt mismatch");
+        assert_eq!(neon_masks.gt, scalar_masks.gt, "gt mismatch");
+        assert_eq!(neon_masks.amp, scalar_masks.amp, "amp mismatch");
+        assert_eq!(neon_masks.quot, scalar_masks.quot, "quot mismatch");
+        assert_eq!(neon_masks.apos, scalar_masks.apos, "apos mismatch");
+        assert_eq!(neon_masks.eq, scalar_masks.eq, "eq mismatch");
+        assert_eq!(neon_masks.slash, scalar_masks.slash, "slash mismatch");
+    }
+
+    #[test]
+    fn compute_all_masks_64_bytes() {
+        let mut input = vec![b'x'; 64];
+        input[0] = b'<';
+        input[15] = b'>';
+        input[16] = b'&';
+        input[31] = b'"';
+        input[48] = b'\'';
+        input[63] = b'/';
+        let masks = unsafe { compute_all_masks(&input) };
+        assert_eq!(masks.lt, 1u64 << 0);
+        assert_eq!(masks.gt, 1u64 << 15);
+        assert_eq!(masks.amp, 1u64 << 16);
+        assert_eq!(masks.quot, 1u64 << 31);
+        assert_eq!(masks.apos, 1u64 << 48);
+        assert_eq!(masks.slash, 1u64 << 63);
     }
 }

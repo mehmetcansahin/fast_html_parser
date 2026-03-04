@@ -9,6 +9,7 @@ use std::borrow::Cow;
 
 use fhp_core::tag::Tag;
 
+use crate::TreeSink;
 use crate::structural::StructuralIndex;
 use crate::token::{Attribute, Token};
 
@@ -83,7 +84,11 @@ enum Mode {
 }
 
 /// Direct input parser driven by structural delimiter positions.
-struct Parser<'a> {
+///
+/// Can be used in two modes:
+/// - Vec mode: via `on_delimiter` / `flush_trailing` (pushes to `Vec<Token>`)
+/// - Callback mode: via `on_delimiter_cb` / `flush_trailing_cb` (invokes closure)
+pub(crate) struct Parser<'a> {
     input_str: &'a str,
     input: &'a [u8],
     mode: Mode,
@@ -98,7 +103,7 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    fn new(input: &'a str) -> Self {
+    pub(crate) fn new(input: &'a str) -> Self {
         Self {
             input_str: input,
             input: input.as_bytes(),
@@ -110,23 +115,39 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Process a structural delimiter.
+    /// Process a structural delimiter (Vec mode).
     fn on_delimiter(&mut self, pos: usize, byte: u8, tokens: &mut Vec<Token<'a>>) {
+        self.on_delimiter_impl(pos, byte, &mut |token| tokens.push(token));
+    }
+
+    /// Process a structural delimiter (callback mode).
+    pub(crate) fn on_delimiter_cb(
+        &mut self,
+        pos: usize,
+        byte: u8,
+        emit: &mut impl FnMut(Token<'a>),
+    ) {
+        self.on_delimiter_impl(pos, byte, emit);
+    }
+
+    /// Shared delimiter dispatch logic.
+    #[inline(always)]
+    fn on_delimiter_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         match self.mode {
-            Mode::Data => self.on_data(pos, byte, tokens),
-            Mode::InTag => self.on_in_tag(pos, byte, tokens),
-            Mode::InComment => self.on_in_comment(pos, byte, tokens),
-            Mode::InDoctype => self.on_in_doctype(pos, byte, tokens),
-            Mode::InCData => self.on_in_cdata(pos, byte, tokens),
-            Mode::InRawText => self.on_in_raw_text(pos, byte, tokens),
+            Mode::Data => self.on_data_impl(pos, byte, emit),
+            Mode::InTag => self.on_in_tag_impl(pos, byte, emit),
+            Mode::InComment => self.on_in_comment_impl(pos, byte, emit),
+            Mode::InDoctype => self.on_in_doctype_impl(pos, byte, emit),
+            Mode::InCData => self.on_in_cdata_impl(pos, byte, emit),
+            Mode::InRawText => self.on_in_raw_text_impl(pos, byte, emit),
         }
     }
 
     /// In Data mode: only `<` matters.
-    fn on_data(&mut self, pos: usize, byte: u8, tokens: &mut Vec<Token<'a>>) {
+    fn on_data_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'<' {
             // Flush text before this `<`.
-            self.flush_text(pos, tokens);
+            self.flush_text_impl(pos, emit);
             self.tag_open_pos = pos;
 
             // Peek ahead to classify what follows `<`.
@@ -158,10 +179,10 @@ impl<'a> Parser<'a> {
     }
 
     /// In tag mode: `>` closes the tag.
-    fn on_in_tag(&mut self, pos: usize, byte: u8, tokens: &mut Vec<Token<'a>>) {
+    fn on_in_tag_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'>' {
             // Parse the tag content between `<` and `>`.
-            self.parse_tag(self.tag_open_pos, pos, tokens);
+            self.parse_tag_impl(self.tag_open_pos, pos, emit);
             self.cursor = pos + 1;
             // parse_tag may have set InRawText for script/style — don't override.
             if self.mode != Mode::InRawText {
@@ -173,7 +194,7 @@ impl<'a> Parser<'a> {
     }
 
     /// In comment mode: look for `-->`.
-    fn on_in_comment(&mut self, pos: usize, byte: u8, tokens: &mut Vec<Token<'a>>) {
+    fn on_in_comment_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'>' && pos >= 2 {
             // Check for `-->`.
             if self.input[pos - 1] == b'-' && self.input[pos - 2] == b'-' {
@@ -185,7 +206,7 @@ impl<'a> Parser<'a> {
                 } else {
                     ""
                 };
-                tokens.push(Token::Comment {
+                emit(Token::Comment {
                     content: Cow::Borrowed(content),
                 });
                 self.cursor = pos + 1;
@@ -195,7 +216,7 @@ impl<'a> Parser<'a> {
     }
 
     /// In doctype mode: `>` closes it.
-    fn on_in_doctype(&mut self, pos: usize, byte: u8, tokens: &mut Vec<Token<'a>>) {
+    fn on_in_doctype_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'>' {
             // Content between `<!` and `>`.
             let inner_start = self.special_open_pos + 2; // after `<!`
@@ -207,7 +228,7 @@ impl<'a> Parser<'a> {
                 } else {
                     content
                 };
-            tokens.push(Token::Doctype {
+            emit(Token::Doctype {
                 content: Cow::Borrowed(content),
             });
             self.cursor = pos + 1;
@@ -216,7 +237,7 @@ impl<'a> Parser<'a> {
     }
 
     /// In CDATA mode: look for `]]>`.
-    fn on_in_cdata(&mut self, pos: usize, byte: u8, tokens: &mut Vec<Token<'a>>) {
+    fn on_in_cdata_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'>' && pos >= 2 && self.input[pos - 1] == b']' && self.input[pos - 2] == b']' {
             // Content between `<![CDATA[` and `]]>`.
             let content_start = self.special_open_pos + 9; // after `<![CDATA[`
@@ -226,7 +247,7 @@ impl<'a> Parser<'a> {
             } else {
                 ""
             };
-            tokens.push(Token::CData {
+            emit(Token::CData {
                 content: Cow::Borrowed(content),
             });
             self.cursor = pos + 1;
@@ -235,17 +256,17 @@ impl<'a> Parser<'a> {
     }
 
     /// In raw text mode: only look for `</script>` or `</style>`.
-    fn on_in_raw_text(&mut self, pos: usize, byte: u8, tokens: &mut Vec<Token<'a>>) {
+    fn on_in_raw_text_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'<' && self.is_raw_text_close(pos) {
             // Flush raw text content.
-            self.flush_text(pos, tokens);
+            self.flush_text_impl(pos, emit);
             self.tag_open_pos = pos;
             self.mode = Mode::InTag;
         }
     }
 
     /// Parse a complete tag from `<` at `open` to `>` at `close`.
-    fn parse_tag(&mut self, open: usize, close: usize, tokens: &mut Vec<Token<'a>>) {
+    fn parse_tag_impl(&mut self, open: usize, close: usize, emit: &mut impl FnMut(Token<'a>)) {
         // Skip the `<`.
         let mut pos = open + 1;
         if pos >= close {
@@ -263,7 +284,7 @@ impl<'a> Parser<'a> {
             }
             let name = self.str_slice(name_start, pos);
             let tag = Tag::from_bytes(&self.input[name_start..pos]);
-            tokens.push(Token::CloseTag {
+            emit(Token::CloseTag {
                 tag,
                 name: Cow::Borrowed(name),
             });
@@ -295,7 +316,7 @@ impl<'a> Parser<'a> {
             },
         );
 
-        tokens.push(Token::OpenTag {
+        emit(Token::OpenTag {
             tag,
             name: Cow::Borrowed(name),
             attributes: attrs,
@@ -403,26 +424,226 @@ impl<'a> Parser<'a> {
         attrs
     }
 
-    /// Flush text from cursor to pos.
-    fn flush_text(&mut self, pos: usize, tokens: &mut Vec<Token<'a>>) {
+    /// Flush text from cursor to pos (generic).
+    #[inline(always)]
+    fn flush_text_impl(&mut self, pos: usize, emit: &mut impl FnMut(Token<'a>)) {
         if pos > self.cursor {
             let raw = self.str_slice(self.cursor, pos);
             if !raw.is_empty() {
                 let content = maybe_decode_entities(raw);
-                tokens.push(Token::Text { content });
+                emit(Token::Text { content });
             }
         }
         self.cursor = pos;
     }
 
-    /// Flush trailing text at end of input.
+    /// Flush trailing text at end of input (Vec mode).
     fn flush_trailing(&mut self, tokens: &mut Vec<Token<'a>>) {
+        self.flush_trailing_impl(&mut |token| tokens.push(token));
+    }
+
+    /// Flush trailing text at end of input (callback mode).
+    pub(crate) fn flush_trailing_cb(&mut self, emit: &mut impl FnMut(Token<'a>)) {
+        self.flush_trailing_impl(emit);
+    }
+
+    // ---- TreeSink-based methods (zero-alloc path) ----
+
+    /// Process a structural delimiter (sink mode).
+    pub(crate) fn on_delimiter_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        match self.mode {
+            Mode::Data => self.on_data_sink(pos, byte, sink),
+            Mode::InTag => self.on_in_tag_sink(pos, byte, sink),
+            Mode::InComment => self.on_in_comment_sink(pos, byte, sink),
+            Mode::InDoctype => self.on_in_doctype_sink(pos, byte, sink),
+            Mode::InCData => self.on_in_cdata_sink(pos, byte, sink),
+            Mode::InRawText => self.on_in_raw_text_sink(pos, byte, sink),
+        }
+    }
+
+    /// In Data mode (sink): only `<` matters.
+    fn on_data_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        if byte == b'<' {
+            self.flush_text_sink(pos, sink);
+            self.tag_open_pos = pos;
+
+            let after = self.peek(pos + 1);
+            let after2 = self.peek(pos + 2);
+
+            if after == Some(b'!') {
+                if after2 == Some(b'-') && self.peek(pos + 3) == Some(b'-') {
+                    self.mode = Mode::InComment;
+                    self.special_open_pos = pos;
+                } else if after2.is_some_and(|b| b == b'D' || b == b'd') {
+                    self.mode = Mode::InDoctype;
+                    self.special_open_pos = pos;
+                } else if after2 == Some(b'[') {
+                    self.mode = Mode::InCData;
+                    self.special_open_pos = pos;
+                } else {
+                    self.mode = Mode::InDoctype;
+                    self.special_open_pos = pos;
+                }
+            } else {
+                self.mode = Mode::InTag;
+            }
+        }
+    }
+
+    /// In tag mode (sink): `>` closes the tag.
+    fn on_in_tag_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        if byte == b'>' {
+            self.parse_tag_sink(self.tag_open_pos, pos, sink);
+            self.cursor = pos + 1;
+            if self.mode != Mode::InRawText {
+                self.mode = Mode::Data;
+            }
+        }
+    }
+
+    /// In comment mode (sink): look for `-->`.
+    fn on_in_comment_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        if byte == b'>' && pos >= 2 && self.input[pos - 1] == b'-' && self.input[pos - 2] == b'-' {
+            let content_start = self.special_open_pos + 4;
+            let content_end = pos - 2;
+            let content = if content_start <= content_end {
+                self.str_slice(content_start, content_end)
+            } else {
+                ""
+            };
+            sink.comment(content);
+            self.cursor = pos + 1;
+            self.mode = Mode::Data;
+        }
+    }
+
+    /// In doctype mode (sink): `>` closes it.
+    fn on_in_doctype_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        if byte == b'>' {
+            let inner_start = self.special_open_pos + 2;
+            let content = self.str_slice(inner_start, pos).trim();
+            let content =
+                if content.len() >= 7 && content.as_bytes()[..7].eq_ignore_ascii_case(b"DOCTYPE") {
+                    content[7..].trim_start()
+                } else {
+                    content
+                };
+            sink.doctype(content);
+            self.cursor = pos + 1;
+            self.mode = Mode::Data;
+        }
+    }
+
+    /// In CDATA mode (sink): look for `]]>`.
+    fn on_in_cdata_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        if byte == b'>' && pos >= 2 && self.input[pos - 1] == b']' && self.input[pos - 2] == b']' {
+            let content_start = self.special_open_pos + 9;
+            let content_end = pos - 2;
+            let content = if content_start <= content_end {
+                self.str_slice(content_start, content_end)
+            } else {
+                ""
+            };
+            sink.cdata(content);
+            self.cursor = pos + 1;
+            self.mode = Mode::Data;
+        }
+    }
+
+    /// In raw text mode (sink): only look for `</script>` or `</style>`.
+    fn on_in_raw_text_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        if byte == b'<' && self.is_raw_text_close(pos) {
+            self.flush_text_sink(pos, sink);
+            self.tag_open_pos = pos;
+            self.mode = Mode::InTag;
+        }
+    }
+
+    /// Parse a complete tag from `<` at `open` to `>` at `close` (sink mode).
+    ///
+    /// Instead of parsing attributes into a Vec, passes the raw attribute
+    /// region to the sink for direct-to-slab parsing.
+    fn parse_tag_sink<S: TreeSink>(&mut self, open: usize, close: usize, sink: &mut S) {
+        let mut pos = open + 1;
+        if pos >= close {
+            return;
+        }
+
+        let first = self.input[pos];
+
+        // Close tag: `</...>`
+        if first == b'/' {
+            pos += 1;
+            let name_start = pos;
+            while pos < close && !is_whitespace(self.input[pos]) {
+                pos += 1;
+            }
+            let name = self.str_slice(name_start, pos);
+            let tag = Tag::from_bytes(&self.input[name_start..pos]);
+            sink.close_tag(tag, name);
+            return;
+        }
+
+        // Open tag: `<name ...>` or `<name ... />`
+        let name_start = pos;
+        while pos < close
+            && !is_whitespace(self.input[pos])
+            && self.input[pos] != b'/'
+            && self.input[pos] != b'>'
+        {
+            pos += 1;
+        }
+        let name = self.str_slice(name_start, pos);
+        let tag = Tag::from_bytes(&self.input[name_start..pos]);
+
+        let has_trailing_slash = close > 0 && self.input[close - 1] == b'/';
+        let self_closing = has_trailing_slash || tag.is_void();
+
+        // Attribute region: from after tag name to before `>` (or `/>`).
+        let attr_end = if has_trailing_slash { close - 1 } else { close };
+        let attr_raw = self.str_slice(pos, attr_end);
+
+        sink.open_tag(tag, name, attr_raw, self_closing);
+
+        // Enter raw text mode for script/style.
+        if tag.is_raw_text() {
+            self.mode = Mode::InRawText;
+            self.raw_text_tag = tag;
+        }
+    }
+
+    /// Flush text from cursor to pos (sink mode — raw, no entity decode).
+    #[inline(always)]
+    fn flush_text_sink<S: TreeSink>(&mut self, pos: usize, sink: &mut S) {
+        if pos > self.cursor {
+            let raw = self.str_slice(self.cursor, pos);
+            if !raw.is_empty() {
+                sink.text(raw);
+            }
+        }
+        self.cursor = pos;
+    }
+
+    /// Flush trailing text at end of input (sink mode).
+    pub(crate) fn flush_trailing_sink<S: TreeSink>(&mut self, sink: &mut S) {
+        let end = self.input.len();
+        if end > self.cursor {
+            let raw = self.str_slice(self.cursor, end);
+            if !raw.is_empty() {
+                sink.text(raw);
+            }
+        }
+    }
+
+    /// Flush trailing text at end of input (generic).
+    #[inline(always)]
+    fn flush_trailing_impl(&mut self, emit: &mut impl FnMut(Token<'a>)) {
         let end = self.input.len();
         if end > self.cursor {
             let raw = self.str_slice(self.cursor, end);
             if !raw.is_empty() {
                 let content = maybe_decode_entities(raw);
-                tokens.push(Token::Text { content });
+                emit(Token::Text { content });
             }
         }
     }
