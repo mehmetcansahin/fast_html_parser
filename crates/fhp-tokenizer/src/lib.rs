@@ -143,10 +143,11 @@ pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
         carry_dq = new_carry_dq;
         carry_sq = new_carry_sq;
 
-        // Step 3: Iterate delimiters in this block and feed to parser.
-        let combined =
-            masks.lt | masks.gt | masks.amp | masks.quot | masks.apos | masks.eq | masks.slash;
+        // Step 3: Only iterate `<` and `>` — the only delimiters that
+        // trigger state transitions. Quote masking already ran above to
+        // filter out `<`/`>` inside attribute strings.
         let _ = in_string; // masking already applied to individual masks
+        let combined = masks.lt | masks.gt;
 
         let mut bits = combined;
         while bits != 0 {
@@ -158,7 +159,7 @@ pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
                 break;
             }
 
-            let byte = determine_byte_from_masks(&masks, bit_pos);
+            let byte = bytes[abs_pos];
             parser.on_delimiter_cb(abs_pos, byte, &mut on_token);
         }
 
@@ -229,10 +230,11 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
         carry_dq = new_carry_dq;
         carry_sq = new_carry_sq;
 
-        // Step 3: Iterate delimiters in this block and feed to parser.
-        let combined =
-            masks.lt | masks.gt | masks.amp | masks.quot | masks.apos | masks.eq | masks.slash;
+        // Step 3: Only iterate `<` and `>` — the only delimiters that
+        // trigger state transitions. Quote masking already ran above to
+        // filter out `<`/`>` inside attribute strings.
         let _ = in_string; // masking already applied to individual masks
+        let combined = masks.lt | masks.gt;
 
         let mut bits = combined;
         while bits != 0 {
@@ -244,7 +246,7 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
                 break;
             }
 
-            let byte = determine_byte_from_masks(&masks, bit_pos);
+            let byte = bytes[abs_pos];
             parser.on_delimiter_sink(abs_pos, byte, sink);
         }
 
@@ -289,38 +291,15 @@ fn compute_string_mask_inline(
     // Combine both quote regions.
     let in_string = dq_in | sq_in;
 
-    // Mask non-structural delimiters inside strings.
+    // Mask `<` and `>` inside strings — these are the only structural delimiters.
     masks.lt &= !in_string;
     masks.gt &= !in_string;
-    masks.amp &= !in_string;
-    masks.eq &= !in_string;
-    masks.slash &= !in_string;
 
-    // Mask non-boundary quotes.
+    // Mask non-boundary quotes (still needed for carry propagation).
     masks.apos &= !dq_in;
     masks.quot &= !sq_in;
 
     (in_string, new_carry_dq, new_carry_sq)
-}
-
-/// Determine which delimiter byte is at a bit position from the mask set.
-#[inline]
-fn determine_byte_from_masks(masks: &AllMasks, bit: usize) -> u8 {
-    if (masks.lt >> bit) & 1 == 1 {
-        b'<'
-    } else if (masks.gt >> bit) & 1 == 1 {
-        b'>'
-    } else if (masks.amp >> bit) & 1 == 1 {
-        b'&'
-    } else if (masks.quot >> bit) & 1 == 1 {
-        b'"'
-    } else if (masks.apos >> bit) & 1 == 1 {
-        b'\''
-    } else if (masks.eq >> bit) & 1 == 1 {
-        b'='
-    } else {
-        b'/'
-    }
 }
 
 #[cfg(test)]
