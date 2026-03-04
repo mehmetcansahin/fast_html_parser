@@ -31,9 +31,20 @@ fhp-encoding = { version = "0.1", path = "../fhp-encoding", optional = true }
 [dev-dependencies]
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
+tl = "0.7"
+scraper = "0.22"
+lol_html = "2"
 
 [[bench]]
 name = "e2e_bench"
+harness = false
+
+[[bench]]
+name = "comparison_bench"
+harness = false
+
+[[bench]]
+name = "profile_bench"
 harness = false
 
 [[example]]

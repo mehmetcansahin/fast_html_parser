@@ -92,6 +92,36 @@ pub fn compute_byte_mask_safe(block: &[u8], byte: u8) -> u64 {
     mask
 }
 
+/// Compute all seven delimiter bitmasks in a single pass over the block.
+///
+/// # Safety
+///
+/// This function is safe. The `unsafe fn` signature matches the SIMD
+/// dispatch slot.
+pub unsafe fn compute_all_masks(block: &[u8]) -> crate::AllMasks {
+    compute_all_masks_safe(block)
+}
+
+/// Safe inner implementation of [`compute_all_masks`].
+#[inline]
+pub fn compute_all_masks_safe(block: &[u8]) -> crate::AllMasks {
+    let mut masks = crate::AllMasks::default();
+    for (i, &b) in block.iter().enumerate() {
+        let bit = 1u64 << i;
+        match b {
+            b'<' => masks.lt |= bit,
+            b'>' => masks.gt |= bit,
+            b'&' => masks.amp |= bit,
+            b'"' => masks.quot |= bit,
+            b'\'' => masks.apos |= bit,
+            b'=' => masks.eq |= bit,
+            b'/' => masks.slash |= bit,
+            _ => {}
+        }
+    }
+    masks
+}
+
 /// Returns `true` if `b` is one of the 7 HTML delimiters.
 #[inline(always)]
 fn is_delimiter(b: u8) -> bool {
@@ -223,5 +253,36 @@ mod tests {
     fn compute_byte_mask_empty() {
         let mask = unsafe { compute_byte_mask(b"", b'<') };
         assert_eq!(mask, 0);
+    }
+
+    #[test]
+    fn compute_all_masks_basic() {
+        let input = b"<div class=\"foo\">";
+        let masks = unsafe { compute_all_masks(input) };
+        assert_eq!(masks.lt, 1 << 0); // '<' at 0
+        assert_eq!(masks.gt, 1 << 16); // '>' at 16
+        assert_eq!(masks.eq, 1 << 10); // '=' at 10
+        assert_eq!(masks.quot, (1 << 11) | (1 << 15)); // '"' at 11 and 15
+    }
+
+    #[test]
+    fn compute_all_masks_empty() {
+        let masks = unsafe { compute_all_masks(b"") };
+        assert_eq!(masks.lt, 0);
+        assert_eq!(masks.gt, 0);
+        assert_eq!(masks.amp, 0);
+    }
+
+    #[test]
+    fn compute_all_masks_matches_individual() {
+        let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
+        let masks = unsafe { compute_all_masks(input) };
+        assert_eq!(masks.lt, unsafe { compute_byte_mask(input, b'<') });
+        assert_eq!(masks.gt, unsafe { compute_byte_mask(input, b'>') });
+        assert_eq!(masks.amp, unsafe { compute_byte_mask(input, b'&') });
+        assert_eq!(masks.quot, unsafe { compute_byte_mask(input, b'"') });
+        assert_eq!(masks.apos, unsafe { compute_byte_mask(input, b'\'') });
+        assert_eq!(masks.eq, unsafe { compute_byte_mask(input, b'=') });
+        assert_eq!(masks.slash, unsafe { compute_byte_mask(input, b'/') });
     }
 }

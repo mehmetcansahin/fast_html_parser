@@ -406,7 +406,7 @@ impl Selectable for Document {
             let node_id = NodeId(i as u32);
             let attrs = arena.attrs(node_id);
             for attr in attrs {
-                if attr.name == "id" && attr.value.as_deref() == Some(id) {
+                if arena.attr_name(attr) == "id" && arena.attr_value(attr) == Some(id) {
                     return Some(self.get(node_id));
                 }
             }
@@ -421,8 +421,8 @@ impl Selectable for Document {
             let id = NodeId(i as u32);
             let attrs = arena.attrs(id);
             for attr in attrs {
-                if attr.name == "class" {
-                    if let Some(ref val) = attr.value {
+                if arena.attr_name(attr) == "class" {
+                    if let Some(val) = arena.attr_value(attr) {
                         if val.split_whitespace().any(|c| c == class) {
                             nodes.push(id);
                             break;
@@ -441,7 +441,7 @@ impl Selectable for Document {
             let id = NodeId(i as u32);
             let attrs = arena.attrs(id);
             for attr in attrs {
-                if attr.name == name && attr.value.as_deref() == Some(value) {
+                if arena.attr_name(attr) == name && arena.attr_value(attr) == Some(value) {
                     nodes.push(id);
                     break;
                 }
@@ -491,8 +491,9 @@ impl DocumentIndex {
             // Index by attributes.
             let attrs = arena.attrs(node_id);
             for attr in attrs {
-                if attr.name == "id" {
-                    if let Some(val) = attr.value.as_deref() {
+                let attr_name = arena.attr_name(attr);
+                if attr_name == "id" {
+                    if let Some(val) = arena.attr_value(attr) {
                         if let Some(existing) = id_map.get_mut(val) {
                             *existing = node_id;
                         } else {
@@ -500,8 +501,8 @@ impl DocumentIndex {
                         }
                     }
                 }
-                if attr.name == "class" {
-                    if let Some(val) = attr.value.as_deref() {
+                if attr_name == "class" {
+                    if let Some(val) = arena.attr_value(attr) {
                         for class in val.split_whitespace() {
                             if let Some(ids) = class_map.get_mut(class) {
                                 ids.push(node_id);

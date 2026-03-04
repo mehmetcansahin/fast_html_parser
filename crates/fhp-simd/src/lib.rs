@@ -67,6 +67,28 @@ pub mod class {
     pub const OTHER: u8 = 0b0000_0000;
 }
 
+/// All seven delimiter bitmasks for a block of up to 64 bytes.
+///
+/// Produced by [`compute_all_masks`](dispatch::SimdOps) which loads each
+/// 16-byte chunk only once, computing all masks in a single pass.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AllMasks {
+    /// `<` positions.
+    pub lt: u64,
+    /// `>` positions.
+    pub gt: u64,
+    /// `&` positions.
+    pub amp: u64,
+    /// `"` positions.
+    pub quot: u64,
+    /// `'` positions.
+    pub apos: u64,
+    /// `=` positions.
+    pub eq: u64,
+    /// `/` positions.
+    pub slash: u64,
+}
+
 /// Classify a single byte into one of the [`class`] categories.
 #[inline(always)]
 pub fn classify_byte(b: u8) -> u8 {

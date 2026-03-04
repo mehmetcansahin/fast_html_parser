@@ -104,6 +104,10 @@ pub struct TreeBuilder {
     open_elements: Vec<NodeId>,
     /// The synthetic root node (document root).
     root: NodeId,
+    /// Base address of the original input (for source-backed text).
+    source_base: usize,
+    /// Length of the original input in bytes.
+    source_len: usize,
 }
 
 impl TreeBuilder {
@@ -127,7 +131,20 @@ impl TreeBuilder {
             arena,
             open_elements: vec![root],
             root,
+            source_base: 0,
+            source_len: 0,
         }
+    }
+
+    /// Enable source-backed text nodes.
+    ///
+    /// Stores an owned copy of `input` in the arena. Text nodes whose content
+    /// is borrowed from `input` (entity-free) will reference the source
+    /// instead of copying to the text slab.
+    pub fn set_source(&mut self, input: &str) {
+        self.source_base = input.as_ptr() as usize;
+        self.source_len = input.len();
+        self.arena.set_source(input);
     }
 
     /// Process a single token and insert it into the tree.
@@ -254,16 +271,65 @@ impl TreeBuilder {
         // If no match found, ignore the close tag (broken HTML recovery).
     }
 
-    /// Handle text content.
+    /// Handle text content (already entity-decoded by the tokenizer).
+    ///
+    /// If the text is borrowed from the original source (pointer falls within
+    /// the source range), creates a source-backed text node to avoid copying.
     fn handle_text(&mut self, content: &str) -> Option<NodeId> {
         if content.is_empty() {
             return None;
         }
         let depth = self.current_depth();
         let parent = self.current_parent();
-        let node = self.arena.new_text(depth, content);
+        let node = self.try_source_ref(depth, content);
         self.arena.append_child(parent, node);
         Some(node)
+    }
+
+    /// Handle raw text from TreeSink (not entity-decoded).
+    ///
+    /// Performs entity decoding if the `entity-decode` feature is enabled,
+    /// then creates a source-backed or slab text node.
+    fn handle_raw_text(&mut self, raw: &str) -> Option<NodeId> {
+        if raw.is_empty() {
+            return None;
+        }
+        let depth = self.current_depth();
+        let parent = self.current_parent();
+
+        #[cfg(feature = "entity-decode")]
+        let node = if raw.as_bytes().contains(&b'&') {
+            let decoded = fhp_tokenizer::entity::decode_entities(raw);
+            match decoded {
+                std::borrow::Cow::Borrowed(s) => self.try_source_ref(depth, s),
+                std::borrow::Cow::Owned(s) => self.arena.new_text(depth, &s),
+            }
+        } else {
+            self.try_source_ref(depth, raw)
+        };
+
+        #[cfg(not(feature = "entity-decode"))]
+        let node = self.try_source_ref(depth, raw);
+
+        self.arena.append_child(parent, node);
+        Some(node)
+    }
+
+    /// Create a text node, using a source-backed ref if the pointer is within
+    /// the original source range.
+    #[inline]
+    fn try_source_ref(&mut self, depth: u16, content: &str) -> NodeId {
+        if self.source_len > 0 {
+            let ptr = content.as_ptr() as usize;
+            if ptr >= self.source_base && ptr + content.len() <= self.source_base + self.source_len
+            {
+                let offset = ptr - self.source_base;
+                return self
+                    .arena
+                    .new_text_ref(depth, offset as u32, content.len() as u32);
+            }
+        }
+        self.arena.new_text(depth, content)
     }
 
     /// Handle a comment.
@@ -297,6 +363,60 @@ impl TreeBuilder {
                 break;
             }
         }
+    }
+}
+
+impl fhp_tokenizer::TreeSink for TreeBuilder {
+    fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool) {
+        self.apply_implicit_close(tag);
+
+        if self.current_depth() >= MAX_DEPTH {
+            return;
+        }
+
+        let depth = self.current_depth();
+        let parent = self.current_parent();
+        let node = self.arena.new_element(tag, depth);
+        if tag == Tag::Unknown {
+            self.arena.set_unknown_tag_name(node, name);
+        }
+
+        // Parse attributes directly into the slab (no intermediate Vec).
+        self.arena.set_attrs_from_raw(node, attr_raw);
+
+        self.arena.append_child(parent, node);
+
+        if tag.is_void() || self_closing {
+            if self_closing {
+                self.arena.set_self_closing(node);
+            }
+            if tag.is_void() {
+                self.arena.set_self_closing(node);
+            }
+        } else {
+            self.open_elements.push(node);
+        }
+    }
+
+    fn close_tag(&mut self, tag: Tag, name: &str) {
+        self.handle_close_tag(tag, name);
+    }
+
+    fn text(&mut self, raw: &str) {
+        self.handle_raw_text(raw);
+    }
+
+    fn comment(&mut self, content: &str) {
+        self.handle_comment(content);
+    }
+
+    fn doctype(&mut self, content: &str) {
+        self.handle_doctype(content);
+    }
+
+    fn cdata(&mut self, content: &str) {
+        // CDATA treated as text.
+        self.handle_raw_text(content);
     }
 }
 

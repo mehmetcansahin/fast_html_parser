@@ -64,6 +64,12 @@ impl NodeFlags {
     /// This node is a CDATA section.
     pub const IS_CDATA: u8 = 1 << 7;
 
+    /// Text node reads from `Arena::source` instead of `text_slab`.
+    ///
+    /// Reuses the [`IS_VOID`](Self::IS_VOID) bit (bit 0), which is unused for
+    /// text nodes. Only meaningful when [`IS_TEXT`](Self::IS_TEXT) is also set.
+    pub const IS_TEXT_FROM_SOURCE: u8 = 1 << 0;
+
     /// Create empty flags.
     #[inline(always)]
     pub const fn empty() -> Self {
