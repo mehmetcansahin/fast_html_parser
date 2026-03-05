@@ -4,6 +4,7 @@
 //! traversal. Text content and attributes are stored in separate slabs,
 //! referenced by offset+length from each [`Node`](crate::node::Node).
 
+use fhp_core::hash::{class_bloom_bit, selector_hash};
 use fhp_core::tag::Tag;
 
 use crate::node::{Node, NodeFlags, NodeId};
@@ -147,6 +148,14 @@ impl Arena {
         self.source = input.as_bytes().to_vec();
     }
 
+    /// Transfer an already-owned `String` as the source buffer (zero copy).
+    ///
+    /// When the caller owns the input `String` (e.g., from an HTTP response),
+    /// this avoids the memcpy that [`set_source`](Arena::set_source) performs.
+    pub fn set_source_owned(&mut self, source: String) {
+        self.source = source.into_bytes();
+    }
+
     /// Allocate a new comment node, storing content in the text slab.
     pub fn new_comment(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
@@ -200,6 +209,9 @@ impl Arena {
         n.attr_offset = offset;
         n.attr_count = count;
         n.flags.set(NodeFlags::HAS_ATTRS);
+
+        // Compute class_hash and id_hash from the just-added attributes.
+        self.compute_node_hashes(node, offset, count);
     }
 
     /// Store raw attribute bytes for lazy parsing.
@@ -337,7 +349,57 @@ impl Arena {
             n.attr_offset = slab_offset;
             n.attr_count = count;
             n.flags.set(NodeFlags::HAS_ATTRS);
+
+            // Compute class_hash (bloom) and id_hash (exact) from parsed attrs.
+            self.compute_node_hashes(node, slab_offset, count);
         }
+    }
+
+    /// Compute class bloom hash and id hash from a node's just-parsed attributes.
+    ///
+    /// Scans the attribute slab for `class` and `id` attributes and stores
+    /// the computed hashes on the node for fast selector rejection.
+    fn compute_node_hashes(&mut self, node: NodeId, slab_offset: u32, count: u8) {
+        let mut class_hash: u32 = 0;
+        let mut id_hash: u32 = 0;
+        let start = slab_offset as usize;
+        let end = start + count as usize;
+
+        for i in start..end {
+            let attr = &self.attr_slab[i];
+            let name_start = attr.name_offset as usize;
+            let name_end = name_start + attr.name_len as usize;
+            let name_bytes = &self.attr_str_slab[name_start..name_end];
+
+            if name_bytes == b"class" && attr.value_len > 0 {
+                let val_start = attr.value_offset as usize;
+                let val_end = val_start + attr.value_len as usize;
+                let val = &self.attr_str_slab[val_start..val_end];
+                // Build bloom: OR in a bit for each whitespace-separated token.
+                let mut pos = 0;
+                while pos < val.len() {
+                    // Skip whitespace.
+                    while pos < val.len() && val[pos].is_ascii_whitespace() {
+                        pos += 1;
+                    }
+                    let token_start = pos;
+                    while pos < val.len() && !val[pos].is_ascii_whitespace() {
+                        pos += 1;
+                    }
+                    if pos > token_start {
+                        class_hash |= class_bloom_bit(&val[token_start..pos]);
+                    }
+                }
+            } else if name_bytes == b"id" && attr.value_len > 0 {
+                let val_start = attr.value_offset as usize;
+                let val_end = val_start + attr.value_len as usize;
+                id_hash = selector_hash(&self.attr_str_slab[val_start..val_end]);
+            }
+        }
+
+        let n = &mut self.nodes[node.index()];
+        n.class_hash = class_hash;
+        n.id_hash = id_hash;
     }
 
     /// Write an attribute value to the string slab, with optional entity decoding.
@@ -566,6 +628,9 @@ impl Arena {
             let n = &mut self.nodes[node.index()];
             n.attr_offset = slab_offset;
             n.attr_count = count;
+
+            // Compute hashes for lazy-parsed attributes.
+            self.compute_node_hashes(node, slab_offset, count);
         }
     }
 

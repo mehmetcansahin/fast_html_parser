@@ -111,9 +111,11 @@ impl NodeFlags {
 /// | 28     | 4     | `text_len` |
 /// | 32     | 4     | `attr_offset` |
 /// | 36     | 4     | `attr_raw_offset` |
-/// | 40     | 2     | `attr_raw_len` |
-/// | 42     | 1     | `attr_count` |
-/// | 43     | 21    | `_padding` |
+/// | 40     | 4     | `class_hash` |
+/// | 44     | 4     | `id_hash` |
+/// | 48     | 2     | `attr_raw_len` |
+/// | 50     | 1     | `attr_count` |
+/// | 51     | 13    | `_padding` |
 #[repr(C, align(64))]
 pub struct Node {
     // === Hot (first 32 bytes) ===
@@ -145,12 +147,23 @@ pub struct Node {
     pub attr_offset: u32,
     /// Byte offset into `attr_str_slab` for the raw attribute region.
     pub attr_raw_offset: u32,
+    /// 32-bit bloom filter of class attribute tokens.
+    ///
+    /// Each class token is hashed via FNV-1a and a single bit is set at
+    /// `hash % 32`. Zero means no class attribute. Used by the selector
+    /// matcher for fast rejection.
+    pub class_hash: u32,
+    /// FNV-1a hash of the `id` attribute value.
+    ///
+    /// Zero means no id attribute. Used by the selector matcher for fast
+    /// rejection before scanning attributes.
+    pub id_hash: u32,
     /// Length in bytes of the raw attribute region (max 65535).
     pub attr_raw_len: u16,
     /// Number of attributes (0 with raw data present = unparsed lazy).
     pub attr_count: u8,
     /// Padding to fill the cache line.
-    pub _padding: [u8; 21],
+    pub _padding: [u8; 13],
 }
 
 impl Node {
@@ -175,7 +188,9 @@ impl Node {
             attr_count: 0,
             attr_raw_offset: 0,
             attr_raw_len: 0,
-            _padding: [0; 21],
+            class_hash: 0,
+            id_hash: 0,
+            _padding: [0; 13],
         }
     }
 
@@ -198,7 +213,9 @@ impl Node {
             attr_count: 0,
             attr_raw_offset: 0,
             attr_raw_len: 0,
-            _padding: [0; 21],
+            class_hash: 0,
+            id_hash: 0,
+            _padding: [0; 13],
         }
     }
 
@@ -221,7 +238,9 @@ impl Node {
             attr_count: 0,
             attr_raw_offset: 0,
             attr_raw_len: 0,
-            _padding: [0; 21],
+            class_hash: 0,
+            id_hash: 0,
+            _padding: [0; 13],
         }
     }
 
@@ -244,7 +263,9 @@ impl Node {
             attr_count: 0,
             attr_raw_offset: 0,
             attr_raw_len: 0,
-            _padding: [0; 21],
+            class_hash: 0,
+            id_hash: 0,
+            _padding: [0; 13],
         }
     }
 }

@@ -92,6 +92,45 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
     Ok(Document { arena, root })
 }
 
+/// Parse an owned `String` into a [`Document`], transferring the allocation.
+///
+/// Unlike [`parse`], this avoids copying the input bytes into the arena's
+/// source buffer — the `String`'s allocation is transferred directly.
+/// Use this when the caller already owns the input (e.g., from an HTTP
+/// response body).
+///
+/// # Errors
+///
+/// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
+///
+/// # Example
+///
+/// ```
+/// use fhp_tree::parse_owned;
+///
+/// let html = String::from("<div><p>Hello</p></div>");
+/// let doc = parse_owned(html).unwrap();
+/// assert_eq!(doc.root().text_content(), "Hello");
+/// ```
+pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
+    if input.len() > MAX_INPUT_SIZE {
+        return Err(HtmlError::InputTooLarge {
+            size: input.len(),
+            max: MAX_INPUT_SIZE,
+        });
+    }
+
+    let mut builder = TreeBuilder::with_capacity_hint(input.len());
+    // Set source pointer tracking without copying data.
+    builder.set_source_ptr(&input);
+    fhp_tokenizer::tokenize_into(&input, &mut builder);
+    let (mut arena, root) = builder.finish();
+    // Transfer the String's allocation directly — no memcpy.
+    arena.set_source_owned(input);
+
+    Ok(Document { arena, root })
+}
+
 /// Parse raw bytes into a [`Document`], auto-detecting the encoding.
 ///
 /// The encoding detection pipeline:

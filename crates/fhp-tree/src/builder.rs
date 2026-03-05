@@ -159,6 +159,15 @@ impl TreeBuilder {
         self.arena.set_source(input);
     }
 
+    /// Set source pointer tracking without copying data to the arena.
+    ///
+    /// Use this with [`Arena::set_source_owned`] after tokenization to
+    /// avoid a redundant memcpy when the caller owns the input `String`.
+    pub fn set_source_ptr(&mut self, input: &str) {
+        self.source_base = input.as_ptr() as usize;
+        self.source_len = input.len();
+    }
+
     /// Process a single token and insert it into the tree.
     ///
     /// Returns the [`NodeId`] of the newly created node, or `None` if the
