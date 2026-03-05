@@ -100,8 +100,8 @@ fn should_implicit_close(open_tag: Tag, new_tag: Tag) -> bool {
 pub struct TreeBuilder {
     /// The arena that owns all nodes.
     pub(crate) arena: Arena,
-    /// Stack of open element node ids.
-    open_elements: Vec<NodeId>,
+    /// Stack of open element node ids with cached tags.
+    open_elements: Vec<(NodeId, Tag)>,
     /// The synthetic root node (document root).
     root: NodeId,
     /// Base address of the original input (for source-backed text).
@@ -122,18 +122,30 @@ impl TreeBuilder {
     /// input byte length, reducing reallocations for large documents.
     pub fn with_capacity_hint(input_len: usize) -> Self {
         let node_cap = (input_len / 32).max(256);
-        let text_cap = (input_len / 4).max(4096);
+        // Source-backed text uses offsets, not slab — smaller alloc suffices.
+        let text_cap = (input_len / 16).max(4096);
         let attr_cap = (input_len / 128).max(64);
         let mut arena = Arena::with_capacity(node_cap, text_cap, attr_cap);
         // Create a synthetic document root.
         let root = arena.new_element(Tag::Unknown, 0);
+        let mut open_elements = Vec::with_capacity(32);
+        open_elements.push((root, Tag::Unknown));
         Self {
             arena,
-            open_elements: vec![root],
+            open_elements,
             root,
             source_base: 0,
             source_len: 0,
         }
+    }
+
+    /// Enable the inline tag index for O(1) tag lookups after parsing.
+    ///
+    /// When enabled, each element's tag is indexed during tree construction,
+    /// eliminating the need for a separate DFS pass in
+    /// [`DocumentIndex::build`](crate::arena::Arena::tag_index).
+    pub fn enable_tag_index(&mut self) {
+        self.arena.enable_tag_index();
     }
 
     /// Enable source-backed text nodes.
@@ -183,7 +195,10 @@ impl TreeBuilder {
     /// Current parent node (top of open_elements stack).
     #[inline]
     fn current_parent(&self) -> NodeId {
-        *self.open_elements.last().unwrap_or(&self.root)
+        self.open_elements
+            .last()
+            .map(|&(id, _)| id)
+            .unwrap_or(self.root)
     }
 
     /// Current depth.
@@ -233,7 +248,7 @@ impl TreeBuilder {
                 self.arena.set_self_closing(node);
             }
         } else {
-            self.open_elements.push(node);
+            self.open_elements.push((node, tag));
         }
 
         Some(node)
@@ -247,12 +262,11 @@ impl TreeBuilder {
         }
 
         // Find the matching open element on the stack.
-        // Walk backwards to find the nearest match.
+        // Walk backwards to find the nearest match — read tag from cached tuple.
         let mut match_idx = None;
         for i in (1..self.open_elements.len()).rev() {
-            let open_id = self.open_elements[i];
-            let open_node = &self.arena.nodes[open_id.index()];
-            if open_node.tag == tag {
+            let (open_id, open_tag) = self.open_elements[i];
+            if open_tag == tag {
                 if tag == Tag::Unknown {
                     let open_name = self.arena.unknown_tag_name(open_id).unwrap_or("");
                     if !open_name.eq_ignore_ascii_case(name) {
@@ -298,14 +312,12 @@ impl TreeBuilder {
         let parent = self.current_parent();
 
         #[cfg(feature = "entity-decode")]
-        let node = if raw.as_bytes().contains(&b'&') {
+        let node = {
             let decoded = fhp_tokenizer::entity::decode_entities(raw);
             match decoded {
                 std::borrow::Cow::Borrowed(s) => self.try_source_ref(depth, s),
                 std::borrow::Cow::Owned(s) => self.arena.new_text(depth, &s),
             }
-        } else {
-            self.try_source_ref(depth, raw)
         };
 
         #[cfg(not(feature = "entity-decode"))]
@@ -353,9 +365,9 @@ impl TreeBuilder {
     /// Apply implicit close rules based on the new tag.
     fn apply_implicit_close(&mut self, new_tag: Tag) {
         // Check if the current open element should be implicitly closed.
+        // Tag is read from the cached tuple — no arena access needed.
         while self.open_elements.len() > 1 {
-            let current = *self.open_elements.last().unwrap();
-            let current_tag = self.arena.nodes[current.index()].tag;
+            let (_, current_tag) = *self.open_elements.last().unwrap();
 
             if should_implicit_close(current_tag, new_tag) {
                 self.open_elements.pop();
@@ -394,7 +406,7 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
                 self.arena.set_self_closing(node);
             }
         } else {
-            self.open_elements.push(node);
+            self.open_elements.push((node, tag));
         }
     }
 

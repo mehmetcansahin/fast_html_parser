@@ -47,6 +47,10 @@ harness = false
 name = "profile_bench"
 harness = false
 
+[[bench]]
+name = "realworld_bench"
+harness = false
+
 [[example]]
 name = "basic_parse"
 

@@ -111,11 +111,8 @@ pub fn compute_all_masks_safe(block: &[u8]) -> crate::AllMasks {
         match b {
             b'<' => masks.lt |= bit,
             b'>' => masks.gt |= bit,
-            b'&' => masks.amp |= bit,
             b'"' => masks.quot |= bit,
             b'\'' => masks.apos |= bit,
-            b'=' => masks.eq |= bit,
-            b'/' => masks.slash |= bit,
             _ => {}
         }
     }
@@ -261,7 +258,6 @@ mod tests {
         let masks = unsafe { compute_all_masks(input) };
         assert_eq!(masks.lt, 1 << 0); // '<' at 0
         assert_eq!(masks.gt, 1 << 16); // '>' at 16
-        assert_eq!(masks.eq, 1 << 10); // '=' at 10
         assert_eq!(masks.quot, (1 << 11) | (1 << 15)); // '"' at 11 and 15
     }
 
@@ -270,7 +266,6 @@ mod tests {
         let masks = unsafe { compute_all_masks(b"") };
         assert_eq!(masks.lt, 0);
         assert_eq!(masks.gt, 0);
-        assert_eq!(masks.amp, 0);
     }
 
     #[test]
@@ -279,10 +274,7 @@ mod tests {
         let masks = unsafe { compute_all_masks(input) };
         assert_eq!(masks.lt, unsafe { compute_byte_mask(input, b'<') });
         assert_eq!(masks.gt, unsafe { compute_byte_mask(input, b'>') });
-        assert_eq!(masks.amp, unsafe { compute_byte_mask(input, b'&') });
         assert_eq!(masks.quot, unsafe { compute_byte_mask(input, b'"') });
         assert_eq!(masks.apos, unsafe { compute_byte_mask(input, b'\'') });
-        assert_eq!(masks.eq, unsafe { compute_byte_mask(input, b'=') });
-        assert_eq!(masks.slash, unsafe { compute_byte_mask(input, b'/') });
     }
 }

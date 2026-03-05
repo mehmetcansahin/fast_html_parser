@@ -382,6 +382,7 @@ dependencies = [
  "fhp-core",
  "fhp-encoding",
  "fhp-tokenizer",
+ "memchr",
  "thiserror",
  "tokio",
 ]
