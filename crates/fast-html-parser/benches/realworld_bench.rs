@@ -59,12 +59,34 @@ fn bench_realworld_parse(c: &mut Criterion) {
     }
 }
 
+fn bench_realworld_parse_owned(c: &mut Criterion) {
+    let pages: Vec<(&str, String)> = vec![
+        ("hackernews_34kb", load_testdata("hackernews.html")),
+        ("wikipedia_590kb", load_testdata("wikipedia.html")),
+    ];
+
+    for (name, html) in &pages {
+        let mut group = c.benchmark_group(format!("realworld_owned/{name}"));
+        group.throughput(criterion::Throughput::Bytes(html.len() as u64));
+
+        group.bench_function("parse", |b| {
+            b.iter(|| fast_html_parser::HtmlParser::parse(html).unwrap());
+        });
+
+        group.bench_function("parse_owned", |b| {
+            b.iter(|| fast_html_parser::HtmlParser::parse_owned(html.clone()).unwrap());
+        });
+
+        group.finish();
+    }
+}
+
 fn bench_realworld_select(c: &mut Criterion) {
     let wikipedia = load_testdata("wikipedia.html");
 
     let mut group = c.benchmark_group("realworld_select/wikipedia");
 
-    // fast-html-parser
+    // fast-html-parser — string selector
     {
         use fast_html_parser::Selectable;
         let doc = fast_html_parser::HtmlParser::parse(&wikipedia).unwrap();
@@ -77,6 +99,25 @@ fn bench_realworld_select(c: &mut Criterion) {
         });
         group.bench_function("fhp/table td", |b| {
             b.iter(|| doc.select("table td").unwrap());
+        });
+    }
+
+    // fast-html-parser — compiled selector
+    {
+        use fast_html_parser::{CompiledSelector, Selectable};
+        let doc = fast_html_parser::HtmlParser::parse(&wikipedia).unwrap();
+        let sel_a = CompiledSelector::new("a[href]").unwrap();
+        let sel_div = CompiledSelector::new("div.mw-body").unwrap();
+        let sel_td = CompiledSelector::new("table td").unwrap();
+
+        group.bench_function("fhp_compiled/a[href]", |b| {
+            b.iter(|| doc.select_compiled(&sel_a).unwrap());
+        });
+        group.bench_function("fhp_compiled/div.mw-body", |b| {
+            b.iter(|| doc.select_compiled(&sel_div).unwrap());
+        });
+        group.bench_function("fhp_compiled/table td", |b| {
+            b.iter(|| doc.select_compiled(&sel_td).unwrap());
         });
     }
 
@@ -128,5 +169,10 @@ fn bench_realworld_select(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_realworld_parse, bench_realworld_select);
+criterion_group!(
+    benches,
+    bench_realworld_parse,
+    bench_realworld_parse_owned,
+    bench_realworld_select
+);
 criterion_main!(benches);

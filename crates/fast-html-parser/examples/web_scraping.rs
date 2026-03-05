@@ -67,4 +67,23 @@ fn main() {
             node.attr("href").unwrap_or("-")
         );
     }
+
+    // Pre-compiled selector — parse once, reuse across many documents.
+    // Ideal for scraping loops where the same selector is applied repeatedly.
+    println!("\nUsing CompiledSelector:");
+    let link_sel = CompiledSelector::new("a").unwrap();
+    let docs = vec![
+        HtmlParser::parse("<a href=\"/one\">One</a>").unwrap(),
+        HtmlParser::parse("<a href=\"/two\">Two</a>").unwrap(),
+    ];
+    for d in &docs {
+        let links = d.select_compiled(&link_sel).unwrap();
+        for node in links.iter() {
+            println!(
+                "  [{text}]({href})",
+                text = node.text_content(),
+                href = node.attr("href").unwrap_or("-")
+            );
+        }
+    }
 }

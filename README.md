@@ -43,6 +43,34 @@ let items = doc.select("li").unwrap();
 assert_eq!(items.len(), 2);
 ```
 
+### Compiled Selectors
+
+Pre-compile a selector once and reuse it across many documents — ideal for scraping loops:
+
+```rust
+use fast_html_parser::prelude::*;
+
+let selector = CompiledSelector::new("a.link").unwrap();
+
+for html in &["<a class=\"link\">one</a>", "<a class=\"link\">two</a>"] {
+    let doc = HtmlParser::parse(html).unwrap();
+    let links = doc.select_compiled(&selector).unwrap();
+    println!("{}", links.text());
+}
+```
+
+### Zero-Copy Parsing
+
+When you already own a `String` (e.g. from an HTTP response), avoid the internal memcpy:
+
+```rust
+use fast_html_parser::HtmlParser;
+
+let body = String::from("<div><p>Hello</p></div>");
+let doc = HtmlParser::parse_owned(body).unwrap();
+assert_eq!(doc.root().text_content(), "Hello");
+```
+
 ### XPath
 
 ```rust
@@ -111,16 +139,36 @@ The parser is organized as a workspace of focused crates:
 
 Benchmarked on ARM64 (Apple Silicon, NEON):
 
+### SIMD Throughput
+
 | Operation | Throughput |
 |---|---|
-| SIMD skip_whitespace | 10.2 GiB/s |
-| SIMD find_delimiters | 8.3 GiB/s |
-| SIMD classify_bytes | 6.2 GiB/s |
-| Parse + tree build | 173-222 MiB/s |
-| CSS tag select (100KB) | ~15 us |
-| CSS descendant select (100KB) | ~67 us |
+| skip_whitespace | 10.2 GiB/s |
+| find_delimiters | 8.3 GiB/s |
+| classify_bytes | 6.2 GiB/s |
 
 NEON achieves ~5-5.5x speedup over scalar fallback.
+
+### Real-World Parse Throughput
+
+| Page | Size | Time | Throughput | vs tl | vs scraper |
+|---|---|---|---|---|---|
+| Hacker News | 34 KB | ~105 µs | 314 MiB/s | 1.2x slower | 7x faster |
+| GitHub | 301 KB | ~323 µs | 893 MiB/s | 1.1x slower | 3x faster |
+| Stack Overflow | 415 KB | ~640 µs | 620 MiB/s | 1.1x faster | 2x faster |
+| Wikipedia | 590 KB | ~1.08 ms | 521 MiB/s | 1.4x faster | 4x faster |
+
+### CSS Selector (100KB HTML)
+
+| Selector | Time |
+|---|---|
+| Tag (`p`) | ~10 µs |
+| Class (`.highlight`) | ~23 µs |
+| ID (`#main`) | ~13 µs |
+| Descendant (`div p`) | ~71 µs |
+| Complex (`div > ul li a`) | ~65 µs |
+
+Per-node hash rejection (class bloom filter, ID FNV-1a) provides fast early exit for non-matching nodes.
 
 Run benchmarks locally:
 
