@@ -90,7 +90,7 @@ pub mod streaming {
 /// CSS selector and XPath engine.
 #[cfg(any(feature = "css-selector", feature = "xpath"))]
 #[cfg_attr(docsrs, doc(cfg(any(feature = "css-selector", feature = "xpath"))))]
-pub use fhp_selector::{DocumentIndex, Selectable, Selection};
+pub use fhp_selector::{CompiledSelector, DocumentIndex, Selectable, Selection};
 
 /// XPath types (re-exported from selector crate).
 #[cfg(feature = "xpath")]
@@ -128,7 +128,7 @@ pub mod prelude {
 
     #[cfg(any(feature = "css-selector", feature = "xpath"))]
     #[cfg_attr(docsrs, doc(cfg(any(feature = "css-selector", feature = "xpath"))))]
-    pub use fhp_selector::{Selectable, Selection};
+    pub use fhp_selector::{CompiledSelector, Selectable, Selection};
 
     pub use crate::HtmlParser;
 }
@@ -249,6 +249,28 @@ impl HtmlParser {
         fhp_tree::parse(input)
     }
 
+    /// Parse an owned `String` with default settings, transferring the allocation.
+    ///
+    /// Avoids a memcpy of the source bytes when the caller already owns the
+    /// input (e.g., from an HTTP response body).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fast_html_parser::HtmlParser;
+    ///
+    /// let html = String::from("<div><p>Hello</p></div>");
+    /// let doc = HtmlParser::parse_owned(html).unwrap();
+    /// assert_eq!(doc.root().text_content(), "Hello");
+    /// ```
+    pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
+        fhp_tree::parse_owned(input)
+    }
+
     /// Parse raw bytes with default settings, auto-detecting encoding.
     ///
     /// # Errors
@@ -284,6 +306,25 @@ impl HtmlParser {
         fhp_tree::parse(input)
     }
 
+    /// Parse an owned `String` with the current configuration.
+    ///
+    /// Avoids a memcpy of the source bytes when the caller already owns the
+    /// input (e.g., from an HTTP response body).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds the
+    /// configured limit.
+    pub fn parse_str_owned(&self, input: String) -> Result<Document, HtmlError> {
+        if input.len() > self.max_input_size {
+            return Err(HtmlError::InputTooLarge {
+                size: input.len(),
+                max: self.max_input_size,
+            });
+        }
+        fhp_tree::parse_owned(input)
+    }
+
     /// Parse raw bytes with the current configuration, auto-detecting encoding.
     ///
     /// # Errors
@@ -311,6 +352,18 @@ impl HtmlParser {
 /// ```
 pub fn parse(input: &str) -> Result<Document, HtmlError> {
     HtmlParser::parse(input)
+}
+
+/// Parse an owned `String` with default settings, transferring the allocation.
+///
+/// # Example
+///
+/// ```
+/// let doc = fast_html_parser::parse_owned(String::from("<p>Quick</p>")).unwrap();
+/// assert_eq!(doc.root().text_content(), "Quick");
+/// ```
+pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
+    HtmlParser::parse_owned(input)
 }
 
 /// Parse raw bytes with default settings, auto-detecting encoding.

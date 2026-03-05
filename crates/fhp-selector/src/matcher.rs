@@ -7,6 +7,7 @@
 //! When a selector contains descendant combinators, ancestor bloom
 //! filters are used for fast rejection.
 
+use fhp_core::hash::{class_bloom_bit, selector_hash};
 use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
 use fhp_tree::node::{NodeFlags, NodeId};
@@ -51,6 +52,12 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
         }
 
         SimpleSelector::Class(class_name) => {
+            // Fast rejection via per-node class bloom filter.
+            let bloom_bit = class_bloom_bit(class_name.as_bytes());
+            if n.class_hash & bloom_bit == 0 {
+                return false;
+            }
+            // Bloom matched — verify via real attribute scan.
             let attrs = arena.attrs(node);
             attrs.iter().any(|a| {
                 arena.attr_name(a) == "class"
@@ -61,6 +68,12 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
         }
 
         SimpleSelector::Id(id) => {
+            // Fast rejection via per-node id hash.
+            let target_hash = selector_hash(id.as_bytes());
+            if n.id_hash == 0 || n.id_hash != target_hash {
+                return false;
+            }
+            // Hash matched — verify via real attribute scan (collision possible).
             let attrs = arena.attrs(node);
             attrs
                 .iter()
@@ -658,6 +671,11 @@ fn simple_tag_selector(selector: &Selector) -> Option<Tag> {
 
 #[inline]
 fn node_has_id(arena: &Arena, node: NodeId, target_id: &str) -> bool {
+    let n = arena.get(node);
+    let target_hash = selector_hash(target_id.as_bytes());
+    if n.id_hash == 0 || n.id_hash != target_hash {
+        return false;
+    }
     arena
         .attrs(node)
         .iter()

@@ -76,6 +76,54 @@ use matcher::{select_all_list, select_first_list};
 use parser::parse_selector;
 use xpath::ast::XPathResult;
 
+/// A pre-compiled CSS selector for reuse across documents and threads.
+///
+/// Parsing a CSS selector string has non-trivial cost. When the same selector
+/// is used to query many documents (e.g., in a scraping loop), compile it once
+/// and reuse it to eliminate repeated parse overhead.
+///
+/// # Example
+///
+/// ```
+/// use fhp_tree::parse;
+/// use fhp_selector::{CompiledSelector, Selectable};
+///
+/// let sel = CompiledSelector::new("div.content").unwrap();
+/// let doc = parse("<div class=\"content\">Hello</div>").unwrap();
+/// let results = doc.select_compiled(&sel).unwrap();
+/// assert_eq!(results.len(), 1);
+/// ```
+#[derive(Clone)]
+pub struct CompiledSelector {
+    list: Arc<ast::SelectorList>,
+}
+
+impl CompiledSelector {
+    /// Compile a CSS selector string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SelectorError::Invalid`] if the selector syntax is invalid.
+    pub fn new(css: &str) -> Result<Self, SelectorError> {
+        Ok(Self {
+            list: Arc::new(parse_selector(css)?),
+        })
+    }
+
+    /// Access the underlying parsed selector list.
+    pub fn as_list(&self) -> &ast::SelectorList {
+        &self.list
+    }
+}
+
+impl core::fmt::Debug for CompiledSelector {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("CompiledSelector")
+            .field("selectors", &self.list.selectors.len())
+            .finish()
+    }
+}
+
 /// Maximum number of parsed selector ASTs cached per thread.
 const SELECTOR_CACHE_CAPACITY: usize = 256;
 /// Skip caching unusually long selectors to avoid pinning large keys.
@@ -217,6 +265,28 @@ impl<'a> Selection<'a> {
         self.nodes.is_empty()
     }
 
+    /// Sub-select with a pre-compiled selector within the matched nodes.
+    ///
+    /// Each matched node is used as a subtree root, and results are
+    /// deduplicated in document order.
+    pub fn select_compiled(&self, sel: &CompiledSelector) -> Result<Selection<'a>, SelectorError> {
+        let list = &sel.list;
+        if self.nodes.len() == 1 {
+            let results = select_all_list(self.doc.arena(), self.nodes[0], list);
+            return Ok(Selection::new(self.doc, results));
+        }
+        let mut results = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for &node_id in &self.nodes {
+            for id in select_all_list(self.doc.arena(), node_id, list) {
+                if seen.insert(id) {
+                    results.push(id);
+                }
+            }
+        }
+        Ok(Selection::new(self.doc, results))
+    }
+
     /// Sub-select: run a CSS selector within the matched nodes.
     ///
     /// Each matched node is used as a subtree root, and results are
@@ -329,6 +399,18 @@ pub trait Selectable {
     /// ```
     fn select(&self, css: &str) -> Result<Selection<'_>, SelectorError>;
 
+    /// Select all nodes matching a pre-compiled CSS selector.
+    ///
+    /// This avoids re-parsing the selector string on every call, which is
+    /// beneficial when the same selector is reused across many documents.
+    fn select_compiled(&self, sel: &CompiledSelector) -> Result<Selection<'_>, SelectorError>;
+
+    /// Select the first node matching a pre-compiled CSS selector.
+    fn select_first_compiled(
+        &self,
+        sel: &CompiledSelector,
+    ) -> Result<Option<NodeRef<'_>>, SelectorError>;
+
     /// Select the first node matching a CSS selector.
     fn select_first(&self, css: &str) -> Result<Option<NodeRef<'_>>, SelectorError>;
 
@@ -375,6 +457,19 @@ impl Selectable for Document {
         let list = parse_selector_cached(css)?;
         let nodes = select_all_list(self.arena(), self.root_id(), &list);
         Ok(Selection::new(self, nodes))
+    }
+
+    fn select_compiled(&self, sel: &CompiledSelector) -> Result<Selection<'_>, SelectorError> {
+        let nodes = select_all_list(self.arena(), self.root_id(), &sel.list);
+        Ok(Selection::new(self, nodes))
+    }
+
+    fn select_first_compiled(
+        &self,
+        sel: &CompiledSelector,
+    ) -> Result<Option<NodeRef<'_>>, SelectorError> {
+        let node = select_first_list(self.arena(), self.root_id(), &sel.list);
+        Ok(node.map(|id| self.get(id)))
     }
 
     fn select_first(&self, css: &str) -> Result<Option<NodeRef<'_>>, SelectorError> {
@@ -750,6 +845,55 @@ mod tests {
             XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 2),
             _ => panic!("expected Nodes"),
         }
+    }
+
+    #[test]
+    fn compiled_selector_basic() {
+        let sel = CompiledSelector::new("p").unwrap();
+        let doc = parse("<div><p>Hello</p></div>").unwrap();
+        let results = doc.select_compiled(&sel).unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results.text(), "Hello");
+    }
+
+    #[test]
+    fn compiled_selector_first() {
+        let sel = CompiledSelector::new("p").unwrap();
+        let doc = parse("<div><p>a</p><p>b</p></div>").unwrap();
+        let first = doc.select_first_compiled(&sel).unwrap();
+        assert!(first.is_some());
+        assert_eq!(first.unwrap().text_content(), "a");
+    }
+
+    #[test]
+    fn compiled_selector_reuse_across_docs() {
+        let sel = CompiledSelector::new("span.active").unwrap();
+        let doc1 = parse("<span class=\"active\">one</span>").unwrap();
+        let doc2 = parse("<div><span class=\"active\">two</span></div>").unwrap();
+        assert_eq!(doc1.select_compiled(&sel).unwrap().text(), "one");
+        assert_eq!(doc2.select_compiled(&sel).unwrap().text(), "two");
+    }
+
+    #[test]
+    fn compiled_selector_chaining() {
+        let sel = CompiledSelector::new("a").unwrap();
+        let doc = parse("<ul><li><a>1</a></li><li><a>2</a></li></ul>").unwrap();
+        let lis = doc.select("li").unwrap();
+        let links = lis.select_compiled(&sel).unwrap();
+        assert_eq!(links.len(), 2);
+    }
+
+    #[test]
+    fn compiled_selector_invalid() {
+        assert!(CompiledSelector::new("").is_err());
+    }
+
+    #[test]
+    fn compiled_selector_clone() {
+        let sel = CompiledSelector::new("div").unwrap();
+        let sel2 = sel.clone();
+        let doc = parse("<div>ok</div>").unwrap();
+        assert_eq!(doc.select_compiled(&sel2).unwrap().len(), 1);
     }
 
     #[test]
