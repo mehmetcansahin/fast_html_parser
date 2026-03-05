@@ -93,10 +93,53 @@ fn bench_chaining(c: &mut Criterion) {
     });
 }
 
+fn bench_compiled_selector(c: &mut Criterion) {
+    let medium = load_testdata("medium_100kb.html");
+    let doc = parse(&medium).unwrap();
+
+    let mut group = c.benchmark_group("compiled");
+
+    // Measure string-based select (includes cache lookup / parse).
+    group.bench_function("string_class", |b| {
+        b.iter(|| {
+            let sel = doc.select(".highlight").unwrap();
+            std::hint::black_box(sel.len());
+        });
+    });
+
+    // Measure pre-compiled select (zero parse overhead).
+    let compiled = fhp_selector::CompiledSelector::new(".highlight").unwrap();
+    group.bench_function("compiled_class", |b| {
+        b.iter(|| {
+            let sel = doc.select_compiled(&compiled).unwrap();
+            std::hint::black_box(sel.len());
+        });
+    });
+
+    // Compound selector comparison.
+    group.bench_function("string_compound", |b| {
+        b.iter(|| {
+            let sel = doc.select("div > ul li a").unwrap();
+            std::hint::black_box(sel.len());
+        });
+    });
+
+    let compiled_compound = fhp_selector::CompiledSelector::new("div > ul li a").unwrap();
+    group.bench_function("compiled_compound", |b| {
+        b.iter(|| {
+            let sel = doc.select_compiled(&compiled_compound).unwrap();
+            std::hint::black_box(sel.len());
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_select,
     bench_find_convenience,
-    bench_chaining
+    bench_chaining,
+    bench_compiled_selector
 );
 criterion_main!(benches);

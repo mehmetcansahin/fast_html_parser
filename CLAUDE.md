@@ -1,7 +1,7 @@
 # HTML Parser — SIMD-Optimized
 
 ## Proje Planı
-Tüm fazlar tamamlandı. Proje yayın aşamasında.
+Tüm fazlar + Tier 1-3 optimizasyonları tamamlandı. Proje yayın aşamasında.
 
 ## Kurallar
 - Rust edition 2024 kullan

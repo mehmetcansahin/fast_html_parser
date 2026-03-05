@@ -25,6 +25,23 @@ fn bench_parse(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_parse_owned(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parse_owned");
+
+    for (name, html) in [("1kb", SMALL_HTML), ("100kb", MEDIUM_HTML)] {
+        group.throughput(Throughput::Bytes(html.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("borrow", name), html, |b, input| {
+            b.iter(|| HtmlParser::parse(input).unwrap());
+        });
+        group.bench_with_input(BenchmarkId::new("owned", name), html, |b, input| {
+            b.iter(|| HtmlParser::parse_owned(input.to_string()).unwrap());
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_parse_bytes(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse_bytes");
 
@@ -64,6 +81,8 @@ fn bench_streaming(c: &mut Criterion) {
 
 #[cfg(feature = "css-selector")]
 fn bench_select(c: &mut Criterion) {
+    use fast_html_parser::CompiledSelector;
+
     let mut group = c.benchmark_group("select");
 
     let doc = HtmlParser::parse(MEDIUM_HTML).unwrap();
@@ -82,6 +101,17 @@ fn bench_select(c: &mut Criterion) {
 
     group.bench_function("complex", |b| {
         b.iter(|| doc.select("div.article > h2 + p").unwrap());
+    });
+
+    // Compiled selector comparison.
+    let compiled_class = CompiledSelector::new(".content").unwrap();
+    group.bench_function("compiled_class", |b| {
+        b.iter(|| doc.select_compiled(&compiled_class).unwrap());
+    });
+
+    let compiled_complex = CompiledSelector::new("div.article > h2 + p").unwrap();
+    group.bench_function("compiled_complex", |b| {
+        b.iter(|| doc.select_compiled(&compiled_complex).unwrap());
     });
 
     group.finish();
@@ -115,6 +145,7 @@ fn bench_tree_traversal(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_parse,
+    bench_parse_owned,
     bench_parse_bytes,
     bench_streaming,
     bench_select,
