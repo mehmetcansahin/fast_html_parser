@@ -44,8 +44,7 @@ fn decode_entities_slow(input: &str) -> Cow<'_, str> {
         if let Some(rel_semi) = input[amp + 1..].find(';') {
             let semi = amp + 1 + rel_semi;
             let entity_body = &input[amp + 1..semi];
-            if let Some(decoded) = try_decode_entity(entity_body) {
-                result.push_str(&decoded);
+            if try_decode_entity_into(entity_body, &mut result) {
                 cursor = semi + 1;
                 continue;
             }
@@ -64,25 +63,39 @@ fn decode_entities_slow(input: &str) -> Cow<'_, str> {
     Cow::Owned(result)
 }
 
-/// Try to decode a single entity body (between `&` and `;`).
-fn try_decode_entity(body: &str) -> Option<String> {
+/// Try to decode a single entity body directly into the result buffer.
+///
+/// Returns `true` if decoded successfully, writing directly to `result`
+/// without any intermediate `String` allocation.
+fn try_decode_entity_into(body: &str, result: &mut String) -> bool {
     if body.is_empty() {
-        return None;
+        return false;
     }
 
     if let Some(digits) = body.strip_prefix('#') {
         // Numeric entity.
         if digits.starts_with('x') || digits.starts_with('X') {
             // Hex: &#xHH;
-            fhp_core::entity::decode_numeric(&digits[1..], true).map(|c| c.to_string())
+            if let Some(c) = fhp_core::entity::decode_numeric(&digits[1..], true) {
+                result.push(c);
+                return true;
+            }
         } else {
             // Decimal: &#DD;
-            fhp_core::entity::decode_numeric(digits, false).map(|c| c.to_string())
+            if let Some(c) = fhp_core::entity::decode_numeric(digits, false) {
+                result.push(c);
+                return true;
+            }
         }
     } else {
-        // Named entity.
-        fhp_core::entity::decode_named(body).map(|s| s.to_string())
+        // Named entity — &'static str, zero alloc.
+        if let Some(s) = fhp_core::entity::decode_named(body) {
+            result.push_str(s);
+            return true;
+        }
     }
+
+    false
 }
 
 #[cfg(test)]

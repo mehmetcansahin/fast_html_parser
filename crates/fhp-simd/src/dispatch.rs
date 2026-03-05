@@ -214,10 +214,7 @@ mod tests {
         let scalar = crate::scalar::compute_all_masks_safe(input);
         assert_eq!(dispatched.lt, scalar.lt, "lt mismatch");
         assert_eq!(dispatched.gt, scalar.gt, "gt mismatch");
-        assert_eq!(dispatched.amp, scalar.amp, "amp mismatch");
         assert_eq!(dispatched.quot, scalar.quot, "quot mismatch");
         assert_eq!(dispatched.apos, scalar.apos, "apos mismatch");
-        assert_eq!(dispatched.eq, scalar.eq, "eq mismatch");
-        assert_eq!(dispatched.slash, scalar.slash, "slash mismatch");
     }
 }

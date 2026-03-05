@@ -133,7 +133,7 @@ pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
         let block_end = (block_start + BLOCK_SIZE).min(len);
         let chunk = &bytes[block_start..block_end];
 
-        // Step 1: Compute all 7 bitmasks in a single SIMD pass.
+        // Step 1: Compute all 4 bitmasks in a single SIMD pass.
         // SAFETY: dispatch function pointer matches detected CPU features.
         let mut masks: AllMasks = unsafe { compute(chunk) };
 
@@ -220,7 +220,7 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
         let block_end = (block_start + BLOCK_SIZE).min(len);
         let chunk = &bytes[block_start..block_end];
 
-        // Step 1: Compute all 7 bitmasks in a single SIMD pass.
+        // Step 1: Compute all 4 bitmasks in a single SIMD pass.
         // SAFETY: dispatch function pointer matches detected CPU features.
         let mut masks: AllMasks = unsafe { compute(chunk) };
 
@@ -277,6 +277,11 @@ fn compute_string_mask_inline(
     carry_dq: bool,
     carry_sq: bool,
 ) -> (u64, bool, bool) {
+    // Fast path: no quotes in this block and no carry — skip prefix_xor entirely.
+    if masks.quot == 0 && masks.apos == 0 && !carry_dq && !carry_sq {
+        return (0, false, false);
+    }
+
     // Pass 1: double-quote regions.
     let flipped_dq = prefix_xor(masks.quot);
     let dq_in = if carry_dq { !flipped_dq } else { flipped_dq };

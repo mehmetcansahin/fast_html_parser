@@ -144,6 +144,7 @@ impl<'a> Parser<'a> {
     }
 
     /// In Data mode: only `<` matters.
+    #[inline(always)]
     fn on_data_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'<' {
             // Flush text before this `<`.
@@ -179,6 +180,7 @@ impl<'a> Parser<'a> {
     }
 
     /// In tag mode: `>` closes the tag.
+    #[inline(always)]
     fn on_in_tag_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'>' {
             // Parse the tag content between `<` and `>`.
@@ -462,6 +464,7 @@ impl<'a> Parser<'a> {
     }
 
     /// In Data mode (sink): only `<` matters.
+    #[inline(always)]
     fn on_data_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
         if byte == b'<' {
             self.flush_text_sink(pos, sink);
@@ -491,6 +494,7 @@ impl<'a> Parser<'a> {
     }
 
     /// In tag mode (sink): `>` closes the tag.
+    #[inline(always)]
     fn on_in_tag_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
         if byte == b'>' {
             self.parse_tag_sink(self.tag_open_pos, pos, sink);
@@ -636,7 +640,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Flush trailing text at end of input (generic).
-    #[inline(always)]
+    #[inline]
     fn flush_trailing_impl(&mut self, emit: &mut impl FnMut(Token<'a>)) {
         let end = self.input.len();
         if end > self.cursor {
@@ -671,13 +675,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Peek at a byte in the input, returning `None` if out of bounds.
-    #[inline]
+    #[inline(always)]
     fn peek(&self, pos: usize) -> Option<u8> {
         self.input.get(pos).copied()
     }
 
     /// Get a `&str` slice from the input.
-    #[inline]
+    #[inline(always)]
     fn str_slice(&self, start: usize, end: usize) -> &'a str {
         if start >= end || end > self.input.len() {
             return "";

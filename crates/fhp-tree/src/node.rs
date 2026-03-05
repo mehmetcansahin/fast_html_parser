@@ -110,8 +110,10 @@ impl NodeFlags {
 /// | 24     | 4     | `text_offset` |
 /// | 28     | 4     | `text_len` |
 /// | 32     | 4     | `attr_offset` |
-/// | 36     | 1     | `attr_count` |
-/// | 37     | 27    | `_padding` |
+/// | 36     | 4     | `attr_raw_offset` |
+/// | 40     | 2     | `attr_raw_len` |
+/// | 42     | 1     | `attr_count` |
+/// | 43     | 21    | `_padding` |
 #[repr(C, align(64))]
 pub struct Node {
     // === Hot (first 32 bytes) ===
@@ -137,12 +139,18 @@ pub struct Node {
     pub text_len: u32,
 
     // === Cold (second 32 bytes) ===
-    /// Byte offset into the attribute slab.
+    // Fields ordered to avoid implicit padding with repr(C):
+    // u32s first, then u16, then u8, then byte-array padding.
+    /// Byte offset into the attribute slab (after lazy parse).
     pub attr_offset: u32,
-    /// Number of attributes.
+    /// Byte offset into `attr_str_slab` for the raw attribute region.
+    pub attr_raw_offset: u32,
+    /// Length in bytes of the raw attribute region (max 65535).
+    pub attr_raw_len: u16,
+    /// Number of attributes (0 with raw data present = unparsed lazy).
     pub attr_count: u8,
     /// Padding to fill the cache line.
-    pub _padding: [u8; 27],
+    pub _padding: [u8; 21],
 }
 
 impl Node {
@@ -165,7 +173,9 @@ impl Node {
             text_len: 0,
             attr_offset: 0,
             attr_count: 0,
-            _padding: [0; 27],
+            attr_raw_offset: 0,
+            attr_raw_len: 0,
+            _padding: [0; 21],
         }
     }
 
@@ -186,7 +196,9 @@ impl Node {
             text_len,
             attr_offset: 0,
             attr_count: 0,
-            _padding: [0; 27],
+            attr_raw_offset: 0,
+            attr_raw_len: 0,
+            _padding: [0; 21],
         }
     }
 
@@ -207,7 +219,9 @@ impl Node {
             text_len,
             attr_offset: 0,
             attr_count: 0,
-            _padding: [0; 27],
+            attr_raw_offset: 0,
+            attr_raw_len: 0,
+            _padding: [0; 21],
         }
     }
 
@@ -228,7 +242,9 @@ impl Node {
             text_len,
             attr_offset: 0,
             attr_count: 0,
-            _padding: [0; 27],
+            attr_raw_offset: 0,
+            attr_raw_len: 0,
+            _padding: [0; 21],
         }
     }
 }

@@ -467,12 +467,44 @@ pub struct DocumentIndex {
 
 impl DocumentIndex {
     /// Build an index from a document by scanning all nodes in a single pass.
+    ///
+    /// If the arena has a pre-built tag index (constructed inline during tree
+    /// building), the tag map is copied directly — avoiding the tag scan.
     pub fn build(doc: &Document) -> Self {
         let arena = doc.arena();
         let mut id_map = HashMap::with_capacity(arena.len() / 8);
         let mut class_map: HashMap<String, Vec<NodeId>> = HashMap::with_capacity(arena.len() / 4);
-        let mut tag_map: HashMap<Tag, Vec<NodeId>> = HashMap::with_capacity(64);
 
+        // Use pre-built tag index if available.
+        let tag_map = if let Some(pre_built) = arena.tag_index() {
+            let mut map = HashMap::with_capacity(64);
+            for (tag_u8, ids) in pre_built.iter().enumerate() {
+                if !ids.is_empty() {
+                    // SAFETY: Tag is repr(u8), but not all u8 values are valid.
+                    // We only insert entries that were created via new_element with
+                    // a valid Tag, so the cast is safe (values came from Tag as u8).
+                    let tag: Tag = unsafe { std::mem::transmute(tag_u8 as u8) };
+                    map.insert(tag, ids.clone());
+                }
+            }
+            map
+        } else {
+            let mut map: HashMap<Tag, Vec<NodeId>> = HashMap::with_capacity(64);
+            for i in 0..arena.len() {
+                let node_id = NodeId(i as u32);
+                let n = arena.get(node_id);
+                if n.flags.has(NodeFlags::IS_TEXT)
+                    || n.flags.has(NodeFlags::IS_COMMENT)
+                    || n.flags.has(NodeFlags::IS_DOCTYPE)
+                {
+                    continue;
+                }
+                map.entry(n.tag).or_default().push(node_id);
+            }
+            map
+        };
+
+        // Build id and class maps — still requires attribute scan.
         for i in 0..arena.len() {
             let node_id = NodeId(i as u32);
             let n = arena.get(node_id);
@@ -485,10 +517,6 @@ impl DocumentIndex {
                 continue;
             }
 
-            // Index by tag.
-            tag_map.entry(n.tag).or_default().push(node_id);
-
-            // Index by attributes.
             let attrs = arena.attrs(node_id);
             for attr in attrs {
                 let attr_name = arena.attr_name(attr);
