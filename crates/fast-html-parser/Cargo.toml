@@ -32,7 +32,7 @@ fhp-encoding = { version = "0.1", path = "../fhp-encoding", optional = true }
 criterion = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
 tl = "0.7"
-scraper = "0.22"
+scraper = "0.25"
 lol_html = "2"
 
 [[bench]]
