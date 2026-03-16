@@ -1,8 +1,8 @@
 //! Comprehensive integration tests for fhp-selector.
 
 use fhp_core::tag::Tag;
-use fhp_selector::Selectable;
 use fhp_selector::xpath::ast::XPathResult;
+use fhp_selector::{DocumentIndex, Selectable};
 use fhp_tree::parse;
 
 // ---------------------------------------------------------------
@@ -45,8 +45,30 @@ fn select_by_id() {
 fn select_universal() {
     let doc = parse("<div><p>a</p><span>b</span></div>").unwrap();
     let sel = doc.select("*").unwrap();
-    // root, div, p, span — all elements
-    assert!(sel.len() >= 3);
+    assert_eq!(sel.len(), 3);
+}
+
+#[test]
+fn html_attribute_names_are_case_insensitive() {
+    let doc = parse("<div CLASS=\"active\" ID=\"main\" DATA-X=\"1\">x</div>").unwrap();
+
+    assert_eq!(doc.select(".active").unwrap().len(), 1);
+    assert_eq!(doc.select("#main").unwrap().len(), 1);
+    assert_eq!(doc.select("[class]").unwrap().len(), 1);
+    assert_eq!(doc.select("[data-x=\"1\"]").unwrap().len(), 1);
+    assert_eq!(doc.find_by_class("active").len(), 1);
+    assert_eq!(doc.find_by_attr("data-x", "1").len(), 1);
+    assert_eq!(doc.find_by_id("main").unwrap().text_content(), "x");
+
+    let index = DocumentIndex::build(&doc);
+    assert_eq!(index.find_by_id(&doc, "main").unwrap().text_content(), "x");
+    assert_eq!(index.find_by_class(&doc, "active").len(), 1);
+
+    let result = doc.xpath("//div[@data-x='1']").unwrap();
+    match result {
+        XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
+        _ => panic!("expected nodes"),
+    }
 }
 
 // ---------------------------------------------------------------

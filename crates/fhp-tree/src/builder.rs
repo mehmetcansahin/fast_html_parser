@@ -121,10 +121,10 @@ impl TreeBuilder {
     /// Uses heuristics to estimate node, text, and attribute counts from the
     /// input byte length, reducing reallocations for large documents.
     pub fn with_capacity_hint(input_len: usize) -> Self {
-        let node_cap = (input_len / 32).max(256);
+        let node_cap = (input_len / 24).max(256);
         // Source-backed text uses offsets, not slab — smaller alloc suffices.
-        let text_cap = (input_len / 16).max(4096);
-        let attr_cap = (input_len / 128).max(64);
+        let text_cap = (input_len / 12).max(4096);
+        let attr_cap = (input_len / 96).max(64);
         let mut arena = Arena::with_capacity(node_cap, text_cap, attr_cap);
         // Create a synthetic document root.
         let root = arena.new_element(Tag::Unknown, 0);

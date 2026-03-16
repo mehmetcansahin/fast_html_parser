@@ -26,10 +26,10 @@ tokio = { version = "1", default-features = false }
 async-std = { version = "1", default-features = false }
 
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
 strip = true
 
 [profile.bench]
-lto = true
+lto = "fat"
 codegen-units = 1

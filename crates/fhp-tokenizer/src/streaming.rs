@@ -7,6 +7,7 @@
 use crate::extract::extract_tokens;
 use crate::structural::StructuralIndexer;
 use crate::token::Token;
+use fhp_core::tag::Tag;
 
 /// Maximum size of the residual buffer.
 ///
@@ -47,6 +48,12 @@ pub struct StreamTokenizer {
     working: Vec<u8>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SplitScan {
+    split: usize,
+    in_raw_text_context: bool,
+}
+
 impl StreamTokenizer {
     /// Create a new streaming tokenizer.
     pub fn new() -> Self {
@@ -76,11 +83,12 @@ impl StreamTokenizer {
 
         // Find the last safe split point.
         // Safe = end of a '>' that's not inside a string.
-        let split = find_safe_split(&working);
+        let scan = scan_safe_split(&working);
+        let split = scan.split;
 
         if split == 0 {
             // No complete tag boundary — buffer everything.
-            if working.len() > MAX_RESIDUAL {
+            if working.len() > MAX_RESIDUAL && !scan.in_raw_text_context {
                 // Too large to buffer — force-process what we have.
                 let tokens = self.process_chunk(&working);
                 self.working = working;
@@ -121,10 +129,11 @@ impl StreamTokenizer {
         working.extend_from_slice(chunk.as_bytes());
         self.residual.clear();
 
-        let split = find_safe_split(&working);
+        let scan = scan_safe_split(&working);
+        let split = scan.split;
 
         if split == 0 {
-            if working.len() > MAX_RESIDUAL {
+            if working.len() > MAX_RESIDUAL && !scan.in_raw_text_context {
                 // Too large to buffer — force-process what we have.
                 match std::str::from_utf8(&working) {
                     Ok(text) => {
@@ -231,25 +240,42 @@ impl Default for StreamTokenizer {
     }
 }
 
-/// Find the last safe split point in the buffer.
-/// Returns the byte index right after the last completed markup construct.
-fn find_safe_split(data: &[u8]) -> usize {
+fn scan_safe_split(data: &[u8]) -> SplitScan {
     #[derive(Clone, Copy)]
     enum Mode {
         Data,
-        Tag { quote: Option<u8> },
-        Doctype { quote: Option<u8> },
+        Tag {
+            quote: Option<u8>,
+            open: usize,
+            raw_text_close: Option<Tag>,
+        },
+        Doctype {
+            quote: Option<u8>,
+        },
         Comment,
         CData,
     }
 
     let mut mode = Mode::Data;
+    let mut raw_text = None;
     let mut i = 0usize;
     let mut last_safe = 0usize;
 
     while i < data.len() {
         match mode {
             Mode::Data => {
+                if let Some(tag) = raw_text {
+                    if data[i] == b'<' && is_raw_text_close(data, i, tag) {
+                        mode = Mode::Tag {
+                            quote: None,
+                            open: i,
+                            raw_text_close: Some(tag),
+                        };
+                    }
+                    i += 1;
+                    continue;
+                }
+
                 if data[i] == b'<' {
                     // <!-- ... -->
                     if i + 3 < data.len() && &data[i..i + 4] == b"<!--" {
@@ -279,7 +305,11 @@ fn find_safe_split(data: &[u8]) -> usize {
                             || next == b'_'
                             || next == b'?'
                         {
-                            mode = Mode::Tag { quote: None };
+                            mode = Mode::Tag {
+                                quote: None,
+                                open: i,
+                                raw_text_close: None,
+                            };
                             i += 1;
                             continue;
                         }
@@ -287,12 +317,20 @@ fn find_safe_split(data: &[u8]) -> usize {
                 }
                 i += 1;
             }
-            Mode::Tag { mut quote } => {
+            Mode::Tag {
+                mut quote,
+                open,
+                raw_text_close,
+            } => {
                 if let Some(q) = quote {
                     if data[i] == q {
                         quote = None;
                     }
-                    mode = Mode::Tag { quote };
+                    mode = Mode::Tag {
+                        quote,
+                        open,
+                        raw_text_close,
+                    };
                     i += 1;
                     continue;
                 }
@@ -300,11 +338,20 @@ fn find_safe_split(data: &[u8]) -> usize {
                     b'"' | b'\'' => {
                         mode = Mode::Tag {
                             quote: Some(data[i]),
+                            open,
+                            raw_text_close,
                         };
                         i += 1;
                     }
                     b'>' => {
-                        last_safe = i + 1;
+                        if raw_text_close.is_some() {
+                            last_safe = i + 1;
+                            raw_text = None;
+                        } else if let Some(tag) = raw_text_open_tag(&data[open + 1..i]) {
+                            raw_text = Some(tag);
+                        } else {
+                            last_safe = i + 1;
+                        }
                         mode = Mode::Data;
                         i += 1;
                     }
@@ -364,7 +411,64 @@ fn find_safe_split(data: &[u8]) -> usize {
         }
     }
 
-    last_safe
+    SplitScan {
+        split: last_safe,
+        in_raw_text_context: raw_text.is_some()
+            || matches!(
+                mode,
+                Mode::Tag {
+                    raw_text_close: Some(_),
+                    ..
+                }
+            ),
+    }
+}
+
+fn raw_text_open_tag(tag_body: &[u8]) -> Option<Tag> {
+    if tag_body.is_empty() || tag_body[0] == b'/' {
+        return None;
+    }
+
+    let mut end = tag_body.len();
+    while end > 0 && tag_body[end - 1].is_ascii_whitespace() {
+        end -= 1;
+    }
+    if end == 0 || tag_body[end - 1] == b'/' {
+        return None;
+    }
+
+    let mut name_end = 0usize;
+    while name_end < end && !tag_body[name_end].is_ascii_whitespace() && tag_body[name_end] != b'/'
+    {
+        name_end += 1;
+    }
+    if name_end == 0 {
+        return None;
+    }
+
+    let tag = Tag::from_bytes(&tag_body[..name_end]);
+    tag.is_raw_text().then_some(tag)
+}
+
+fn is_raw_text_close(data: &[u8], pos: usize, tag: Tag) -> bool {
+    let remaining = &data[pos..];
+    if remaining.len() < 3 || remaining[1] != b'/' {
+        return false;
+    }
+
+    let tag_name = tag.as_str().unwrap_or("");
+    let name_len = tag_name.len();
+    if remaining.len() < 2 + name_len + 1 {
+        return false;
+    }
+
+    let candidate = &remaining[2..2 + name_len];
+    if !candidate.eq_ignore_ascii_case(tag_name.as_bytes()) {
+        return false;
+    }
+
+    let after = remaining[2 + name_len];
+    after == b'>' || after.is_ascii_whitespace()
 }
 
 /// Convert a borrowed token to an owned ('static) token.
@@ -491,8 +595,53 @@ mod tests {
 
     #[test]
     fn find_safe_split_basic() {
-        assert_eq!(find_safe_split(b"<div>hello</div>"), 16);
-        assert_eq!(find_safe_split(b"<div>hello"), 5);
-        assert_eq!(find_safe_split(b"hello"), 0);
+        assert_eq!(scan_safe_split(b"<div>hello</div>").split, 16);
+        assert_eq!(scan_safe_split(b"<div>hello").split, 5);
+        assert_eq!(scan_safe_split(b"hello").split, 0);
+    }
+
+    #[test]
+    fn find_safe_split_buffers_open_raw_text_context() {
+        let scan = scan_safe_split(b"<div><script>if(a<b)");
+
+        assert_eq!(scan.split, 5);
+        assert!(scan.in_raw_text_context);
+    }
+
+    #[test]
+    fn raw_text_split_after_script_open() {
+        let mut tok = StreamTokenizer::new();
+        let mut all = Vec::new();
+
+        all.extend(tok.feed(b"<script>"));
+        all.extend(tok.feed(b"if(a<b)"));
+        all.extend(tok.feed(b"{x()}</script>"));
+        all.extend(tok.finish());
+
+        let open_tags: Vec<_> = all
+            .iter()
+            .filter_map(|token| match token {
+                Token::OpenTag { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .collect();
+        let close_tags: Vec<_> = all
+            .iter()
+            .filter_map(|token| match token {
+                Token::CloseTag { tag, .. } => Some(*tag),
+                _ => None,
+            })
+            .collect();
+        let text: Vec<_> = all
+            .iter()
+            .filter_map(|token| match token {
+                Token::Text { content } => Some(content.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(open_tags, vec![Tag::Script]);
+        assert_eq!(close_tags, vec![Tag::Script]);
+        assert_eq!(text, vec!["if(a<b){x()}"]);
     }
 }

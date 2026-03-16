@@ -440,7 +440,7 @@ impl<'a> NodeRef<'a> {
         self.arena
             .attrs(self.id)
             .iter()
-            .find(|a| self.arena.attr_name(a) == name)
+            .find(|a| self.arena.attr_name(a).eq_ignore_ascii_case(name))
             .and_then(|a| self.arena.attr_value(a))
     }
 
@@ -584,6 +584,18 @@ mod tests {
         assert!(a.has_class("link"));
         assert!(a.has_class("primary"));
         assert!(!a.has_class("secondary"));
+    }
+
+    #[test]
+    fn parse_attr_case_insensitive_name_lookup() {
+        let doc = parse("<a HREF=\"https://example.com\" CLASS=\"link primary\">text</a>").unwrap();
+        let root = doc.root();
+        let a = root.first_child().expect("should have child");
+
+        assert_eq!(a.attr("href"), Some("https://example.com"));
+        assert_eq!(a.attr("HREF"), Some("https://example.com"));
+        assert!(a.has_class("link"));
+        assert!(a.has_class("primary"));
     }
 
     #[test]

@@ -144,9 +144,9 @@ fn find_descendants_by_tag_and_attr(
         &|a, id, n| {
             is_element(n)
                 && n.tag == tag
-                && a.attrs(id)
-                    .iter()
-                    .any(|at| a.attr_name(at) == attr && a.attr_value(at) == value)
+                && a.attrs(id).iter().any(|at| {
+                    a.attr_name(at).eq_ignore_ascii_case(attr) && a.attr_value(at) == value
+                })
         },
         &mut results,
     );
@@ -165,7 +165,11 @@ fn find_descendants_by_tag_and_attr_exists(
         arena,
         root,
         &|a, id, n| {
-            is_element(n) && n.tag == tag && a.attrs(id).iter().any(|at| a.attr_name(at) == attr)
+            is_element(n)
+                && n.tag == tag
+                && a.attrs(id)
+                    .iter()
+                    .any(|at| a.attr_name(at).eq_ignore_ascii_case(attr))
         },
         &mut results,
     );
@@ -188,7 +192,8 @@ fn find_descendants_by_tag_and_contains(
             is_element(n)
                 && n.tag == tag
                 && a.attrs(id).iter().any(|at| {
-                    a.attr_name(at) == attr && a.attr_value(at).is_some_and(|v| v.contains(substr))
+                    a.attr_name(at).eq_ignore_ascii_case(attr)
+                        && a.attr_value(at).is_some_and(|v| v.contains(substr))
                 })
         },
         &mut results,
@@ -212,11 +217,13 @@ fn find_all_elements_by_attr(
                 return false;
             }
             match value {
-                Some(val) => a
+                Some(val) => a.attrs(id).iter().any(|at| {
+                    a.attr_name(at).eq_ignore_ascii_case(attr) && a.attr_value(at) == Some(val)
+                }),
+                None => a
                     .attrs(id)
                     .iter()
-                    .any(|at| a.attr_name(at) == attr && a.attr_value(at) == Some(val)),
-                None => a.attrs(id).iter().any(|at| a.attr_name(at) == attr),
+                    .any(|at| a.attr_name(at).eq_ignore_ascii_case(attr)),
             }
         },
         &mut results,
@@ -297,13 +304,12 @@ fn direct_element_children(arena: &Arena, node: NodeId) -> Vec<NodeId> {
 /// Check if a node matches a predicate.
 fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
     match pred {
-        Predicate::AttrEquals { attr, value } => arena
-            .attrs(node)
-            .iter()
-            .any(|a| arena.attr_name(a) == *attr && arena.attr_value(a) == Some(value)),
+        Predicate::AttrEquals { attr, value } => arena.attrs(node).iter().any(|a| {
+            arena.attr_name(a).eq_ignore_ascii_case(attr) && arena.attr_value(a) == Some(value)
+        }),
 
         Predicate::Contains { attr, substr } => arena.attrs(node).iter().any(|a| {
-            arena.attr_name(a) == *attr
+            arena.attr_name(a).eq_ignore_ascii_case(attr)
                 && arena
                     .attr_value(a)
                     .is_some_and(|v| v.contains(substr.as_str()))
@@ -334,7 +340,7 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
         Predicate::AttrExists { attr } => arena
             .attrs(node)
             .iter()
-            .any(|a| arena.attr_name(a) == *attr),
+            .any(|a| arena.attr_name(a).eq_ignore_ascii_case(attr)),
     }
 }
 
