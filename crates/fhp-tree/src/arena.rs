@@ -448,6 +448,26 @@ impl Arena {
             }
             p.last_child = child;
             p.flags.set(NodeFlags::HAS_CHILDREN);
+
+            // Compute 1-based element sibling index for element children.
+            if !c.flags.has(NodeFlags::IS_TEXT)
+                && !c.flags.has(NodeFlags::IS_COMMENT)
+                && !c.flags.has(NodeFlags::IS_DOCTYPE)
+            {
+                // Walk backward from prev sibling to find last element's index.
+                let mut prev = c.prev_sibling;
+                while !prev.is_null() {
+                    let pn = &*nodes.add(prev.index());
+                    if pn.element_index > 0 {
+                        c.element_index = pn.element_index.saturating_add(1);
+                        break;
+                    }
+                    prev = pn.prev_sibling;
+                }
+                if c.element_index == 0 {
+                    c.element_index = 1; // first element child
+                }
+            }
         }
     }
 
