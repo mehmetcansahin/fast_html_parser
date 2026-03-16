@@ -371,7 +371,7 @@ impl Arena {
             let name_end = name_start + attr.name_len as usize;
             let name_bytes = &self.attr_str_slab[name_start..name_end];
 
-            if name_bytes == b"class" && attr.value_len > 0 {
+            if name_bytes.eq_ignore_ascii_case(b"class") && attr.value_len > 0 {
                 let val_start = attr.value_offset as usize;
                 let val_end = val_start + attr.value_len as usize;
                 let val = &self.attr_str_slab[val_start..val_end];
@@ -390,7 +390,7 @@ impl Arena {
                         class_hash |= class_bloom_bit(&val[token_start..pos]);
                     }
                 }
-            } else if name_bytes == b"id" && attr.value_len > 0 {
+            } else if name_bytes.eq_ignore_ascii_case(b"id") && attr.value_len > 0 {
                 let val_start = attr.value_offset as usize;
                 let val_end = val_start + attr.value_len as usize;
                 id_hash = selector_hash(&self.attr_str_slab[val_start..val_end]);

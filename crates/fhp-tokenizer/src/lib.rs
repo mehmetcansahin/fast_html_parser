@@ -149,16 +149,19 @@ pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
         let _ = in_string; // masking already applied to individual masks
         let combined = masks.lt | masks.gt;
 
-        let mut bits = combined;
+        // Pre-mask: clear bits beyond the valid range for this chunk,
+        // eliminating the per-iteration bounds check inside the loop.
+        let valid_bits = block_end - block_start;
+        let mut bits = if valid_bits < 64 {
+            combined & ((1u64 << valid_bits) - 1)
+        } else {
+            combined
+        };
         while bits != 0 {
             let bit_pos = bits.trailing_zeros() as usize;
             bits &= bits - 1; // clear lowest set bit
 
             let abs_pos = block_start + bit_pos;
-            if abs_pos >= len {
-                break;
-            }
-
             let byte = bytes[abs_pos];
             parser.on_delimiter_cb(abs_pos, byte, &mut on_token);
         }
@@ -236,16 +239,19 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
         let _ = in_string; // masking already applied to individual masks
         let combined = masks.lt | masks.gt;
 
-        let mut bits = combined;
+        // Pre-mask: clear bits beyond the valid range for this chunk,
+        // eliminating the per-iteration bounds check inside the loop.
+        let valid_bits = block_end - block_start;
+        let mut bits = if valid_bits < 64 {
+            combined & ((1u64 << valid_bits) - 1)
+        } else {
+            combined
+        };
         while bits != 0 {
             let bit_pos = bits.trailing_zeros() as usize;
             bits &= bits - 1; // clear lowest set bit
 
             let abs_pos = block_start + bit_pos;
-            if abs_pos >= len {
-                break;
-            }
-
             let byte = bytes[abs_pos];
             parser.on_delimiter_sink(abs_pos, byte, sink);
         }

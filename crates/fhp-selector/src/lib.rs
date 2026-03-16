@@ -76,6 +76,14 @@ use matcher::{select_all_list, select_first_list};
 use parser::parse_selector;
 use xpath::ast::XPathResult;
 
+#[inline]
+fn is_document_element(n: &fhp_tree::node::Node) -> bool {
+    n.depth > 0
+        && !n.flags.has(NodeFlags::IS_TEXT)
+        && !n.flags.has(NodeFlags::IS_COMMENT)
+        && !n.flags.has(NodeFlags::IS_DOCTYPE)
+}
+
 /// A pre-compiled CSS selector for reuse across documents and threads.
 ///
 /// Parsing a CSS selector string has non-trivial cost. When the same selector
@@ -170,7 +178,7 @@ thread_local! {
 
 #[inline]
 fn parse_selector_cached(css: &str) -> Result<Arc<ast::SelectorList>, SelectorError> {
-    if css.len() > MAX_CACHED_SELECTOR_LEN || is_single_simple_selector(css) {
+    if css.len() > MAX_CACHED_SELECTOR_LEN {
         return Ok(Arc::new(parse_selector(css)?));
     }
 
@@ -183,28 +191,6 @@ fn parse_selector_cached(css: &str) -> Result<Arc<ast::SelectorList>, SelectorEr
         cache.borrow_mut().insert(css, Arc::clone(&parsed));
         Ok(parsed)
     })
-}
-
-#[inline]
-fn is_single_simple_selector(css: &str) -> bool {
-    if is_simple_ident(css) {
-        return true;
-    }
-
-    let bytes = css.as_bytes();
-    if bytes.len() >= 2 && (bytes[0] == b'.' || bytes[0] == b'#') {
-        return is_simple_ident(&css[1..]);
-    }
-
-    false
-}
-
-#[inline]
-fn is_simple_ident(s: &str) -> bool {
-    !s.is_empty()
-        && s.as_bytes()
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || *b == b'-' || *b == b'_')
 }
 
 /// A collection of matched nodes from a selector query.
@@ -484,11 +470,7 @@ impl Selectable for Document {
         for i in 0..arena.len() {
             let id = NodeId(i as u32);
             let n = arena.get(id);
-            if n.tag == tag
-                && !n.flags.has(NodeFlags::IS_TEXT)
-                && !n.flags.has(NodeFlags::IS_COMMENT)
-                && !n.flags.has(NodeFlags::IS_DOCTYPE)
-            {
+            if n.tag == tag && is_document_element(n) {
                 nodes.push(id);
             }
         }
@@ -501,7 +483,9 @@ impl Selectable for Document {
             let node_id = NodeId(i as u32);
             let attrs = arena.attrs(node_id);
             for attr in attrs {
-                if arena.attr_name(attr) == "id" && arena.attr_value(attr) == Some(id) {
+                if arena.attr_name(attr).eq_ignore_ascii_case("id")
+                    && arena.attr_value(attr) == Some(id)
+                {
                     return Some(self.get(node_id));
                 }
             }
@@ -516,7 +500,7 @@ impl Selectable for Document {
             let id = NodeId(i as u32);
             let attrs = arena.attrs(id);
             for attr in attrs {
-                if arena.attr_name(attr) == "class" {
+                if arena.attr_name(attr).eq_ignore_ascii_case("class") {
                     if let Some(val) = arena.attr_value(attr) {
                         if val.split_whitespace().any(|c| c == class) {
                             nodes.push(id);
@@ -536,7 +520,9 @@ impl Selectable for Document {
             let id = NodeId(i as u32);
             let attrs = arena.attrs(id);
             for attr in attrs {
-                if arena.attr_name(attr) == name && arena.attr_value(attr) == Some(value) {
+                if arena.attr_name(attr).eq_ignore_ascii_case(name)
+                    && arena.attr_value(attr) == Some(value)
+                {
                     nodes.push(id);
                     break;
                 }
@@ -574,12 +560,17 @@ impl DocumentIndex {
         let tag_map = if let Some(pre_built) = arena.tag_index() {
             let mut map = HashMap::with_capacity(64);
             for (tag_u8, ids) in pre_built.iter().enumerate() {
-                if !ids.is_empty() {
+                let filtered_ids: Vec<_> = ids
+                    .iter()
+                    .copied()
+                    .filter(|&id| is_document_element(arena.get(id)))
+                    .collect();
+                if !filtered_ids.is_empty() {
                     // SAFETY: Tag is repr(u8), but not all u8 values are valid.
                     // We only insert entries that were created via new_element with
                     // a valid Tag, so the cast is safe (values came from Tag as u8).
                     let tag: Tag = unsafe { std::mem::transmute(tag_u8 as u8) };
-                    map.insert(tag, ids.clone());
+                    map.insert(tag, filtered_ids);
                 }
             }
             map
@@ -588,10 +579,7 @@ impl DocumentIndex {
             for i in 0..arena.len() {
                 let node_id = NodeId(i as u32);
                 let n = arena.get(node_id);
-                if n.flags.has(NodeFlags::IS_TEXT)
-                    || n.flags.has(NodeFlags::IS_COMMENT)
-                    || n.flags.has(NodeFlags::IS_DOCTYPE)
-                {
+                if !is_document_element(n) {
                     continue;
                 }
                 map.entry(n.tag).or_default().push(node_id);
@@ -605,17 +593,14 @@ impl DocumentIndex {
             let n = arena.get(node_id);
 
             // Skip non-element nodes.
-            if n.flags.has(NodeFlags::IS_TEXT)
-                || n.flags.has(NodeFlags::IS_COMMENT)
-                || n.flags.has(NodeFlags::IS_DOCTYPE)
-            {
+            if !is_document_element(n) {
                 continue;
             }
 
             let attrs = arena.attrs(node_id);
             for attr in attrs {
                 let attr_name = arena.attr_name(attr);
-                if attr_name == "id" {
+                if attr_name.eq_ignore_ascii_case("id") {
                     if let Some(val) = arena.attr_value(attr) {
                         if let Some(existing) = id_map.get_mut(val) {
                             *existing = node_id;
@@ -624,7 +609,7 @@ impl DocumentIndex {
                         }
                     }
                 }
-                if attr_name == "class" {
+                if attr_name.eq_ignore_ascii_case("class") {
                     if let Some(val) = arena.attr_value(attr) {
                         for class in val.split_whitespace() {
                             if let Some(ids) = class_map.get_mut(class) {
@@ -799,6 +784,16 @@ mod tests {
     }
 
     #[test]
+    fn document_index_handles_uppercase_html_attributes() {
+        let doc = parse("<div ID=\"main\" CLASS=\"active hero\">x</div>").unwrap();
+        let index = DocumentIndex::build(&doc);
+
+        assert_eq!(index.find_by_id(&doc, "main").unwrap().text_content(), "x");
+        assert_eq!(index.find_by_class(&doc, "active").len(), 1);
+        assert_eq!(index.find_by_class(&doc, "hero").len(), 1);
+    }
+
+    #[test]
     fn selection_into_iter() {
         let doc = parse("<div><p>a</p><p>b</p></div>").unwrap();
         let sel = doc.select("p").unwrap();
@@ -896,15 +891,4 @@ mod tests {
         assert_eq!(doc.select_compiled(&sel2).unwrap().len(), 1);
     }
 
-    #[test]
-    fn single_simple_selector_detection() {
-        assert!(is_single_simple_selector("p"));
-        assert!(is_single_simple_selector("my-widget"));
-        assert!(is_single_simple_selector(".content"));
-        assert!(is_single_simple_selector("#main"));
-
-        assert!(!is_single_simple_selector("div p"));
-        assert!(!is_single_simple_selector("div.article"));
-        assert!(!is_single_simple_selector("a[href]"));
-    }
 }

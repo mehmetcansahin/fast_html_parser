@@ -97,6 +97,31 @@ fn stream_parser_attributes_preserved() {
     assert!(a.has_class("link"));
 }
 
+#[test]
+fn stream_parser_preserves_raw_text_across_chunk_boundaries() {
+    let prefix = vec![b'x'; 1024];
+    let suffix = b"<script>if(a<b){x()}</script><p>ok</p>";
+
+    let mut html = prefix.clone();
+    html.extend_from_slice(suffix);
+
+    let one_shot = parse_bytes(&html).unwrap();
+
+    let mut parser = StreamParser::new();
+    parser.feed(&prefix);
+    parser.feed(b"<script>");
+    parser.feed(b"if(a<b){x()}");
+    parser.feed(b"</script><p>ok</p>");
+    let streamed = parser.finish().unwrap();
+
+    assert_eq!(
+        streamed.root().text_content(),
+        one_shot.root().text_content()
+    );
+    assert_eq!(streamed.node_count(), one_shot.node_count());
+    assert!(streamed.to_html().contains("<script>if(a<b){x()}</script>"));
+}
+
 // ---------------------------------------------------------------------------
 // Early termination
 // ---------------------------------------------------------------------------

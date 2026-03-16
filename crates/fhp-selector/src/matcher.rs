@@ -60,7 +60,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             // Bloom matched — verify via real attribute scan.
             let attrs = arena.attrs(node);
             attrs.iter().any(|a| {
-                arena.attr_name(a) == "class"
+                arena.attr_name(a).eq_ignore_ascii_case("class")
                     && arena
                         .attr_value(a)
                         .is_some_and(|v| contains_class_token(v, class_name))
@@ -75,17 +75,13 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             }
             // Hash matched — verify via real attribute scan (collision possible).
             let attrs = arena.attrs(node);
-            attrs
-                .iter()
-                .any(|a| arena.attr_name(a) == "id" && arena.attr_value(a) == Some(id.as_str()))
+            attrs.iter().any(|a| {
+                arena.attr_name(a).eq_ignore_ascii_case("id")
+                    && arena.attr_value(a) == Some(id.as_str())
+            })
         }
 
-        SimpleSelector::Universal => {
-            // Match any element (not text, comment, doctype).
-            !n.flags.has(NodeFlags::IS_TEXT)
-                && !n.flags.has(NodeFlags::IS_COMMENT)
-                && !n.flags.has(NodeFlags::IS_DOCTYPE)
-        }
+        SimpleSelector::Universal => is_element(n),
 
         SimpleSelector::Attr(attr_sel) => match_attr(arena, node, attr_sel),
 
@@ -101,7 +97,10 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
 fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
     let attrs = arena.attrs(node);
     for attr in attrs {
-        if arena.attr_name(attr) != sel.name {
+        if !arena
+            .attr_name(attr)
+            .eq_ignore_ascii_case(sel.name.as_str())
+        {
             continue;
         }
         let val = arena.attr_value(attr);
@@ -112,7 +111,7 @@ fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
             }
             AttrOp::Includes => {
                 if let (Some(v), Some(sel_val)) = (val, &sel.value) {
-                    return v.split_whitespace().any(|w| w == sel_val.as_str());
+                    return contains_class_token(v, sel_val.as_str());
                 }
             }
             AttrOp::StartsWith => {
@@ -246,10 +245,12 @@ fn matches_nth(a: i32, b: i32, index: i32) -> bool {
     diff % a == 0 && (diff / a) >= 0
 }
 
-/// Returns `true` for element nodes (not text, comment, doctype).
+/// Returns `true` for real element nodes (not the synthetic root wrapper,
+/// text, comment, or doctype).
 #[inline]
 fn is_element(n: &fhp_tree::node::Node) -> bool {
-    !n.flags.has(NodeFlags::IS_TEXT)
+    n.depth > 0
+        && !n.flags.has(NodeFlags::IS_TEXT)
         && !n.flags.has(NodeFlags::IS_COMMENT)
         && !n.flags.has(NodeFlags::IS_DOCTYPE)
 }
@@ -676,10 +677,9 @@ fn node_has_id(arena: &Arena, node: NodeId, target_id: &str) -> bool {
     if n.id_hash == 0 || n.id_hash != target_hash {
         return false;
     }
-    arena
-        .attrs(node)
-        .iter()
-        .any(|a| arena.attr_name(a) == "id" && arena.attr_value(a) == Some(target_id))
+    arena.attrs(node).iter().any(|a| {
+        arena.attr_name(a).eq_ignore_ascii_case("id") && arena.attr_value(a) == Some(target_id)
+    })
 }
 
 #[cfg(test)]
@@ -742,8 +742,7 @@ mod tests {
     #[test]
     fn match_universal() {
         let ids = parse_and_match("<div><p>text</p></div>", "*");
-        // root (Unknown), div, p — all elements match *
-        assert!(ids.len() >= 2); // at least div and p
+        assert_eq!(ids.len(), 2);
     }
 
     #[test]
