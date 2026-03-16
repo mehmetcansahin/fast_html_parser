@@ -16,6 +16,7 @@
 //! - Comma-separated selector lists: `div, span`
 
 use fhp_core::error::SelectorError;
+use fhp_core::hash::{class_bloom_bit, selector_hash};
 use fhp_core::tag::Tag;
 
 use crate::ast::{
@@ -292,12 +293,14 @@ impl<'a> Parser<'a> {
                 Some(b'#') => {
                     self.advance();
                     let id = self.read_ident()?;
-                    parts.push(SimpleSelector::Id(id));
+                    let hash = selector_hash(id.as_bytes());
+                    parts.push(SimpleSelector::Id(id, hash));
                 }
                 Some(b'.') => {
                     self.advance();
                     let class = self.read_ident()?;
-                    parts.push(SimpleSelector::Class(class));
+                    let bloom = class_bloom_bit(class.as_bytes());
+                    parts.push(SimpleSelector::Class(class, bloom));
                 }
                 Some(b'[') => {
                     parts.push(self.parse_attr_selector()?);
@@ -542,7 +545,7 @@ mod tests {
         let list = parse_selector(".foo").unwrap();
         let sel = &list.selectors[0];
         match &sel.subject.parts[0] {
-            SimpleSelector::Class(c) => assert_eq!(c, "foo"),
+            SimpleSelector::Class(c, _) => assert_eq!(c, "foo"),
             _ => panic!("expected class selector"),
         }
     }
@@ -552,7 +555,7 @@ mod tests {
         let list = parse_selector("#bar").unwrap();
         let sel = &list.selectors[0];
         match &sel.subject.parts[0] {
-            SimpleSelector::Id(id) => assert_eq!(id, "bar"),
+            SimpleSelector::Id(id, _) => assert_eq!(id, "bar"),
             _ => panic!("expected id selector"),
         }
     }
@@ -573,8 +576,8 @@ mod tests {
             sel.subject.parts[0],
             SimpleSelector::Tag(Tag::Div)
         ));
-        assert!(matches!(&sel.subject.parts[1], SimpleSelector::Class(c) if c == "active"));
-        assert!(matches!(&sel.subject.parts[2], SimpleSelector::Id(id) if id == "main"));
+        assert!(matches!(&sel.subject.parts[1], SimpleSelector::Class(c, _) if c == "active"));
+        assert!(matches!(&sel.subject.parts[2], SimpleSelector::Id(id, _) if id == "main"));
     }
 
     #[test]
@@ -768,7 +771,7 @@ mod tests {
         let list = parse_selector(":not(.hidden)").unwrap();
         match &list.selectors[0].subject.parts[0] {
             SimpleSelector::PseudoNot(inner) => {
-                assert!(matches!(&inner.parts[0], SimpleSelector::Class(c) if c == "hidden"));
+                assert!(matches!(&inner.parts[0], SimpleSelector::Class(c, _) if c == "hidden"));
             }
             _ => panic!("expected :not"),
         }

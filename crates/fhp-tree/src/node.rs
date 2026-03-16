@@ -114,8 +114,9 @@ impl NodeFlags {
 /// | 40     | 4     | `class_hash` |
 /// | 44     | 4     | `id_hash` |
 /// | 48     | 2     | `attr_raw_len` |
-/// | 50     | 1     | `attr_count` |
-/// | 51     | 13    | `_padding` |
+/// | 50     | 2     | `element_index` |
+/// | 52     | 1     | `attr_count` |
+/// | 53     | 11    | `_padding` |
 #[repr(C, align(64))]
 pub struct Node {
     // === Hot (first 32 bytes) ===
@@ -160,10 +161,12 @@ pub struct Node {
     pub id_hash: u32,
     /// Length in bytes of the raw attribute region (max 65535).
     pub attr_raw_len: u16,
+    /// 1-based index among element siblings (0 = not computed or text node).
+    pub element_index: u16,
     /// Number of attributes (0 with raw data present = unparsed lazy).
     pub attr_count: u8,
     /// Padding to fill the cache line.
-    pub _padding: [u8; 13],
+    pub _padding: [u8; 11],
 }
 
 impl Node {
@@ -190,7 +193,8 @@ impl Node {
             attr_raw_len: 0,
             class_hash: 0,
             id_hash: 0,
-            _padding: [0; 13],
+            element_index: 0,
+            _padding: [0; 11],
         }
     }
 
@@ -215,7 +219,8 @@ impl Node {
             attr_raw_len: 0,
             class_hash: 0,
             id_hash: 0,
-            _padding: [0; 13],
+            element_index: 0,
+            _padding: [0; 11],
         }
     }
 
@@ -240,7 +245,8 @@ impl Node {
             attr_raw_len: 0,
             class_hash: 0,
             id_hash: 0,
-            _padding: [0; 13],
+            element_index: 0,
+            _padding: [0; 11],
         }
     }
 
@@ -265,7 +271,8 @@ impl Node {
             attr_raw_len: 0,
             class_hash: 0,
             id_hash: 0,
-            _padding: [0; 13],
+            element_index: 0,
+            _padding: [0; 11],
         }
     }
 }

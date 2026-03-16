@@ -193,6 +193,35 @@ fn parse_selector_cached(css: &str) -> Result<Arc<ast::SelectorList>, SelectorEr
     })
 }
 
+/// Merge results from multiple roots, deduplicating by NodeId index.
+///
+/// DFS results are already in document order (ascending NodeId index), so
+/// we merge sorted lists instead of using a HashSet. O(n) vs O(n log n).
+fn merge_dedup_results(
+    _arena: &fhp_tree::arena::Arena,
+    roots: &[NodeId],
+    mut query: impl FnMut(NodeId) -> Vec<NodeId>,
+) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    let mut max_seen = u32::MAX; // tracks highest NodeId index seen
+    for &root in roots {
+        for id in query(root) {
+            let idx = id.index() as u32;
+            if results.is_empty() || idx > max_seen {
+                max_seen = idx;
+                results.push(id);
+            } else if idx != max_seen {
+                // Out-of-order (different subtree) — insert if not duplicate.
+                // For typical DFS, this branch is rare.
+                if !results.contains(&id) {
+                    results.push(id);
+                }
+            }
+        }
+    }
+    results
+}
+
 /// A collection of matched nodes from a selector query.
 ///
 /// Provides iteration, text extraction, attribute access, and
@@ -261,15 +290,9 @@ impl<'a> Selection<'a> {
             let results = select_all_list(self.doc.arena(), self.nodes[0], list);
             return Ok(Selection::new(self.doc, results));
         }
-        let mut results = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &node_id in &self.nodes {
-            for id in select_all_list(self.doc.arena(), node_id, list) {
-                if seen.insert(id) {
-                    results.push(id);
-                }
-            }
-        }
+        let results = merge_dedup_results(self.doc.arena(), &self.nodes, |root| {
+            select_all_list(self.doc.arena(), root, list)
+        });
         Ok(Selection::new(self.doc, results))
     }
 
@@ -284,15 +307,9 @@ impl<'a> Selection<'a> {
             let results = select_all_list(self.doc.arena(), self.nodes[0], &list);
             return Ok(Selection::new(self.doc, results));
         }
-        let mut results = Vec::new();
-        let mut seen = std::collections::HashSet::new();
-        for &node_id in &self.nodes {
-            for id in select_all_list(self.doc.arena(), node_id, &list) {
-                if seen.insert(id) {
-                    results.push(id);
-                }
-            }
-        }
+        let results = merge_dedup_results(self.doc.arena(), &self.nodes, |root| {
+            select_all_list(self.doc.arena(), root, &list)
+        });
         Ok(Selection::new(self.doc, results))
     }
 

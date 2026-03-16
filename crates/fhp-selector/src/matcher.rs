@@ -7,7 +7,7 @@
 //! When a selector contains descendant combinators, ancestor bloom
 //! filters are used for fast rejection.
 
-use fhp_core::hash::{class_bloom_bit, selector_hash};
+use fhp_core::hash::selector_hash;
 use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
 use fhp_tree::node::{NodeFlags, NodeId};
@@ -51,9 +51,8 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
                     .is_some_and(|name| name.eq_ignore_ascii_case(tag_name))
         }
 
-        SimpleSelector::Class(class_name) => {
+        SimpleSelector::Class(class_name, bloom_bit) => {
             // Fast rejection via per-node class bloom filter.
-            let bloom_bit = class_bloom_bit(class_name.as_bytes());
             if n.class_hash & bloom_bit == 0 {
                 return false;
             }
@@ -67,10 +66,9 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             })
         }
 
-        SimpleSelector::Id(id) => {
+        SimpleSelector::Id(id, target_hash) => {
             // Fast rejection via per-node id hash.
-            let target_hash = selector_hash(id.as_bytes());
-            if n.id_hash == 0 || n.id_hash != target_hash {
+            if n.id_hash == 0 || n.id_hash != *target_hash {
                 return false;
             }
             // Hash matched — verify via real attribute scan (collision possible).
@@ -208,25 +206,15 @@ fn is_last_element_child(arena: &Arena, node: NodeId) -> bool {
 }
 
 /// Check if the node is the nth element child (1-based) matching `an+b`.
+///
+/// Uses the precomputed `element_index` field on the node for O(1) lookup
+/// instead of walking siblings.
 fn is_nth_element_child(arena: &Arena, node: NodeId, a: i32, b: i32) -> bool {
     let n = arena.get(node);
-    if n.parent.is_null() {
+    if n.parent.is_null() || n.element_index == 0 {
         return false;
     }
-    let parent = arena.get(n.parent);
-    let mut child = parent.first_child;
-    let mut index: i32 = 0;
-    while !child.is_null() {
-        let c = arena.get(child);
-        if is_element(c) {
-            index += 1;
-            if child == node {
-                return matches_nth(a, b, index);
-            }
-        }
-        child = c.next_sibling;
-    }
-    false
+    matches_nth(a, b, n.element_index as i32)
 }
 
 /// Check if a 1-based `index` satisfies `an+b`.
@@ -551,10 +539,10 @@ fn compute_descendant_hashes(selector: &Selector) -> Vec<u32> {
                 // tag name here causes false negatives for descendant checks
                 // (e.g. `my-widget span`), so skip UnknownTag pre-filtering.
                 SimpleSelector::UnknownTag(_) => {}
-                SimpleSelector::Class(class) => {
+                SimpleSelector::Class(class, _) => {
                     hashes.push(hash_str(class));
                 }
-                SimpleSelector::Id(id) => {
+                SimpleSelector::Id(id, _) => {
                     hashes.push(hash_str(id));
                 }
                 _ => {}
@@ -654,7 +642,7 @@ fn simple_id_selector(selector: &Selector) -> Option<&str> {
         return None;
     }
     match selector.subject.parts.as_slice() {
-        [SimpleSelector::Id(id)] => Some(id.as_str()),
+        [SimpleSelector::Id(id, _)] => Some(id.as_str()),
         _ => None,
     }
 }

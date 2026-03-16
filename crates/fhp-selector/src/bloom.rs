@@ -7,6 +7,7 @@
 //!
 //! The filter is stack-allocated (32 bytes) and built in a single DFS pass.
 
+use fhp_core::hash::selector_hash;
 use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
 use fhp_tree::node::{NodeFlags, NodeId};
@@ -56,20 +57,20 @@ impl Default for AncestorBloom {
 
 /// Compute a bloom-filter hash for a [`Tag`].
 ///
-/// Uses Knuth's multiplicative hash on the tag discriminant.
+/// Uses FNV-1a on the tag discriminant byte, consistent with
+/// [`selector_hash`] used for per-node class/id hashes.
 #[inline]
 pub fn hash_tag(tag: Tag) -> u32 {
-    (tag as u32).wrapping_mul(2_654_435_761)
+    selector_hash(&[tag as u8])
 }
 
 /// Compute a bloom-filter hash for a string (class name, id, etc.).
+///
+/// Delegates to [`selector_hash`] (FNV-1a) so that ancestor bloom
+/// hashes are consistent with per-node class/id hashes.
 #[inline]
 pub fn hash_str(s: &str) -> u32 {
-    let mut h: u32 = 0;
-    for &b in s.as_bytes() {
-        h = h.wrapping_mul(31).wrapping_add(b as u32);
-    }
-    h.wrapping_mul(2_654_435_761)
+    selector_hash(s.as_bytes())
 }
 
 /// Build ancestor bloom filters for every node in the arena.

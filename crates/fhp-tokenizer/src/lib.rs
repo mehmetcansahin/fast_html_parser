@@ -288,6 +288,14 @@ fn compute_string_mask_inline(
         return (0, false, false);
     }
 
+    // Fast path: carry active but no quotes in block — entire block is inside string.
+    if masks.quot == 0 && masks.apos == 0 {
+        let in_string = !0u64;
+        masks.lt = 0;
+        masks.gt = 0;
+        return (in_string, carry_dq, carry_sq);
+    }
+
     // Pass 1: double-quote regions.
     let flipped_dq = prefix_xor(masks.quot);
     let dq_in = if carry_dq { !flipped_dq } else { flipped_dq };

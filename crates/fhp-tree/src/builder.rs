@@ -172,6 +172,7 @@ impl TreeBuilder {
     ///
     /// Returns the [`NodeId`] of the newly created node, or `None` if the
     /// token did not produce a node (e.g. a close tag or depth limit hit).
+    #[inline]
     pub fn process(&mut self, token: &Token<'_>) -> Option<NodeId> {
         match token {
             Token::OpenTag {

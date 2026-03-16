@@ -318,8 +318,9 @@ unsafe fn neon_movemask(v: uint8x16_t) -> u16 {
     unsafe {
         // Bit-select table: each byte contributes its corresponding bit.
         // AND with power-of-2 per lane, then pairwise-add reduce to form bitmask.
-        let bit_mask: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
-        let bitmask = vld1q_u8(bit_mask.as_ptr());
+        // Static avoids stack allocation + load-use latency on every call.
+        static BIT_MASK: [u8; 16] = [1, 2, 4, 8, 16, 32, 64, 128, 1, 2, 4, 8, 16, 32, 64, 128];
+        let bitmask = vld1q_u8(BIT_MASK.as_ptr());
 
         // AND: each lane is either 0 or its bit value.
         let masked = vandq_u8(v, bitmask);
