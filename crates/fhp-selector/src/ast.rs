@@ -42,8 +42,8 @@ pub enum SimpleSelector {
     Tag(Tag),
     /// Match by unknown/custom tag name, e.g. `my-widget`.
     UnknownTag(String),
-    /// Match by class: `.class`. Second field is precomputed bloom bit.
-    Class(String, u32),
+    /// Match by class: `.class`. Second field is precomputed 64-bit bloom bit.
+    Class(String, u64),
     /// Match by id: `#id`. Second field is precomputed FNV-1a hash.
     Id(String, u32),
     /// Universal selector: `*`.

@@ -20,11 +20,11 @@ pub fn selector_hash(bytes: &[u8]) -> u32 {
 
 /// Compute a single bloom bit position from a class token.
 ///
-/// Returns a `u32` with exactly one bit set at position `hash % 32`.
-/// Used to build and query the per-node 32-bit class bloom filter.
+/// Returns a `u64` with exactly one bit set at position `hash % 64`.
+/// Used to build and query the per-node 64-bit class bloom filter.
 #[inline]
-pub fn class_bloom_bit(class_bytes: &[u8]) -> u32 {
-    1u32 << (selector_hash(class_bytes) % 32)
+pub fn class_bloom_bit(class_bytes: &[u8]) -> u64 {
+    1u64 << (selector_hash(class_bytes) % 64)
 }
 
 #[cfg(test)]

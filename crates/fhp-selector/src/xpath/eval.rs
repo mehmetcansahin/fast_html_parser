@@ -244,17 +244,24 @@ fn find_all_elements(arena: &Arena, root: NodeId) -> Vec<NodeId> {
 }
 
 /// Evaluate an absolute path from the root.
+///
+/// Uses a single reusable buffer to avoid per-step Vec allocations.
+/// Children are expanded in-place using a swap buffer.
 fn evaluate_absolute_path(arena: &Arena, root: NodeId, steps: &[PathStep]) -> Vec<NodeId> {
     if steps.is_empty() {
         return vec![];
     }
 
     // Start from the root's children (the root itself is a synthetic wrapper).
-    let mut current_nodes: Vec<NodeId> = direct_element_children(arena, root);
+    let mut current = Vec::new();
+    collect_element_children(arena, root, &mut current);
 
-    for step in steps {
-        let mut next = Vec::new();
-        for &node_id in &current_nodes {
+    let mut next = Vec::new();
+    let last_idx = steps.len() - 1;
+
+    for (i, step) in steps.iter().enumerate() {
+        next.clear();
+        for &node_id in &current {
             let n = arena.get(node_id);
             if !is_element(n) || n.tag != step.tag {
                 continue;
@@ -271,34 +278,32 @@ fn evaluate_absolute_path(arena: &Arena, root: NodeId, steps: &[PathStep]) -> Ve
             return vec![];
         }
 
-        // For the next step, expand to the children of matched nodes.
-        if steps.last() != Some(step) {
-            let mut children = Vec::new();
+        if i < last_idx {
+            // Expand to children of matched nodes for the next step.
+            current.clear();
             for &nid in &next {
-                children.extend(direct_element_children(arena, nid));
+                collect_element_children(arena, nid, &mut current);
             }
-            current_nodes = children;
         } else {
-            current_nodes = next;
+            std::mem::swap(&mut current, &mut next);
         }
     }
 
-    current_nodes
+    current
 }
 
-/// Get the direct element children of a node.
-fn direct_element_children(arena: &Arena, node: NodeId) -> Vec<NodeId> {
+/// Collect direct element children of a node into `out` (no allocation).
+#[inline]
+fn collect_element_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) {
     let n = arena.get(node);
-    let mut children = Vec::new();
     let mut child = n.first_child;
     while !child.is_null() {
         let c = arena.get(child);
         if is_element(c) {
-            children.push(child);
+            out.push(child);
         }
         child = c.next_sibling;
     }
-    children
 }
 
 /// Check if a node matches a predicate.

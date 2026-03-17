@@ -360,7 +360,7 @@ impl Arena {
     /// Scans the attribute slab for `class` and `id` attributes and stores
     /// the computed hashes on the node for fast selector rejection.
     fn compute_node_hashes(&mut self, node: NodeId, slab_offset: u32, count: u8) {
-        let mut class_hash: u32 = 0;
+        let mut class_hash: u64 = 0;
         let mut id_hash: u32 = 0;
         let start = slab_offset as usize;
         let end = start + count as usize;
