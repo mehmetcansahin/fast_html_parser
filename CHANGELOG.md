@@ -13,8 +13,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `select_compiled()` / `select_first_compiled()` methods on `Selectable` trait and `Selection`
 - `parse_owned(String)` — zero-copy parsing that transfers the String allocation directly (avoids memcpy)
 - `HtmlParser::parse_owned()` static method and `parser.parse_str_owned()` instance method
-- Per-node `class_hash` (32-bit bloom filter) and `id_hash` (FNV-1a) fields for fast selector rejection
+- Per-node `class_hash` (64-bit bloom filter) and `id_hash` (FNV-1a) fields for fast selector rejection
 - `fhp_core::hash` module with `selector_hash()` and `class_bloom_bit()` shared hash functions
+- Per-node `element_index: u16` for O(1) `:nth-child` matching (computed via TreeBuilder counter)
+- Precomputed class bloom bit and id hash stored in selector AST at parse time
+- XPath evaluation benchmark (`xpath_bench.rs`) with 7 query patterns
+- Selector parse-only benchmark (parse cost without matching)
+- Entity decode isolation benchmark (fast path, sparse, dense)
+- Async streaming benchmark (gated behind `async-tokio` feature)
 - Compiled selector benchmarks in selector_bench, e2e_bench, and realworld_bench
 - `parse_owned` vs `parse` comparison benchmarks
 - Apache-2.0 license (dual-licensed: MIT OR Apache-2.0)
@@ -30,10 +36,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Node cold section layout: `class_hash: u32` + `id_hash: u32` added, padding reduced from 21 to 13 bytes (still 64 bytes total)
-- CSS selector matcher uses bloom bit check for `.class` and hash compare for `#id` before scanning attributes
+- Node cold section layout: `class_hash: u64` + `id_hash: u32` + `element_index: u16`, padding 7 bytes (still 64 bytes total)
+- CSS selector matcher uses precomputed bloom bit for `.class` and precomputed hash for `#id` — eliminates per-node hashing
+- Bloom filter hashes unified to FNV-1a across ancestor bloom (bloom.rs) and per-node hashes (hash.rs)
+- NEON `neon_movemask` uses static bitmask array instead of stack allocation
+- `TreeBuilder::process()` marked `#[inline]` for cross-crate optimization
+- Fat LTO enabled (`lto = "fat"`) for aggressive cross-crate inlining
+- Delimiter loop uses pre-mask to eliminate per-iteration bounds check
+- Quote-aware string masking: fast-path when carry active but no quotes in block
+- Multi-root selection dedup uses sorted merge instead of HashSet
+- XPath absolute path evaluation reuses buffers instead of per-step Vec allocation
+- `[class~=val]` attribute selector uses fast ASCII `contains_class_token` instead of `split_whitespace`
+- Selector cache includes single-simple selectors (tag, .class, #id) — no longer bypassed
+- Case-insensitive attribute name matching (`eq_ignore_ascii_case`) in NodeRef, XPath, and matcher
+- StreamTokenizer `scan_safe_split` with raw text context awareness (script/style)
+- Consolidated testdata to single root directory (removed 5.1 MB duplicate)
+- All crate Cargo.toml files include `exclude` patterns for crates.io publishing
 - License field updated to "MIT OR Apache-2.0" across all crates
-- README updated with real-world benchmarks, CompiledSelector, and parse_owned examples
+
+### Performance
+
+- `.class` selector: **-29%** (21 µs → 15 µs) via precomputed bloom bit
+- `[attr=val]` selector: **-5%** via precomputed id hash
+- Tokenization stage: **-10%** (fat LTO + delimiter pre-mask)
+- `:nth-child`: O(1) via cached element_index (was O(n) sibling walk)
+- Class bloom filter false positive rate: ~15% → ~8% (u32 → u64)
 
 ## [0.1.0] - 2026-02-06
 

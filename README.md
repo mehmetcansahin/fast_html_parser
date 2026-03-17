@@ -163,12 +163,12 @@ NEON achieves ~5-5.5x speedup over scalar fallback.
 | Selector | Time |
 |---|---|
 | Tag (`p`) | ~10 µs |
-| Class (`.highlight`) | ~23 µs |
+| Class (`.highlight`) | ~15 µs |
 | ID (`#main`) | ~13 µs |
-| Descendant (`div p`) | ~71 µs |
-| Complex (`div > ul li a`) | ~65 µs |
+| Descendant (`div p`) | ~70 µs |
+| Complex (`div > ul li a`) | ~63 µs |
 
-Per-node hash rejection (class bloom filter, ID FNV-1a) provides fast early exit for non-matching nodes.
+Per-node hash rejection (64-bit class bloom filter, ID FNV-1a) with precomputed hashes at selector parse time provides fast early exit for non-matching nodes. `:nth-child` uses O(1) cached element index.
 
 Run benchmarks locally:
 
