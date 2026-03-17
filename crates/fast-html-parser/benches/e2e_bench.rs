@@ -9,8 +9,8 @@ use fast_html_parser::HtmlParser;
 use fast_html_parser::Selectable;
 use fast_html_parser::streaming::parse_stream;
 
-const SMALL_HTML: &str = include_str!("../testdata/small_1kb.html");
-const MEDIUM_HTML: &str = include_str!("../testdata/medium_100kb.html");
+const SMALL_HTML: &str = include_str!("../../../testdata/small_1kb.html");
+const MEDIUM_HTML: &str = include_str!("../../../testdata/medium_100kb.html");
 
 fn bench_parse(c: &mut Criterion) {
     let mut group = c.benchmark_group("parse");

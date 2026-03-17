@@ -4,7 +4,7 @@
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
-const MEDIUM_HTML: &str = include_str!("../testdata/medium_100kb.html");
+const MEDIUM_HTML: &str = include_str!("../../../testdata/medium_100kb.html");
 
 fn bench_cost_breakdown(c: &mut Criterion) {
     let html = MEDIUM_HTML;

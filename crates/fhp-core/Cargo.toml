@@ -10,6 +10,7 @@ repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-core"
 keywords = ["html", "parser", "core", "tags", "entities"]
 categories = ["parser-implementations"]
+exclude = ["benches/", "tests/"]
 
 [dependencies]
 thiserror = { workspace = true }

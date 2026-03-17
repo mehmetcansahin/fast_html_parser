@@ -10,6 +10,7 @@ repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-encoding"
 keywords = ["encoding", "html", "charset", "utf8", "parser"]
 categories = ["encoding"]
+exclude = ["benches/", "tests/"]
 
 [dependencies]
 fhp-core = { version = "0.1", path = "../fhp-core" }

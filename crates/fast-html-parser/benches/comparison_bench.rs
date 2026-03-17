@@ -8,9 +8,9 @@
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 
-const SMALL_HTML: &str = include_str!("../testdata/small_1kb.html");
-const MEDIUM_HTML: &str = include_str!("../testdata/medium_100kb.html");
-const LARGE_HTML: &str = include_str!("../testdata/large_5mb.html");
+const SMALL_HTML: &str = include_str!("../../../testdata/small_1kb.html");
+const MEDIUM_HTML: &str = include_str!("../../../testdata/medium_100kb.html");
+const LARGE_HTML: &str = include_str!("../../../testdata/large_5mb.html");
 
 // ---------------------------------------------------------------------------
 // Parse throughput comparison

@@ -10,6 +10,7 @@ repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-simd"
 keywords = ["simd", "html", "parser", "neon", "avx2"]
 categories = ["algorithms"]
+exclude = ["benches/", "tests/"]
 
 [dependencies]
 fhp-core = { version = "0.1", path = "../fhp-core" }

@@ -10,6 +10,7 @@ repository = "https://github.com/nicatdcw/fast-html-parser"
 documentation = "https://docs.rs/fhp-selector"
 keywords = ["css", "selector", "xpath", "html", "parser"]
 categories = ["parser-implementations", "web-programming"]
+exclude = ["benches/", "tests/"]
 
 [dependencies]
 fhp-core = { version = "0.1", path = "../fhp-core" }

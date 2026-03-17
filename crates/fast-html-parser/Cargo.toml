@@ -11,6 +11,7 @@ documentation = "https://docs.rs/fast-html-parser"
 readme = "../../README.md"
 keywords = ["html", "parser", "simd", "web-scraping", "css-selector"]
 categories = ["parser-implementations", "web-programming"]
+exclude = ["benches/", "tests/"]
 
 [features]
 default = ["css-selector", "entity-decode"]
