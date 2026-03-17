@@ -1,6 +1,5 @@
 # fast-html-parser
 
-[![CI](https://github.com/nicatdcw/fast-html-parser/actions/workflows/ci.yml/badge.svg)](https://github.com/nicatdcw/fast-html-parser/actions/workflows/ci.yml)
 [![Crates.io](https://img.shields.io/crates/v/fast-html-parser.svg)](https://crates.io/crates/fast-html-parser)
 [![docs.rs](https://docs.rs/fast-html-parser/badge.svg)](https://docs.rs/fast-html-parser)
 [![License](https://img.shields.io/crates/l/fast-html-parser.svg)](LICENSE-MIT)

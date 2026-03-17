@@ -9,7 +9,7 @@
 ## Reporting a Vulnerability
 
 Please report security vulnerabilities through
-[GitHub Security Advisories](https://github.com/nicatdcw/fast-html-parser/security/advisories).
+[GitHub Security Advisories](https://github.com/mehmetcansahin/fast_html_parser/security/advisories).
 
 **Do not** open a public issue for security vulnerabilities.
 
