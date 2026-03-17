@@ -135,11 +135,38 @@ fn bench_compiled_selector(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_selector_parse(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parse_selector");
+
+    let selectors = [
+        ("tag", "p"),
+        ("class", ".highlight"),
+        ("id", "#main"),
+        ("descendant", "div p"),
+        ("compound", "p.highlight#main"),
+        ("complex", "div > ul li a[href]"),
+        ("nth_child", "li:nth-child(2n+1)"),
+        ("not", "p:not(.hidden)"),
+    ];
+
+    for (name, css) in &selectors {
+        group.bench_with_input(BenchmarkId::from_parameter(name), *css, |b, css| {
+            b.iter(|| {
+                let list = fhp_selector::parser::parse_selector(css).unwrap();
+                std::hint::black_box(&list);
+            });
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_select,
     bench_find_convenience,
     bench_chaining,
-    bench_compiled_selector
+    bench_compiled_selector,
+    bench_selector_parse
 );
 criterion_main!(benches);

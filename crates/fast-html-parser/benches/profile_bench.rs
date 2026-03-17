@@ -82,5 +82,42 @@ fn bench_cost_breakdown(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_cost_breakdown);
+fn bench_entity_decode(c: &mut Criterion) {
+    // Text with no entities (fast path — borrowed, zero alloc).
+    let no_entities = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(100);
+    // Text with sparse entities (~5% of content has entities).
+    let sparse_entities = "Hello &amp; world &lt;div&gt; test &quot;value&quot; end. ".repeat(100);
+    // Text with dense entities (every token has entities).
+    let dense_entities = "&lt;div class=&quot;foo&quot;&gt;&amp;bar&lt;/div&gt;".repeat(100);
+
+    let mut group = c.benchmark_group("entity_decode");
+
+    group.throughput(criterion::Throughput::Bytes(no_entities.len() as u64));
+    group.bench_function("no_entities", |b| {
+        b.iter(|| {
+            let r = fhp_tokenizer::entity::decode_entities(&no_entities);
+            std::hint::black_box(&r);
+        });
+    });
+
+    group.throughput(criterion::Throughput::Bytes(sparse_entities.len() as u64));
+    group.bench_function("sparse_entities", |b| {
+        b.iter(|| {
+            let r = fhp_tokenizer::entity::decode_entities(&sparse_entities);
+            std::hint::black_box(&r);
+        });
+    });
+
+    group.throughput(criterion::Throughput::Bytes(dense_entities.len() as u64));
+    group.bench_function("dense_entities", |b| {
+        b.iter(|| {
+            let r = fhp_tokenizer::entity::decode_entities(&dense_entities);
+            std::hint::black_box(&r);
+        });
+    });
+
+    group.finish();
+}
+
+criterion_group!(benches, bench_cost_breakdown, bench_entity_decode);
 criterion_main!(benches);

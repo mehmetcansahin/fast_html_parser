@@ -68,12 +68,39 @@ fn bench_streaming(c: &mut Criterion) {
         let html = MEDIUM_HTML.as_bytes();
         group.throughput(Throughput::Bytes(html.len() as u64));
         group.bench_with_input(
-            BenchmarkId::new("100kb", format!("chunk_{chunk_size}")),
+            BenchmarkId::new("sync_100kb", format!("chunk_{chunk_size}")),
             &chunk_size,
             |b, &cs| {
                 b.iter(|| parse_stream(html.chunks(cs)).unwrap());
             },
         );
+    }
+
+    // Async streaming via tokio (if feature enabled).
+    #[cfg(feature = "async-tokio")]
+    {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for &chunk_size in &chunk_sizes {
+            let html = MEDIUM_HTML.as_bytes();
+            group.throughput(Throughput::Bytes(html.len() as u64));
+            group.bench_with_input(
+                BenchmarkId::new("async_100kb", format!("chunk_{chunk_size}")),
+                &chunk_size,
+                |b, &cs| {
+                    b.iter(|| {
+                        rt.block_on(async {
+                            let reader = tokio::io::BufReader::new(&html[..]);
+                            let doc = fast_html_parser::streaming::parse_async(reader).await.unwrap();
+                            std::hint::black_box(doc.node_count());
+                        })
+                    });
+                },
+            );
+        }
     }
 
     group.finish();
