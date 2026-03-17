@@ -100,8 +100,8 @@ fn should_implicit_close(open_tag: Tag, new_tag: Tag) -> bool {
 pub struct TreeBuilder {
     /// The arena that owns all nodes.
     pub(crate) arena: Arena,
-    /// Stack of open element node ids with cached tags.
-    open_elements: Vec<(NodeId, Tag)>,
+    /// Stack of open element node ids with cached tags and element child count.
+    open_elements: Vec<(NodeId, Tag, u16)>,
     /// The synthetic root node (document root).
     root: NodeId,
     /// Base address of the original input (for source-backed text).
@@ -129,7 +129,7 @@ impl TreeBuilder {
         // Create a synthetic document root.
         let root = arena.new_element(Tag::Unknown, 0);
         let mut open_elements = Vec::with_capacity(32);
-        open_elements.push((root, Tag::Unknown));
+        open_elements.push((root, Tag::Unknown, 0));
         Self {
             arena,
             open_elements,
@@ -207,7 +207,7 @@ impl TreeBuilder {
     fn current_parent(&self) -> NodeId {
         self.open_elements
             .last()
-            .map(|&(id, _)| id)
+            .map(|&(id, _, _)| id)
             .unwrap_or(self.root)
     }
 
@@ -245,8 +245,12 @@ impl TreeBuilder {
             self.arena.set_attrs(node, attributes);
         }
 
-        // Append to parent.
+        // Append to parent and set element index from parent's counter.
         self.arena.append_child(parent, node);
+        if let Some(parent_entry) = self.open_elements.last_mut() {
+            parent_entry.2 += 1;
+            self.arena.set_element_index(node, parent_entry.2);
+        }
 
         // Void elements and self-closing tags don't go on the stack.
         if tag.is_void() || self_closing {
@@ -258,7 +262,7 @@ impl TreeBuilder {
                 self.arena.set_self_closing(node);
             }
         } else {
-            self.open_elements.push((node, tag));
+            self.open_elements.push((node, tag, 0));
         }
 
         Some(node)
@@ -275,7 +279,7 @@ impl TreeBuilder {
         // Walk backwards to find the nearest match — read tag from cached tuple.
         let mut match_idx = None;
         for i in (1..self.open_elements.len()).rev() {
-            let (open_id, open_tag) = self.open_elements[i];
+            let (open_id, open_tag, _) = self.open_elements[i];
             if open_tag == tag {
                 if tag == Tag::Unknown {
                     let open_name = self.arena.unknown_tag_name(open_id).unwrap_or("");
@@ -377,7 +381,7 @@ impl TreeBuilder {
         // Check if the current open element should be implicitly closed.
         // Tag is read from the cached tuple — no arena access needed.
         while self.open_elements.len() > 1 {
-            let (_, current_tag) = *self.open_elements.last().unwrap();
+            let (_, current_tag, _) = *self.open_elements.last().unwrap();
 
             if should_implicit_close(current_tag, new_tag) {
                 self.open_elements.pop();
@@ -407,6 +411,10 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
         self.arena.set_attrs_from_raw(node, attr_raw);
 
         self.arena.append_child(parent, node);
+        if let Some(parent_entry) = self.open_elements.last_mut() {
+            parent_entry.2 += 1;
+            self.arena.set_element_index(node, parent_entry.2);
+        }
 
         if tag.is_void() || self_closing {
             if self_closing {
@@ -416,7 +424,7 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
                 self.arena.set_self_closing(node);
             }
         } else {
-            self.open_elements.push((node, tag));
+            self.open_elements.push((node, tag, 0));
         }
     }
 
