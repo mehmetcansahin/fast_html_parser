@@ -182,7 +182,7 @@ impl Arena {
             return;
         }
         let offset = self.attr_slab.len() as u32;
-        let count = attrs.len().min(255) as u8;
+        let count = attrs.len().min(u16::MAX as usize) as u16;
 
         for attr in &attrs[..count as usize] {
             let name_offset = self.attr_str_slab.len() as u32;
@@ -214,27 +214,6 @@ impl Arena {
         self.compute_node_hashes(node, offset, count);
     }
 
-    /// Store raw attribute bytes for lazy parsing.
-    ///
-    /// Instead of parsing attributes immediately, stores the raw attribute
-    /// region in `attr_str_slab` and records offset/len on the node. Attributes
-    /// are parsed on first access via [`Arena::attrs`] or
-    /// [`Arena::ensure_attrs_parsed`].
-    pub fn set_attrs_raw_lazy(&mut self, node: NodeId, attr_raw: &str) {
-        let trimmed = attr_raw.as_bytes();
-        // Quick scan: skip if all whitespace.
-        let has_content = trimmed.iter().any(|&b| !is_attr_whitespace(b));
-        if !has_content {
-            return;
-        }
-        let offset = self.attr_str_slab.len() as u32;
-        self.attr_str_slab.extend_from_slice(trimmed);
-        let n = &mut self.nodes[node.index()];
-        n.attr_raw_offset = offset;
-        n.attr_raw_len = trimmed.len().min(u16::MAX as usize) as u16;
-        n.flags.set(NodeFlags::HAS_ATTRS);
-    }
-
     /// Parse attributes directly from a raw attribute region into the slab.
     ///
     /// Skips all intermediate `Vec<Attribute>` allocation — names and values
@@ -248,7 +227,7 @@ impl Arena {
         }
 
         let slab_offset = self.attr_slab.len() as u32;
-        let mut count: u8 = 0;
+        let mut count: u16 = 0;
         let mut pos = 0;
 
         loop {
@@ -257,7 +236,7 @@ impl Arena {
                 .iter()
                 .position(|&b| !is_attr_whitespace(b))
                 .unwrap_or(end - pos);
-            if pos >= end || count == 255 {
+            if pos >= end || count == u16::MAX {
                 break;
             }
 
@@ -359,7 +338,7 @@ impl Arena {
     ///
     /// Scans the attribute slab for `class` and `id` attributes and stores
     /// the computed hashes on the node for fast selector rejection.
-    fn compute_node_hashes(&mut self, node: NodeId, slab_offset: u32, count: u8) {
+    fn compute_node_hashes(&mut self, node: NodeId, slab_offset: u32, count: u16) {
         let mut class_hash: u64 = 0;
         let mut id_hash: u32 = 0;
         let start = slab_offset as usize;
@@ -421,7 +400,7 @@ impl Arena {
 
     /// Set the 1-based element sibling index for a node.
     ///
-    /// Called by [`TreeBuilder`] after appending an element child.
+    /// Called by [`TreeBuilder`](crate::builder::TreeBuilder) after appending an element child.
     #[inline]
     pub fn set_element_index(&mut self, node: NodeId, index: u16) {
         self.nodes[node.index()].element_index = index;
@@ -439,10 +418,22 @@ impl Arena {
     /// Updates all tree links: parent, first_child, last_child, prev_sibling,
     /// next_sibling. Uses unchecked indexing since NodeIds are always valid
     /// indices created by this arena.
+    ///
+    /// `child` must be a freshly allocated, not-yet-linked node, distinct from
+    /// `parent` (and therefore from `parent`'s current last child). Internal
+    /// callers always satisfy this; the debug assertions below catch misuse.
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
+        debug_assert!(
+            parent != child,
+            "append_child: parent and child must be distinct nodes (aliasing &mut)"
+        );
         let nodes = self.nodes.as_mut_ptr();
         // SAFETY: parent and child indices were created by this arena via
-        // new_element/new_text/etc., so they are always in bounds.
+        // new_element/new_text/etc., so they are always in bounds. The three
+        // `&mut` references taken below (parent, child, and parent.last_child)
+        // never alias: `parent != child` (asserted), and `last` is a previously
+        // appended child, so it differs from both the pre-existing `parent` and
+        // the freshly allocated `child`.
         unsafe {
             let p = &mut *nodes.add(parent.index());
             let c = &mut *nodes.add(child.index());
@@ -451,6 +442,10 @@ impl Arena {
             if last.is_null() {
                 p.first_child = child;
             } else {
+                debug_assert!(
+                    last != parent && last != child,
+                    "append_child: parent.last_child must differ from parent and child"
+                );
                 (*nodes.add(last.index())).next_sibling = child;
                 c.prev_sibling = last;
             }
@@ -495,153 +490,6 @@ impl Arena {
         &self.attr_slab[start..end]
     }
 
-    /// Returns `true` if the node has lazy (unparsed) attributes.
-    #[inline]
-    pub fn has_lazy_attrs(&self, node: NodeId) -> bool {
-        let n = &self.nodes[node.index()];
-        n.attr_count == 0 && n.attr_raw_len > 0
-    }
-
-    /// Ensure the node's attributes are parsed into the slab.
-    ///
-    /// If the node has lazy attributes (stored as raw bytes), parses them
-    /// now and updates the node's attr_offset/attr_count. No-op if already
-    /// parsed or if the node has no attributes.
-    pub fn ensure_attrs_parsed(&mut self, node: NodeId) {
-        let n = &self.nodes[node.index()];
-        if n.attr_count > 0 || n.attr_raw_len == 0 {
-            return;
-        }
-        let raw_offset = n.attr_raw_offset as usize;
-        let raw_len = n.attr_raw_len as usize;
-        // SAFETY: attr_str_slab bytes were originally sourced from &str (valid UTF-8).
-        let attr_raw = unsafe {
-            std::str::from_utf8_unchecked(&self.attr_str_slab[raw_offset..raw_offset + raw_len])
-        }
-        .to_owned();
-        self.parse_raw_attrs_into_slab(node, &attr_raw);
-    }
-
-    /// Get the attributes for a node, parsing lazily if needed.
-    ///
-    /// Convenience method that combines [`Arena::ensure_attrs_parsed`] and
-    /// [`Arena::attrs`].
-    pub fn attrs_mut(&mut self, node: NodeId) -> &[Attribute] {
-        self.ensure_attrs_parsed(node);
-        let n = &self.nodes[node.index()];
-        if n.attr_count == 0 {
-            return &[];
-        }
-        let start = n.attr_offset as usize;
-        let end = start + n.attr_count as usize;
-        &self.attr_slab[start..end]
-    }
-
-    /// Parse raw attribute bytes into the slab (internal helper for lazy parsing).
-    fn parse_raw_attrs_into_slab(&mut self, node: NodeId, attr_raw: &str) {
-        let bytes = attr_raw.as_bytes();
-        let end = bytes.len();
-        if end == 0 {
-            return;
-        }
-
-        let slab_offset = self.attr_slab.len() as u32;
-        let mut count: u8 = 0;
-        let mut pos = 0;
-
-        loop {
-            pos += bytes[pos..end]
-                .iter()
-                .position(|&b| !is_attr_whitespace(b))
-                .unwrap_or(end - pos);
-            if pos >= end || count == 255 {
-                break;
-            }
-
-            let name_start = pos;
-            while pos < end && !is_attr_name_end(bytes[pos]) {
-                pos += 1;
-            }
-            if name_start == pos {
-                pos += 1;
-                continue;
-            }
-
-            let name_slab_offset = self.attr_str_slab.len() as u32;
-            self.attr_str_slab
-                .extend_from_slice(&bytes[name_start..pos]);
-            let name_len = (pos - name_start) as u16;
-
-            pos += bytes[pos..end]
-                .iter()
-                .position(|&b| !is_attr_whitespace(b))
-                .unwrap_or(end - pos);
-
-            if pos < end && bytes[pos] == b'=' {
-                pos += 1;
-
-                pos += bytes[pos..end]
-                    .iter()
-                    .position(|&b| !is_attr_whitespace(b))
-                    .unwrap_or(end - pos);
-
-                if pos < end && (bytes[pos] == b'"' || bytes[pos] == b'\'') {
-                    let quote = bytes[pos];
-                    pos += 1;
-                    let val_start = pos;
-                    if let Some(found) = memchr::memchr(quote, &bytes[pos..end]) {
-                        pos += found;
-                    } else {
-                        pos = end;
-                    }
-                    let val_end = pos;
-                    if pos < end {
-                        pos += 1;
-                    }
-                    let raw_value = &attr_raw[val_start..val_end];
-                    let (value_offset, value_len) = self.push_attr_value(raw_value);
-                    self.attr_slab.push(Attribute {
-                        name_offset: name_slab_offset,
-                        name_len,
-                        value_offset,
-                        value_len,
-                    });
-                } else {
-                    let val_start = pos;
-                    while pos < end && !is_attr_whitespace(bytes[pos]) && bytes[pos] != b'>' {
-                        pos += 1;
-                    }
-                    let raw_value = &attr_raw[val_start..pos];
-                    let (value_offset, value_len) = self.push_attr_value(raw_value);
-                    self.attr_slab.push(Attribute {
-                        name_offset: name_slab_offset,
-                        name_len,
-                        value_offset,
-                        value_len,
-                    });
-                }
-            } else {
-                self.attr_slab.push(Attribute {
-                    name_offset: name_slab_offset,
-                    name_len,
-                    value_offset: 0,
-                    value_len: 0,
-                });
-            }
-
-            count += 1;
-        }
-
-        if count > 0 {
-            let n = &mut self.nodes[node.index()];
-            n.attr_offset = slab_offset;
-            n.attr_count = count;
-
-            // Compute hashes for lazy-parsed attributes.
-            self.compute_node_hashes(node, slab_offset, count);
-        }
-    }
-
     /// Get the text content for a node (direct text, not recursive).
     #[inline]
     pub fn text(&self, node: NodeId) -> &str {
@@ -683,30 +531,6 @@ impl Arena {
     #[inline]
     pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
         &mut self.nodes[id.index()]
-    }
-
-    /// Parse all lazy (unparsed) attributes in a single batch pass.
-    ///
-    /// Called after tree building completes to resolve all deferred attribute
-    /// parsing before handing the arena to consumers. This gives better cache
-    /// locality than interleaving attr parsing with node creation.
-    pub fn ensure_all_attrs_parsed(&mut self) {
-        for i in 0..self.nodes.len() {
-            let n = &self.nodes[i];
-            if n.attr_count == 0 && n.attr_raw_len > 0 {
-                let raw_offset = n.attr_raw_offset as usize;
-                let raw_len = n.attr_raw_len as usize;
-                // SAFETY: attr_str_slab bytes were sourced from &str (valid UTF-8).
-                let attr_raw = unsafe {
-                    std::str::from_utf8_unchecked(
-                        &self.attr_str_slab[raw_offset..raw_offset + raw_len],
-                    )
-                }
-                .to_owned();
-                let node_id = NodeId(i as u32);
-                self.parse_raw_attrs_into_slab(node_id, &attr_raw);
-            }
-        }
     }
 
     /// Total number of nodes in the arena.

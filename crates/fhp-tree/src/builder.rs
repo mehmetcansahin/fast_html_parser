@@ -108,6 +108,9 @@ pub struct TreeBuilder {
     source_base: usize,
     /// Length of the original input in bytes.
     source_len: usize,
+    /// Count of non-void open tags dropped at the depth limit whose matching
+    /// close tags must still be swallowed (so they do not pop real elements).
+    suppressed_opens: u32,
 }
 
 impl TreeBuilder {
@@ -136,6 +139,7 @@ impl TreeBuilder {
             root,
             source_base: 0,
             source_len: 0,
+            suppressed_opens: 0,
         }
     }
 
@@ -230,6 +234,12 @@ impl TreeBuilder {
 
         // Enforce depth limit.
         if self.current_depth() >= MAX_DEPTH {
+            // A dropped non-void open would otherwise have a matching close
+            // later; record it so that close is swallowed instead of popping a
+            // real element.
+            if !tag.is_void() && !self_closing {
+                self.suppressed_opens += 1;
+            }
             return None;
         }
 
@@ -248,7 +258,11 @@ impl TreeBuilder {
         // Append to parent and set element index from parent's counter.
         self.arena.append_child(parent, node);
         if let Some(parent_entry) = self.open_elements.last_mut() {
-            parent_entry.2 += 1;
+            // Saturating: the element index is a u16, so a parent with more
+            // than u16::MAX element children pins later children at u16::MAX
+            // rather than overflowing (debug panic / release wrap to 0, which
+            // would make a node look like "not an element" to :nth-child).
+            parent_entry.2 = parent_entry.2.saturating_add(1);
             self.arena.set_element_index(node, parent_entry.2);
         }
 
@@ -272,6 +286,14 @@ impl TreeBuilder {
     fn handle_close_tag(&mut self, tag: Tag, name: &str) {
         // Ignore close tags for void elements.
         if tag.is_void() {
+            return;
+        }
+
+        // Swallow the close of an element that was dropped at the depth limit
+        // (LIFO: depth-dropped elements are the most deeply nested, so their
+        // closes arrive before any close that targets the real stack).
+        if self.suppressed_opens > 0 {
+            self.suppressed_opens -= 1;
             return;
         }
 
@@ -397,6 +419,11 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
         self.apply_implicit_close(tag);
 
         if self.current_depth() >= MAX_DEPTH {
+            // See `handle_open_tag`: swallow the matching close of a dropped
+            // non-void open so it does not pop a real element later.
+            if !tag.is_void() && !self_closing {
+                self.suppressed_opens += 1;
+            }
             return;
         }
 
@@ -412,7 +439,11 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
 
         self.arena.append_child(parent, node);
         if let Some(parent_entry) = self.open_elements.last_mut() {
-            parent_entry.2 += 1;
+            // Saturating: the element index is a u16, so a parent with more
+            // than u16::MAX element children pins later children at u16::MAX
+            // rather than overflowing (debug panic / release wrap to 0, which
+            // would make a node look like "not an element" to :nth-child).
+            parent_entry.2 = parent_entry.2.saturating_add(1);
             self.arena.set_element_index(node, parent_entry.2);
         }
 

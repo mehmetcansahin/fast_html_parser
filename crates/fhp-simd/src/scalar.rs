@@ -81,10 +81,13 @@ pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
 }
 
 /// Safe inner implementation of [`compute_byte_mask`].
+///
+/// The result is a 64-bit mask, so at most the first 64 bytes of `block` are
+/// considered; any bytes beyond offset 64 are ignored.
 #[inline]
 pub fn compute_byte_mask_safe(block: &[u8], byte: u8) -> u64 {
     let mut mask = 0u64;
-    for (i, &b) in block.iter().enumerate() {
+    for (i, &b) in block.iter().take(64).enumerate() {
         if b == byte {
             mask |= 1u64 << i;
         }
@@ -103,10 +106,13 @@ pub unsafe fn compute_all_masks(block: &[u8]) -> crate::AllMasks {
 }
 
 /// Safe inner implementation of [`compute_all_masks`].
+///
+/// The masks are 64-bit, so at most the first 64 bytes of `block` are
+/// considered; any bytes beyond offset 64 are ignored.
 #[inline]
 pub fn compute_all_masks_safe(block: &[u8]) -> crate::AllMasks {
     let mut masks = crate::AllMasks::default();
-    for (i, &b) in block.iter().enumerate() {
+    for (i, &b) in block.iter().take(64).enumerate() {
         let bit = 1u64 << i;
         match b {
             b'<' => masks.lt |= bit,
@@ -250,6 +256,22 @@ mod tests {
     fn compute_byte_mask_empty() {
         let mask = unsafe { compute_byte_mask(b"", b'<') };
         assert_eq!(mask, 0);
+    }
+
+    #[test]
+    fn compute_byte_mask_over_64_bytes_does_not_overflow() {
+        // A u64 mask can only represent 64 positions. An over-long block must
+        // be capped at 64 rather than overflowing the shift (UB/panic).
+        let input = vec![b'<'; 80];
+        let mask = compute_byte_mask_safe(&input, b'<');
+        assert_eq!(mask, u64::MAX, "first 64 '<' set, rest ignored");
+    }
+
+    #[test]
+    fn compute_all_masks_over_64_bytes_does_not_overflow() {
+        let input = vec![b'<'; 80];
+        let masks = compute_all_masks_safe(&input);
+        assert_eq!(masks.lt, u64::MAX);
     }
 
     #[test]

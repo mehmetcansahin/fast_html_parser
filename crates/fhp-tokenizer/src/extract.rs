@@ -100,6 +100,10 @@ pub(crate) struct Parser<'a> {
     special_open_pos: usize,
     /// Tag we're inside for raw text mode.
     raw_text_tag: Tag,
+    /// While inside a tag, the quote char (`"` or `'`) of the attribute value
+    /// we are currently within, or `None` when not inside a quoted value. Used
+    /// so a `>` inside an attribute value does not close the tag.
+    attr_quote: Option<u8>,
 }
 
 impl<'a> Parser<'a> {
@@ -112,6 +116,19 @@ impl<'a> Parser<'a> {
             tag_open_pos: 0,
             special_open_pos: 0,
             raw_text_tag: Tag::Unknown,
+            attr_quote: None,
+        }
+    }
+
+    /// Update the in-attribute quote state for a quote byte (`"` or `'`) seen
+    /// inside a tag. Opening a quote records its char; the matching char closes
+    /// it; the other quote char inside a quoted value is a literal (ignored).
+    #[inline(always)]
+    fn update_attr_quote(&mut self, byte: u8) {
+        match self.attr_quote {
+            None => self.attr_quote = Some(byte),
+            Some(open) if open == byte => self.attr_quote = None,
+            Some(_) => {}
         }
     }
 
@@ -150,6 +167,7 @@ impl<'a> Parser<'a> {
             // Flush text before this `<`.
             self.flush_text_impl(pos, emit);
             self.tag_open_pos = pos;
+            self.attr_quote = None;
 
             // Peek ahead to classify what follows `<`.
             let after = self.peek(pos + 1);
@@ -179,20 +197,25 @@ impl<'a> Parser<'a> {
         // Other delimiters in Data mode are part of text content (entities, etc.)
     }
 
-    /// In tag mode: `>` closes the tag.
+    /// In tag mode: `>` closes the tag, unless it sits inside an attribute
+    /// value. `"`/`'` toggle the quoted-value state.
     #[inline(always)]
     fn on_in_tag_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        if byte == b'>' {
-            // Parse the tag content between `<` and `>`.
-            self.parse_tag_impl(self.tag_open_pos, pos, emit);
-            self.cursor = pos + 1;
-            // parse_tag may have set InRawText for script/style — don't override.
-            if self.mode != Mode::InRawText {
-                self.mode = Mode::Data;
+        match byte {
+            b'"' | b'\'' => self.update_attr_quote(byte),
+            b'>' if self.attr_quote.is_none() => {
+                // Parse the tag content between `<` and `>`.
+                self.parse_tag_impl(self.tag_open_pos, pos, emit);
+                self.cursor = pos + 1;
+                // parse_tag may have set InRawText for script/style — don't override.
+                if self.mode != Mode::InRawText {
+                    self.mode = Mode::Data;
+                }
             }
+            // Other delimiters inside tags (`=`, `/`, and `>` inside a quoted
+            // value) are handled during tag parsing when we see the closing `>`.
+            _ => {}
         }
-        // Other delimiters inside tags (`=`, `"`, `'`, `/`) are handled
-        // during tag parsing when we see `>`.
     }
 
     /// In comment mode: look for `-->`.
@@ -263,6 +286,7 @@ impl<'a> Parser<'a> {
             // Flush raw text content.
             self.flush_text_impl(pos, emit);
             self.tag_open_pos = pos;
+            self.attr_quote = None;
             self.mode = Mode::InTag;
         }
     }
@@ -469,6 +493,7 @@ impl<'a> Parser<'a> {
         if byte == b'<' {
             self.flush_text_sink(pos, sink);
             self.tag_open_pos = pos;
+            self.attr_quote = None;
 
             let after = self.peek(pos + 1);
             let after2 = self.peek(pos + 2);
@@ -493,15 +518,20 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// In tag mode (sink): `>` closes the tag.
+    /// In tag mode (sink): `>` closes the tag, unless it sits inside an
+    /// attribute value. `"`/`'` toggle the quoted-value state.
     #[inline(always)]
     fn on_in_tag_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        if byte == b'>' {
-            self.parse_tag_sink(self.tag_open_pos, pos, sink);
-            self.cursor = pos + 1;
-            if self.mode != Mode::InRawText {
-                self.mode = Mode::Data;
+        match byte {
+            b'"' | b'\'' => self.update_attr_quote(byte),
+            b'>' if self.attr_quote.is_none() => {
+                self.parse_tag_sink(self.tag_open_pos, pos, sink);
+                self.cursor = pos + 1;
+                if self.mode != Mode::InRawText {
+                    self.mode = Mode::Data;
+                }
             }
+            _ => {}
         }
     }
 
@@ -559,6 +589,7 @@ impl<'a> Parser<'a> {
         if byte == b'<' && self.is_raw_text_close(pos) {
             self.flush_text_sink(pos, sink);
             self.tag_open_pos = pos;
+            self.attr_quote = None;
             self.mode = Mode::InTag;
         }
     }

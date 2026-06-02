@@ -97,16 +97,20 @@ fn find_first_error_offset(input: &[u8], encoding: &'static Encoding) -> usize {
     // Simple linear scan with small chunks for accuracy.
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut output = vec![0u8; 1024];
-    let mut total_read = 0usize;
+    // Track the byte position of the current chunk explicitly. The decoder's
+    // consumed-byte count can lag the chunk position (e.g. an internally
+    // buffered partial sequence), so it must not be used to derive `is_last`
+    // or the reported offset.
+    let mut pos = 0usize;
 
     for chunk in input.chunks(256) {
-        let is_last = total_read + chunk.len() >= input.len();
+        let is_last = pos + chunk.len() >= input.len();
         let (result, read, _) =
             decoder.decode_to_utf8_without_replacement(chunk, &mut output, is_last);
         if let encoding_rs::DecoderResult::Malformed(_, _) = result {
-            return total_read + read;
+            return pos + read;
         }
-        total_read += read;
+        pos += chunk.len();
     }
     0
 }

@@ -32,9 +32,6 @@ pub struct BlockBitmaps {
     pub eq: u64,
     /// `/` positions.
     pub slash: u64,
-    /// Positions inside quoted strings (both `"` and `'`).
-    /// Set bits indicate bytes that are *not* structural.
-    pub in_string: u64,
 }
 
 /// Result of structural indexing: a sequence of [`BlockBitmaps`] covering
@@ -85,7 +82,7 @@ impl StructuralIndex {
         &self.bitmaps[index]
     }
 
-    /// OR of all delimiter masks for a block (excluding `in_string`).
+    /// OR of all delimiter masks for a block.
     fn combined_mask(block: &BlockBitmaps) -> u64 {
         block.lt | block.gt | block.amp | block.quot | block.apos | block.eq | block.slash
     }
@@ -215,62 +212,12 @@ impl StructuralIndexer {
                 apos,
                 eq,
                 slash,
-                in_string: 0,
             });
         }
-
-        Self::compute_string_masks(&mut bitmaps);
 
         StructuralIndex {
             bitmaps,
             len: input.len(),
-        }
-    }
-
-    /// Compute quote-aware string masks using prefix XOR.
-    ///
-    /// Two passes:
-    /// 1. Double-quote (`"`) regions via prefix XOR + carry.
-    /// 2. Single-quote (`'`) regions, ignoring positions already inside
-    ///    double-quoted strings.
-    ///
-    /// After both passes, non-structural delimiters inside strings are
-    /// cleared from `lt`, `gt`, `amp`, `eq`, `slash`, and the non-boundary
-    /// quote masks.
-    fn compute_string_masks(bitmaps: &mut [BlockBitmaps]) {
-        // Pass 1: double-quote regions.
-        let mut carry_dq = false;
-        for block in bitmaps.iter_mut() {
-            let flipped = prefix_xor(block.quot);
-            let dq_in = if carry_dq { !flipped } else { flipped };
-            carry_dq ^= (block.quot.count_ones() % 2) == 1;
-            // Store dq_in temporarily in `in_string`.
-            block.in_string = dq_in;
-        }
-
-        // Pass 2: single-quote regions (excluding positions inside dquot).
-        let mut carry_sq = false;
-        for block in bitmaps.iter_mut() {
-            let dq_in = block.in_string;
-            // Ignore single quotes that fall inside double-quoted strings.
-            let effective_apos = block.apos & !dq_in;
-            let flipped = prefix_xor(effective_apos);
-            let sq_in = if carry_sq { !flipped } else { flipped };
-            carry_sq ^= (effective_apos.count_ones() % 2) == 1;
-
-            // Combine both quote regions.
-            block.in_string = dq_in | sq_in;
-
-            // Mask non-structural delimiters inside strings.
-            block.lt &= !block.in_string;
-            block.gt &= !block.in_string;
-            block.amp &= !block.in_string;
-            block.eq &= !block.in_string;
-            block.slash &= !block.in_string;
-
-            // Mask non-boundary quotes (apos inside dquot, quot inside squot).
-            block.apos &= !dq_in;
-            block.quot &= !sq_in;
         }
     }
 }
@@ -281,66 +228,9 @@ impl Default for StructuralIndexer {
     }
 }
 
-/// Compute prefix XOR of all bits in a `u64`.
-///
-/// After this operation, bit `i` equals the XOR of the original bits
-/// `0..=i`. This effectively creates a toggle mask: each set bit in the
-/// input flips all subsequent bits, turning quote positions into
-/// inside/outside-string regions.
-///
-/// On x86_64 with PCLMULQDQ this could be a single `clmul` instruction;
-/// here we use a portable cascade of shifts.
-#[inline]
-fn prefix_xor(mut x: u64) -> u64 {
-    x ^= x << 1;
-    x ^= x << 2;
-    x ^= x << 4;
-    x ^= x << 8;
-    x ^= x << 16;
-    x ^= x << 32;
-    x
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // ---------------------------------------------------------------
-    // prefix_xor unit tests
-    // ---------------------------------------------------------------
-
-    #[test]
-    fn prefix_xor_single_bit() {
-        // Bit 2 set → bits 2..63 should be set after prefix XOR.
-        let result = prefix_xor(1 << 2);
-        for i in 0..64 {
-            let bit = (result >> i) & 1;
-            if i < 2 {
-                assert_eq!(bit, 0, "bit {i} should be 0");
-            } else {
-                assert_eq!(bit, 1, "bit {i} should be 1");
-            }
-        }
-    }
-
-    #[test]
-    fn prefix_xor_two_bits() {
-        // Bits 2 and 5 → bits 2..4 should be 1, bits 5..63 should be 0.
-        let result = prefix_xor((1 << 2) | (1 << 5));
-        for i in 0..64 {
-            let bit = (result >> i) & 1;
-            if (2..5).contains(&i) {
-                assert_eq!(bit, 1, "bit {i} should be 1");
-            } else {
-                assert_eq!(bit, 0, "bit {i} should be 0");
-            }
-        }
-    }
-
-    #[test]
-    fn prefix_xor_zero() {
-        assert_eq!(prefix_xor(0), 0);
-    }
 
     // ---------------------------------------------------------------
     // StructuralIndexer — basic HTML
@@ -396,45 +286,42 @@ mod tests {
     }
 
     // ---------------------------------------------------------------
-    // Quote-aware masking
+    // Delimiter indexing (quote semantics belong to the parser)
     // ---------------------------------------------------------------
 
     #[test]
-    fn delimiters_inside_double_quotes_masked() {
-        // The < and > inside the attribute value should NOT appear.
+    fn delimiters_inside_double_quotes_are_indexed() {
+        // The indexer yields ALL delimiter positions, including those inside
+        // an attribute value. Quote semantics (a `>` inside a value does not
+        // close the tag) are the parser's job, not the indexer's — see the
+        // `tests/quote_handling.rs` integration tests.
         let input = b"<a title=\"x > y < z\">link</a>";
         let indexer = StructuralIndexer::new();
         let index = indexer.index(input);
 
-        let delims: Vec<_> = index.iter_delimiters().collect();
-        let positions: Vec<usize> = delims.iter().map(|d| d.pos).collect();
+        let positions: Vec<usize> = index.iter_delimiters().map(|d| d.pos).collect();
 
-        // '<' at 0 (opening tag)
-        assert!(positions.contains(&0));
-        // '>' at 20 (closing >)
-        assert!(positions.contains(&20));
-        // '<' at 25 (closing tag </a>)
-        assert!(positions.contains(&25));
+        // Structural delimiters of the tag itself.
+        assert!(positions.contains(&0)); // opening '<'
+        assert!(positions.contains(&20)); // closing '>'
+        assert!(positions.contains(&25)); // '<' of </a>
 
-        // The '>' at 12 and '<' at 16 should NOT be present (inside quotes).
-        assert!(!positions.contains(&12), "> inside quotes should be masked");
-        assert!(!positions.contains(&16), "< inside quotes should be masked");
+        // Delimiters inside the quoted value are also indexed now.
+        assert!(positions.contains(&12), "> inside quotes is indexed");
+        assert!(positions.contains(&16), "< inside quotes is indexed");
     }
 
     #[test]
-    fn delimiters_inside_single_quotes_masked() {
+    fn delimiters_inside_single_quotes_are_indexed() {
         let input = b"<a title='x > y'>link</a>";
         let indexer = StructuralIndexer::new();
         let index = indexer.index(input);
 
-        let delims: Vec<_> = index.iter_delimiters().collect();
-        let positions: Vec<usize> = delims.iter().map(|d| d.pos).collect();
+        let positions: Vec<usize> = index.iter_delimiters().map(|d| d.pos).collect();
 
-        // '>' at 12 inside single quotes should NOT be present.
-        assert!(
-            !positions.contains(&12),
-            "> inside single quotes should be masked"
-        );
+        // '>' at 12 inside single quotes is indexed; the parser decides it is
+        // not a tag-closing '>'.
+        assert!(positions.contains(&12), "> inside single quotes is indexed");
     }
 
     #[test]
@@ -591,13 +478,15 @@ mod tests {
             .map(|d| d.pos)
             .collect();
 
-        // The '<' at offset 60 should be masked (inside double-quoted string).
+        // The '<' at offset 60 (inside the value, across a block boundary) is
+        // indexed; the parser, tracking quote state, will not treat it as a
+        // tag start.
         assert!(
-            !lt_positions.contains(&60),
-            "< at offset 60 should be masked (inside quoted string)"
+            lt_positions.contains(&60),
+            "< at offset 60 is indexed (parser handles quote state)"
         );
 
-        // The opening '<' at 0 and closing '<' should be present.
+        // The opening '<' at 0 is present too.
         assert!(lt_positions.contains(&0), "opening < should be structural");
     }
 

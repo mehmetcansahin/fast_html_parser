@@ -25,38 +25,39 @@ pub unsafe fn find_delimiters(haystack: &[u8]) -> DelimiterResult {
 
     // SAFETY: all intrinsics below require SSE4.2, guaranteed by #[target_feature].
     unsafe {
-        // Load all 7 delimiter bytes into a single 128-bit register.
-        // _mm_cmpistri can compare against up to 16 needle bytes.
-        let delims = _mm_set_epi8(
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0, // padding (unused slots)
-            b'/' as i8,
-            b'=' as i8,
-            b'\'' as i8,
-            b'"' as i8,
-            b'&' as i8,
-            b'>' as i8,
-            b'<' as i8,
-        );
+        // Splat each of the 7 delimiter bytes into its own register. We use
+        // explicit-length equality compares (`_mm_cmpeq_epi8`) rather than the
+        // implicit-length string intrinsic `_mm_cmpistri`: the latter treats a
+        // NUL byte as a string terminator and would miss any delimiter at or
+        // after a `\0`, diverging from the scalar and NEON backends (a `&str`
+        // may legally contain NUL bytes).
+        let lt = _mm_set1_epi8(b'<' as i8);
+        let gt = _mm_set1_epi8(b'>' as i8);
+        let amp = _mm_set1_epi8(b'&' as i8);
+        let quot = _mm_set1_epi8(b'"' as i8);
+        let apos = _mm_set1_epi8(b'\'' as i8);
+        let eq = _mm_set1_epi8(b'=' as i8);
+        let slash = _mm_set1_epi8(b'/' as i8);
 
         while offset + 16 <= len {
             // Load 16 bytes from haystack (unaligned).
             let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
 
-            // _mm_cmpistri: compare each byte in `chunk` against the set of
-            // bytes in `delims`. Returns the index of the *first* matching
-            // byte (0..15), or 16 if no match.
-            // Mode 0x00 = SIDD_UBYTE_OPS | SIDD_CMP_EQUAL_ANY | SIDD_LEAST_SIGNIFICANT
-            let idx = _mm_cmpistri(delims, chunk, 0x00);
-            if idx < 16 {
-                let pos = offset + idx as usize;
+            // OR the per-delimiter equality masks together: 0xFF in any lane
+            // that matches one of the seven delimiters.
+            let m = _mm_or_si128(
+                _mm_or_si128(
+                    _mm_or_si128(_mm_cmpeq_epi8(chunk, lt), _mm_cmpeq_epi8(chunk, gt)),
+                    _mm_or_si128(_mm_cmpeq_epi8(chunk, amp), _mm_cmpeq_epi8(chunk, quot)),
+                ),
+                _mm_or_si128(
+                    _mm_or_si128(_mm_cmpeq_epi8(chunk, apos), _mm_cmpeq_epi8(chunk, eq)),
+                    _mm_cmpeq_epi8(chunk, slash),
+                ),
+            );
+            let mask = _mm_movemask_epi8(m) as u16;
+            if mask != 0 {
+                let pos = offset + mask.trailing_zeros() as usize;
                 return DelimiterResult::Found {
                     pos,
                     byte: *ptr.add(pos),
@@ -181,35 +182,27 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
 
     // SAFETY: all intrinsics below require SSE4.2, guaranteed by #[target_feature].
     unsafe {
-        // Whitespace needle: space, tab, newline, CR.
-        let ws = _mm_set_epi8(
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            0,
-            b'\r' as i8,
-            b'\n' as i8,
-            b'\t' as i8,
-            b' ' as i8,
-        );
+        // Whitespace needle: space, tab, newline, CR. As in `find_delimiters`,
+        // we use explicit-length equality compares instead of `_mm_cmpistri`,
+        // whose NUL-termination semantics would treat a `\0` (a non-whitespace
+        // byte) as still inside the run and over-skip past it.
+        let space = _mm_set1_epi8(b' ' as i8);
+        let tab = _mm_set1_epi8(b'\t' as i8);
+        let nl = _mm_set1_epi8(b'\n' as i8);
+        let cr = _mm_set1_epi8(b'\r' as i8);
 
         while offset + 16 <= len {
             let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
 
-            // _mm_cmpistri with EQUAL_ANY + NEGATIVE_POLARITY:
-            // returns index of first byte NOT in the whitespace set.
-            // Mode 0x10 = SIDD_UBYTE_OPS | SIDD_CMP_EQUAL_ANY | SIDD_NEGATIVE_POLARITY
-            let idx = _mm_cmpistri(ws, chunk, 0x10);
-            if idx < 16 {
-                return offset + idx as usize;
+            // 0xFF in lanes that ARE whitespace.
+            let ws = _mm_or_si128(
+                _mm_or_si128(_mm_cmpeq_epi8(chunk, space), _mm_cmpeq_epi8(chunk, tab)),
+                _mm_or_si128(_mm_cmpeq_epi8(chunk, nl), _mm_cmpeq_epi8(chunk, cr)),
+            );
+            let mask = _mm_movemask_epi8(ws) as u16;
+            // First non-whitespace byte = first zero bit in the mask.
+            if mask != 0xFFFF {
+                return offset + (!mask).trailing_zeros() as usize;
             }
             offset += 16;
         }
@@ -230,7 +223,8 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
 #[target_feature(enable = "sse4.2")]
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
-    let len = block.len();
+    // Mask is 64-bit; only the first 64 bytes can be represented.
+    let len = block.len().min(64);
     let ptr = block.as_ptr();
     let mut result: u64 = 0;
     let mut offset = 0;
@@ -324,5 +318,29 @@ mod tests {
         }
         let result = unsafe { skip_whitespace(b"                    ") };
         assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn find_delimiters_after_nul_in_simd_block() {
+        // A NUL byte before a delimiter, both within the first 16-byte SIMD
+        // block. The implicit-length string intrinsic would treat the NUL as a
+        // terminator and miss the `<`; equality compares do not.
+        if !has_sse42() {
+            return;
+        }
+        let input = b"abc\0def<ghijklmn"; // 16 bytes, '<' at index 7
+        let result = unsafe { find_delimiters(input) };
+        assert_eq!(result, DelimiterResult::Found { pos: 7, byte: b'<' });
+    }
+
+    #[test]
+    fn skip_whitespace_stops_at_nul() {
+        // A NUL is not whitespace, so it must stop the skip, not be skipped.
+        if !has_sse42() {
+            return;
+        }
+        let input = b"   \0Xhelloworld!"; // 16 bytes, first non-ws (NUL) at 3
+        let result = unsafe { skip_whitespace(input) };
+        assert_eq!(result, 3);
     }
 }

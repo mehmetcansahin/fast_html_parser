@@ -226,7 +226,8 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
 #[target_feature(enable = "avx2")]
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
-    let len = block.len();
+    // Mask is 64-bit; only the first 64 bytes can be represented.
+    let len = block.len().min(64);
     let ptr = block.as_ptr();
     let mut result: u64 = 0;
     let mut offset = 0;

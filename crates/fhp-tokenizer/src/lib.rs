@@ -123,31 +123,22 @@ pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
     let compute = dispatch.compute_all_masks;
     let mut parser = extract::Parser::new(input);
 
-    // Quote-aware masking carry bits (streaming across blocks).
-    let mut carry_dq = false;
-    let mut carry_sq = false;
-
     let mut block_start = 0;
 
     while block_start < len {
         let block_end = (block_start + BLOCK_SIZE).min(len);
         let chunk = &bytes[block_start..block_end];
 
-        // Step 1: Compute all 4 bitmasks in a single SIMD pass.
+        // Step 1: Compute all bitmasks in a single SIMD pass.
         // SAFETY: dispatch function pointer matches detected CPU features.
-        let mut masks: AllMasks = unsafe { compute(chunk) };
+        let masks: AllMasks = unsafe { compute(chunk) };
 
-        // Step 2: Apply quote-aware string masking (inline, carry-based).
-        let (in_string, new_carry_dq, new_carry_sq) =
-            compute_string_mask_inline(&mut masks, carry_dq, carry_sq);
-        carry_dq = new_carry_dq;
-        carry_sq = new_carry_sq;
-
-        // Step 3: Only iterate `<` and `>` — the only delimiters that
-        // trigger state transitions. Quote masking already ran above to
-        // filter out `<`/`>` inside attribute strings.
-        let _ = in_string; // masking already applied to individual masks
-        let combined = masks.lt | masks.gt;
+        // Step 2: Iterate `<`, `>`, and quote bytes. The parser tracks
+        // attribute-quote state itself, so a `>` inside a quoted attribute
+        // value does not close the tag; quotes in text content are harmless
+        // no-ops in Data mode. (No global string masking — that incorrectly
+        // treated quotes in text/comments as attribute strings.)
+        let combined = masks.lt | masks.gt | masks.quot | masks.apos;
 
         // Pre-mask: clear bits beyond the valid range for this chunk,
         // eliminating the per-iteration bounds check inside the loop.
@@ -213,31 +204,22 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
     let compute = dispatch.compute_all_masks;
     let mut parser = extract::Parser::new(input);
 
-    // Quote-aware masking carry bits (streaming across blocks).
-    let mut carry_dq = false;
-    let mut carry_sq = false;
-
     let mut block_start = 0;
 
     while block_start < len {
         let block_end = (block_start + BLOCK_SIZE).min(len);
         let chunk = &bytes[block_start..block_end];
 
-        // Step 1: Compute all 4 bitmasks in a single SIMD pass.
+        // Step 1: Compute all bitmasks in a single SIMD pass.
         // SAFETY: dispatch function pointer matches detected CPU features.
-        let mut masks: AllMasks = unsafe { compute(chunk) };
+        let masks: AllMasks = unsafe { compute(chunk) };
 
-        // Step 2: Apply quote-aware string masking (inline, carry-based).
-        let (in_string, new_carry_dq, new_carry_sq) =
-            compute_string_mask_inline(&mut masks, carry_dq, carry_sq);
-        carry_dq = new_carry_dq;
-        carry_sq = new_carry_sq;
-
-        // Step 3: Only iterate `<` and `>` — the only delimiters that
-        // trigger state transitions. Quote masking already ran above to
-        // filter out `<`/`>` inside attribute strings.
-        let _ = in_string; // masking already applied to individual masks
-        let combined = masks.lt | masks.gt;
+        // Step 2: Iterate `<`, `>`, and quote bytes. The parser tracks
+        // attribute-quote state itself, so a `>` inside a quoted attribute
+        // value does not close the tag; quotes in text content are harmless
+        // no-ops in Data mode. (No global string masking — that incorrectly
+        // treated quotes in text/comments as attribute strings.)
+        let combined = masks.lt | masks.gt | masks.quot | masks.apos;
 
         // Pre-mask: clear bits beyond the valid range for this chunk,
         // eliminating the per-iteration bounds check inside the loop.
@@ -261,64 +243,6 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
 
     // Flush trailing text.
     parser.flush_trailing_sink(sink);
-}
-
-/// Compute prefix XOR of all bits in a `u64`.
-#[inline]
-fn prefix_xor(mut x: u64) -> u64 {
-    x ^= x << 1;
-    x ^= x << 2;
-    x ^= x << 4;
-    x ^= x << 8;
-    x ^= x << 16;
-    x ^= x << 32;
-    x
-}
-
-/// Apply quote-aware string masking to a block's masks, returning the
-/// combined in-string mask and updated carry bits.
-#[inline]
-fn compute_string_mask_inline(
-    masks: &mut AllMasks,
-    carry_dq: bool,
-    carry_sq: bool,
-) -> (u64, bool, bool) {
-    // Fast path: no quotes in this block and no carry — skip prefix_xor entirely.
-    if masks.quot == 0 && masks.apos == 0 && !carry_dq && !carry_sq {
-        return (0, false, false);
-    }
-
-    // Fast path: carry active but no quotes in block — entire block is inside string.
-    if masks.quot == 0 && masks.apos == 0 {
-        let in_string = !0u64;
-        masks.lt = 0;
-        masks.gt = 0;
-        return (in_string, carry_dq, carry_sq);
-    }
-
-    // Pass 1: double-quote regions.
-    let flipped_dq = prefix_xor(masks.quot);
-    let dq_in = if carry_dq { !flipped_dq } else { flipped_dq };
-    let new_carry_dq = carry_dq ^ ((masks.quot.count_ones() % 2) == 1);
-
-    // Pass 2: single-quote regions (excluding positions inside dquot).
-    let effective_apos = masks.apos & !dq_in;
-    let flipped_sq = prefix_xor(effective_apos);
-    let sq_in = if carry_sq { !flipped_sq } else { flipped_sq };
-    let new_carry_sq = carry_sq ^ ((effective_apos.count_ones() % 2) == 1);
-
-    // Combine both quote regions.
-    let in_string = dq_in | sq_in;
-
-    // Mask `<` and `>` inside strings — these are the only structural delimiters.
-    masks.lt &= !in_string;
-    masks.gt &= !in_string;
-
-    // Mask non-boundary quotes (still needed for carry propagation).
-    masks.apos &= !dq_in;
-    masks.quot &= !sq_in;
-
-    (in_string, new_carry_dq, new_carry_sq)
 }
 
 #[cfg(test)]

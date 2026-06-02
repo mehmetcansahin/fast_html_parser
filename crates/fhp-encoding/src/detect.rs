@@ -60,6 +60,12 @@ fn detect_bom(input: &[u8]) -> Option<&'static Encoding> {
 /// Looks for two patterns:
 /// - `<meta charset="ENCODING">`
 /// - `<meta http-equiv="Content-Type" content="...charset=ENCODING...">`
+///
+/// This is a byte-level (ASCII-oriented) scan, so it does not detect a `<meta>`
+/// declaration inside a BOM-less UTF-16 document (where bytes are interleaved
+/// with NULs). Such documents are expected to carry a BOM or an HTTP charset;
+/// matching browser behaviour, a BOM-less UTF-16 body without one falls back to
+/// UTF-8 detection.
 fn prescan_meta(input: &[u8]) -> Option<&'static Encoding> {
     let limit = input.len().min(PRESCAN_LIMIT);
     let haystack = &input[..limit];

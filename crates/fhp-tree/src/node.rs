@@ -115,8 +115,8 @@ impl NodeFlags {
 /// | 48     | 4     | `id_hash` |
 /// | 52     | 2     | `attr_raw_len` |
 /// | 54     | 2     | `element_index` |
-/// | 56     | 1     | `attr_count` |
-/// | 57     | 7     | `_padding` |
+/// | 56     | 2     | `attr_count` |
+/// | 58     | 6     | `_padding` |
 #[repr(C, align(64))]
 pub struct Node {
     // === Hot (first 32 bytes) ===
@@ -143,10 +143,11 @@ pub struct Node {
 
     // === Cold (second 32 bytes) ===
     // Fields ordered to avoid implicit padding with repr(C):
-    // u32s first, then u16, then u8, then byte-array padding.
-    /// Byte offset into the attribute slab (after lazy parse).
+    // u32s first, then u16s, then byte-array padding.
+    /// Byte offset into the attribute slab.
     pub attr_offset: u32,
-    /// Byte offset into `attr_str_slab` for the raw attribute region.
+    /// Reserved (formerly the raw attribute region offset for lazy parsing,
+    /// which was removed). Kept to preserve the 64-byte layout.
     pub attr_raw_offset: u32,
     /// 64-bit bloom filter of class attribute tokens.
     ///
@@ -160,14 +161,15 @@ pub struct Node {
     /// Zero means no id attribute. Used by the selector matcher for fast
     /// rejection before scanning attributes.
     pub id_hash: u32,
-    /// Length in bytes of the raw attribute region (max 65535).
+    /// Reserved (formerly the raw attribute region length for lazy parsing,
+    /// which was removed). Kept to preserve the 64-byte layout.
     pub attr_raw_len: u16,
     /// 1-based index among element siblings (0 = not computed or text node).
     pub element_index: u16,
-    /// Number of attributes (0 with raw data present = unparsed lazy).
-    pub attr_count: u8,
+    /// Number of attributes.
+    pub attr_count: u16,
     /// Padding to fill the cache line.
-    pub _padding: [u8; 7],
+    pub _padding: [u8; 6],
 }
 
 impl Node {
@@ -195,7 +197,7 @@ impl Node {
             class_hash: 0,
             id_hash: 0,
             element_index: 0,
-            _padding: [0; 7],
+            _padding: [0; 6],
         }
     }
 
@@ -221,7 +223,7 @@ impl Node {
             class_hash: 0,
             id_hash: 0,
             element_index: 0,
-            _padding: [0; 7],
+            _padding: [0; 6],
         }
     }
 
@@ -247,7 +249,7 @@ impl Node {
             class_hash: 0,
             id_hash: 0,
             element_index: 0,
-            _padding: [0; 7],
+            _padding: [0; 6],
         }
     }
 
@@ -273,7 +275,7 @@ impl Node {
             class_hash: 0,
             id_hash: 0,
             element_index: 0,
-            _padding: [0; 7],
+            _padding: [0; 6],
         }
     }
 }

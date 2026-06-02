@@ -187,6 +187,18 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_compute_byte_mask_over_64_bytes_does_not_overflow() {
+        // The active backend must cap at 64 bytes rather than overflow the
+        // shift when handed an over-long block.
+        let o = ops();
+        let input = vec![b'<'; 80];
+        let mask = unsafe { (o.compute_byte_mask)(&input, b'<') };
+        assert_eq!(mask, u64::MAX);
+        let masks = unsafe { (o.compute_all_masks)(&input) };
+        assert_eq!(masks.lt, u64::MAX);
+    }
+
+    #[test]
     fn dispatch_compute_byte_mask_matches_scalar() {
         let o = ops();
         let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";

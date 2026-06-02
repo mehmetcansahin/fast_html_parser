@@ -71,43 +71,52 @@ impl<R: Read> DecodingReader<R> {
         self.decoded_pos = 0;
         self.decoded_len = 0;
 
-        if self.eof && self.raw_len == 0 {
-            return Ok(());
-        }
+        // Decode buffered bytes, reading more whenever a pass produces no
+        // output. A single pass can yield zero bytes when the only buffered
+        // bytes are an incomplete multi-byte sequence straddling a read
+        // boundary (the decoder buffers them internally and emits nothing); in
+        // that case we must read more from `inner` and decode again rather than
+        // reporting a premature EOF.
+        loop {
+            let (_result, read, written, _had_errors) = self.decoder.decode_to_utf8(
+                &self.raw_buf[..self.raw_len],
+                &mut self.decoded_buf,
+                self.eof,
+            );
 
-        // Read more raw bytes if needed.
-        if self.raw_len == 0 && !self.eof {
-            let n = self.inner.read(&mut self.raw_buf)?;
+            // Shift any unconsumed trailing bytes (e.g. an output-full
+            // remainder) to the front of the raw buffer.
+            if read < self.raw_len {
+                self.raw_buf.copy_within(read..self.raw_len, 0);
+                self.raw_len -= read;
+            } else {
+                self.raw_len = 0;
+            }
+
+            if written > 0 {
+                self.decoded_len = written;
+                return Ok(());
+            }
+
+            // No output this pass. If the input is exhausted, we are done.
+            if self.eof {
+                return Ok(());
+            }
+
+            // Read more, appending after any leftover partial sequence so it
+            // can be completed by the following bytes.
+            if self.raw_len == self.raw_buf.len() {
+                // Buffer full without a complete sequence (pathological): grow
+                // it so the next read can make progress.
+                self.raw_buf.resize(self.raw_buf.len() * 2, 0);
+            }
+            let n = self.inner.read(&mut self.raw_buf[self.raw_len..])?;
             if n == 0 {
                 self.eof = true;
             } else {
-                self.raw_len = n;
+                self.raw_len += n;
             }
         }
-
-        // Decode the raw buffer.
-        let (result, read, written, _had_errors) = self.decoder.decode_to_utf8(
-            &self.raw_buf[..self.raw_len],
-            &mut self.decoded_buf,
-            self.eof,
-        );
-
-        // Shift unconsumed raw bytes to the front.
-        if read < self.raw_len {
-            self.raw_buf.copy_within(read..self.raw_len, 0);
-            self.raw_len -= read;
-        } else {
-            self.raw_len = 0;
-        }
-
-        self.decoded_len = written;
-
-        // If output_full, we need the caller to drain before decoding more.
-        if let encoding_rs::CoderResult::OutputFull = result {
-            // That's fine — caller will read, then we'll decode more.
-        }
-
-        Ok(())
     }
 }
 
@@ -186,5 +195,54 @@ mod tests {
             output.extend_from_slice(&buf[..n]);
         }
         assert_eq!(String::from_utf8(output).unwrap(), "Hello, world!");
+    }
+
+    /// Inner reader that yields a single byte per `read` call, forcing
+    /// multi-byte sequences to straddle read boundaries.
+    struct OneByteReader<'a> {
+        data: &'a [u8],
+        pos: usize,
+    }
+
+    impl Read for OneByteReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            if self.pos >= self.data.len() || buf.is_empty() {
+                return Ok(0);
+            }
+            buf[0] = self.data[self.pos];
+            self.pos += 1;
+            Ok(1)
+        }
+    }
+
+    #[test]
+    fn stream_multibyte_split_across_reads() {
+        // Multi-byte UTF-8 chars whose bytes arrive one at a time. A lead byte
+        // leaves a partial sequence buffered; the reader must read more rather
+        // than report a premature EOF.
+        let text = "cafe\u{301} gu\u{308}naydin nai\u{308}ve \u{1F600}";
+        let reader = OneByteReader {
+            data: text.as_bytes(),
+            pos: 0,
+        };
+        let mut out = String::new();
+        DecodingReader::new(reader, encoding_rs::UTF_8)
+            .read_to_string(&mut out)
+            .unwrap();
+        assert_eq!(out, text);
+    }
+
+    #[test]
+    fn stream_multibyte_across_chunk_boundary() {
+        // A multi-byte char positioned so its bytes straddle the 8 KB raw-read
+        // boundary must not be dropped.
+        let mut text = "a".repeat(CHUNK_SIZE - 1);
+        text.push('\u{20AC}'); // euro sign: 3 UTF-8 bytes, splits across 8192
+        text.push_str(&"b".repeat(100));
+        let mut out = String::new();
+        DecodingReader::new(text.as_bytes(), encoding_rs::UTF_8)
+            .read_to_string(&mut out)
+            .unwrap();
+        assert_eq!(out, text);
     }
 }

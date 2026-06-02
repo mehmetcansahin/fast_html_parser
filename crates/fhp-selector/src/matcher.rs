@@ -67,11 +67,15 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
         }
 
         SimpleSelector::Id(id, target_hash) => {
-            // Fast rejection via per-node id hash.
-            if n.id_hash == 0 || n.id_hash != *target_hash {
+            // Fast rejection via per-node id hash. `id_hash == 0` doubles as the
+            // "no id attribute" sentinel, so it cannot represent a real id that
+            // hashes to 0; when the target itself hashes to 0 we skip the fast
+            // path and verify directly to avoid a false negative.
+            if *target_hash != 0 && n.id_hash != *target_hash {
                 return false;
             }
-            // Hash matched — verify via real attribute scan (collision possible).
+            // Hash matched (or target hash is 0) — verify via real attribute
+            // scan (collision possible).
             let attrs = arena.attrs(node);
             attrs.iter().any(|a| {
                 arena.attr_name(a).eq_ignore_ascii_case("id")
@@ -218,8 +222,12 @@ fn is_nth_element_child(arena: &Arena, node: NodeId, a: i32, b: i32) -> bool {
 }
 
 /// Check if a 1-based `index` satisfies `an+b`.
+///
+/// Arithmetic is done in `i64` so an adversarial `b` (e.g. `n-2147483647`)
+/// cannot overflow the `index - b` subtraction.
 #[inline]
 fn matches_nth(a: i32, b: i32, index: i32) -> bool {
+    let (a, b, index) = (a as i64, b as i64, index as i64);
     if a == 0 {
         return index == b;
     }
@@ -254,68 +262,62 @@ pub fn match_selector(arena: &Arena, node: NodeId, selector: &Selector) -> bool 
         return false;
     }
 
-    // Step 2: walk the chain right-to-left.
-    let mut current = node;
-    for (combinator, compound) in &selector.chain {
-        match combinator {
-            Combinator::Descendant => {
-                let n = arena.get(current);
-                let mut ancestor = n.parent;
-                let mut found = false;
-                while !ancestor.is_null() {
-                    if match_compound(arena, ancestor, compound) {
-                        current = ancestor;
-                        found = true;
-                        break;
-                    }
-                    ancestor = arena.get(ancestor).parent;
-                }
-                if !found {
-                    return false;
-                }
-            }
+    // Step 2: walk the chain right-to-left with backtracking.
+    match_chain(arena, node, &selector.chain)
+}
 
-            Combinator::Child => {
-                let n = arena.get(current);
-                if n.parent.is_null() || !match_compound(arena, n.parent, compound) {
-                    return false;
-                }
-                current = n.parent;
-            }
+/// Recursively match the remaining right-to-left combinator chain against
+/// ancestors/siblings of `current`.
+///
+/// Descendant and general-sibling steps try every candidate and backtrack on
+/// failure: committing to the nearest match (as a greedy walk does) drops valid
+/// matches for selectors like `A > B C`, where the nearest `B` is not a child
+/// of `A` but an outer `B` is. Child and adjacent-sibling steps are
+/// deterministic (a single candidate) but still recurse on the chain remainder.
+fn match_chain(arena: &Arena, current: NodeId, chain: &[(Combinator, CompoundSelector)]) -> bool {
+    let Some(((combinator, compound), rest)) = chain.split_first() else {
+        return true;
+    };
 
-            Combinator::AdjacentSibling => {
-                // Find the immediately preceding *element* sibling.
-                let prev = prev_element_sibling(arena, current);
-                match prev {
-                    Some(p) if match_compound(arena, p, compound) => {
-                        current = p;
-                    }
-                    _ => return false,
+    match combinator {
+        Combinator::Descendant => {
+            let mut ancestor = arena.get(current).parent;
+            while !ancestor.is_null() {
+                if match_compound(arena, ancestor, compound) && match_chain(arena, ancestor, rest) {
+                    return true;
                 }
+                ancestor = arena.get(ancestor).parent;
             }
+            false
+        }
 
-            Combinator::GeneralSibling => {
-                // Find any preceding element sibling that matches.
-                let n = arena.get(current);
-                let mut prev = n.prev_sibling;
-                let mut found = false;
-                while !prev.is_null() {
-                    let p = arena.get(prev);
-                    if is_element(p) && match_compound(arena, prev, compound) {
-                        current = prev;
-                        found = true;
-                        break;
-                    }
-                    prev = p.prev_sibling;
+        Combinator::Child => {
+            let parent = arena.get(current).parent;
+            !parent.is_null()
+                && match_compound(arena, parent, compound)
+                && match_chain(arena, parent, rest)
+        }
+
+        Combinator::AdjacentSibling => match prev_element_sibling(arena, current) {
+            Some(p) => match_compound(arena, p, compound) && match_chain(arena, p, rest),
+            None => false,
+        },
+
+        Combinator::GeneralSibling => {
+            let mut prev = arena.get(current).prev_sibling;
+            while !prev.is_null() {
+                let p = arena.get(prev);
+                if is_element(p)
+                    && match_compound(arena, prev, compound)
+                    && match_chain(arena, prev, rest)
+                {
+                    return true;
                 }
-                if !found {
-                    return false;
-                }
+                prev = p.prev_sibling;
             }
+            false
         }
     }
-
-    true
 }
 
 /// Match a selector list: a node matches if it matches ANY selector.
@@ -662,7 +664,9 @@ fn simple_tag_selector(selector: &Selector) -> Option<Tag> {
 fn node_has_id(arena: &Arena, node: NodeId, target_id: &str) -> bool {
     let n = arena.get(node);
     let target_hash = selector_hash(target_id.as_bytes());
-    if n.id_hash == 0 || n.id_hash != target_hash {
+    // `id_hash == 0` is also the "no id" sentinel; when the target hashes to 0,
+    // skip the fast path and verify directly (see SimpleSelector::Id).
+    if target_hash != 0 && n.id_hash != target_hash {
         return false;
     }
     arena.attrs(node).iter().any(|a| {

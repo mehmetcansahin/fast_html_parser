@@ -317,6 +317,13 @@ impl<'a> Selection<'a> {
     ///
     /// Each matched node is used as a context root, and results are
     /// deduplicated in document order.
+    ///
+    /// Note: the leading `//` is evaluated **relative to each matched node's
+    /// subtree** (descendant-or-self), not against the whole document. So
+    /// `doc.select("div").xpath("//span")` finds the spans inside each matched
+    /// `div`, and an axis like `//div` also yields the context `div` itself.
+    /// This scoping is intentional so XPath composes with a prior selection;
+    /// for a document-wide query, evaluate from the document root instead.
     pub fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError> {
         let parsed = xpath::parser::parse_xpath(expr)?;
         let mut all_nodes = Vec::new();
@@ -907,5 +914,4 @@ mod tests {
         let doc = parse("<div>ok</div>").unwrap();
         assert_eq!(doc.select_compiled(&sel2).unwrap().len(), 1);
     }
-
 }

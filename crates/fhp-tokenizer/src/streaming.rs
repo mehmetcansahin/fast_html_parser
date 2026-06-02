@@ -15,6 +15,15 @@ use fhp_core::tag::Tag;
 /// this many bytes and prepend them to the next chunk.
 const MAX_RESIDUAL: usize = 4096;
 
+/// Hard upper bound on the residual buffer, enforced even inside raw-text
+/// (`<script>`/`<style>`) context.
+///
+/// Without it, an unterminated raw-text element would let the residual grow
+/// without limit (a denial-of-service vector). Legitimate inline scripts and
+/// styles are far smaller than this; once the bound is crossed the buffered
+/// bytes are force-processed rather than accumulated forever.
+pub const MAX_RAW_TEXT_RESIDUAL: usize = 2 * 1024 * 1024;
+
 /// A streaming tokenizer that processes input chunk by chunk.
 ///
 /// Maintains internal state so that token boundaries that span chunk
@@ -64,6 +73,13 @@ impl StreamTokenizer {
         }
     }
 
+    /// Number of bytes currently buffered as residual (not yet processed).
+    ///
+    /// Bounded by [`MAX_RAW_TEXT_RESIDUAL`] plus the size of one fed chunk.
+    pub fn buffered_len(&self) -> usize {
+        self.residual.len()
+    }
+
     /// Feed a chunk of UTF-8 input and return any complete tokens.
     ///
     /// Tokens are returned as owned (`'static` lifetime) since the chunk
@@ -88,7 +104,9 @@ impl StreamTokenizer {
 
         if split == 0 {
             // No complete tag boundary — buffer everything.
-            if working.len() > MAX_RESIDUAL && !scan.in_raw_text_context {
+            if working.len() > MAX_RESIDUAL
+                && (!scan.in_raw_text_context || working.len() > MAX_RAW_TEXT_RESIDUAL)
+            {
                 // Too large to buffer — force-process what we have.
                 let tokens = self.process_chunk(&working);
                 self.working = working;
@@ -133,7 +151,9 @@ impl StreamTokenizer {
         let split = scan.split;
 
         if split == 0 {
-            if working.len() > MAX_RESIDUAL && !scan.in_raw_text_context {
+            if working.len() > MAX_RESIDUAL
+                && (!scan.in_raw_text_context || working.len() > MAX_RAW_TEXT_RESIDUAL)
+            {
                 // Too large to buffer — force-process what we have.
                 match std::str::from_utf8(&working) {
                     Ok(text) => {
