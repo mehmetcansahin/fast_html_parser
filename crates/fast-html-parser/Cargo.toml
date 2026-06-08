@@ -1,6 +1,6 @@
 [package]
 name = "fast-html-parser"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -23,11 +23,11 @@ entity-decode = ["fhp-tree/entity-decode", "fhp-tokenizer/entity-decode"]
 simd = []  # SIMD acceleration marker (NEON/SSE4.2/AVX2 runtime dispatch)
 
 [dependencies]
-fhp-core = { version = "0.1", path = "../fhp-core" }
-fhp-tokenizer = { version = "0.1", path = "../fhp-tokenizer", default-features = false }
-fhp-tree = { version = "0.1", path = "../fhp-tree", default-features = false }
-fhp-selector = { version = "0.1", path = "../fhp-selector", optional = true }
-fhp-encoding = { version = "0.1", path = "../fhp-encoding", optional = true }
+fhp-core = { version = "0.1.1", path = "../fhp-core" }
+fhp-tokenizer = { version = "0.1.1", path = "../fhp-tokenizer", default-features = false }
+fhp-tree = { version = "0.1.1", path = "../fhp-tree", default-features = false }
+fhp-selector = { version = "0.1.1", path = "../fhp-selector", optional = true }
+fhp-encoding = { version = "0.1.1", path = "../fhp-encoding", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

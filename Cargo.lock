@@ -308,7 +308,7 @@ checksum = "877a4ace8713b0bcf2a4e7eec82529c029f1d0619886d18145fea96c3ffe5c0f"
 
 [[package]]
 name = "fast-html-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "fhp-core",
@@ -330,7 +330,7 @@ checksum = "37909eebbb50d72f9059c3b6d82c0463f2ff062c9e95845c43a6c9c0355411be"
 
 [[package]]
 name = "fhp-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "phf 0.11.3",
  "thiserror",
@@ -338,7 +338,7 @@ dependencies = [
 
 [[package]]
 name = "fhp-encoding"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "encoding_rs",
  "fhp-core",
@@ -347,7 +347,7 @@ dependencies = [
 
 [[package]]
 name = "fhp-selector"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "fhp-core",
@@ -357,7 +357,7 @@ dependencies = [
 
 [[package]]
 name = "fhp-simd"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "fhp-core",
@@ -365,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "fhp-tokenizer"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "criterion",
  "fhp-core",
@@ -374,7 +374,7 @@ dependencies = [
 
 [[package]]
 name = "fhp-tree"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-std",
  "criterion",

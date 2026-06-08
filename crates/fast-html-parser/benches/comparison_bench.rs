@@ -71,6 +71,7 @@ fn bench_selector_comparison(c: &mut Criterion) {
     let html = MEDIUM_HTML;
 
     // fast-html-parser
+    #[cfg(feature = "css-selector")]
     {
         use fast_html_parser::Selectable;
         let doc = fast_html_parser::HtmlParser::parse(html).unwrap();

@@ -122,6 +122,89 @@ fn stream_parser_preserves_raw_text_across_chunk_boundaries() {
     assert!(streamed.to_html().contains("<script>if(a<b){x()}</script>"));
 }
 
+#[derive(Debug)]
+struct StreamingEdgeCase {
+    name: &'static str,
+    html: &'static [u8],
+    expected_text: &'static str,
+    expected_html: &'static str,
+}
+
+#[test]
+fn stream_parser_preserves_lt_edge_cases_across_chunk_boundaries() {
+    let cases = [
+        StreamingEdgeCase {
+            name: "invalid_close_like_and_lt_space",
+            html: b"<p>a </ b and 1 < 2</p><p>ok</p>",
+            expected_text: "a </ b and 1 < 2ok",
+            expected_html: "<p>a &lt;/ b and 1 &lt; 2</p><p>ok</p>",
+        },
+        StreamingEdgeCase {
+            name: "double_lt_and_slash_digit",
+            html: b"<p>a << b and a </2</p><span>next</span>",
+            expected_text: "a << b and a </2next",
+            expected_html: "<p>a &lt;&lt; b and a &lt;/2</p><span>next</span>",
+        },
+        StreamingEdgeCase {
+            name: "script_raw_text",
+            html: b"<script>if (a </ b && c < 3) { s = \"&amp;\"; }</script><p>ok</p>",
+            expected_text: "if (a </ b && c < 3) { s = \"&amp;\"; }ok",
+            expected_html: "<script>if (a </ b && c < 3) { s = \"&amp;\"; }</script><p>ok</p>",
+        },
+        StreamingEdgeCase {
+            name: "style_raw_text",
+            html: b"<style>.x::before { content: \"&lt;\"; }</style><p>ok</p>",
+            expected_text: ".x::before { content: \"&lt;\"; }ok",
+            expected_html: "<style>.x::before { content: \"&lt;\"; }</style><p>ok</p>",
+        },
+    ];
+    let chunk_sizes = [1, 2, 3, 5, 8, 13, 64];
+
+    for case in cases {
+        let one_shot = parse_bytes(case.html).unwrap();
+        assert_eq!(
+            one_shot.root().text_content(),
+            case.expected_text,
+            "case={}, html={}",
+            case.name,
+            String::from_utf8_lossy(case.html)
+        );
+        assert_eq!(
+            one_shot.to_html(),
+            case.expected_html,
+            "case={}, html={}",
+            case.name,
+            String::from_utf8_lossy(case.html)
+        );
+
+        for chunk_size in chunk_sizes {
+            let streamed = parse_stream(case.html.chunks(chunk_size)).unwrap();
+
+            assert_eq!(
+                streamed.root().text_content(),
+                case.expected_text,
+                "case={}, chunk_size={chunk_size}, html={}",
+                case.name,
+                String::from_utf8_lossy(case.html)
+            );
+            assert_eq!(
+                streamed.to_html(),
+                case.expected_html,
+                "case={}, chunk_size={chunk_size}, html={}",
+                case.name,
+                String::from_utf8_lossy(case.html)
+            );
+            assert_eq!(
+                streamed.to_html(),
+                one_shot.to_html(),
+                "case={}, chunk_size={chunk_size}, html={}",
+                case.name,
+                String::from_utf8_lossy(case.html)
+            );
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Early termination
 // ---------------------------------------------------------------------------

@@ -117,14 +117,17 @@ fn build_recursive(
         let attrs = arena.attrs(node);
         for attr in attrs {
             let name = arena.attr_name(attr);
-            if name == "class" {
+            // Attribute names are not lowercased during parsing, and the matcher
+            // compares them case-insensitively, so the bloom must too (the values
+            // stay case-sensitive, matching CSS semantics).
+            if name.eq_ignore_ascii_case("class") {
                 if let Some(val) = arena.attr_value(attr) {
                     for class in val.split_whitespace() {
                         child_bloom.insert(hash_str(class));
                     }
                 }
             }
-            if name == "id" {
+            if name.eq_ignore_ascii_case("id") {
                 if let Some(val) = arena.attr_value(attr) {
                     child_bloom.insert(hash_str(val));
                 }

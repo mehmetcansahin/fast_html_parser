@@ -93,8 +93,8 @@ fn bench_streaming(c: &mut Criterion) {
                 |b, &cs| {
                     b.iter(|| {
                         rt.block_on(async {
-                            let reader = tokio::io::BufReader::new(&html[..]);
-                            let doc = fast_html_parser::streaming::parse_async(reader)
+                            let reader = tokio::io::BufReader::with_capacity(cs, html);
+                            let doc = fast_html_parser::async_parser::parse_async(reader)
                                 .await
                                 .unwrap();
                             std::hint::black_box(doc.node_count());

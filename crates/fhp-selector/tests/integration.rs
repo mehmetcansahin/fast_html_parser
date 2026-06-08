@@ -332,6 +332,25 @@ fn bloom_filter_no_false_negatives() {
 }
 
 #[test]
+fn bloom_no_false_negative_uppercase_class_ancestor() {
+    // Attribute names are not lowercased during parsing, and the matcher
+    // compares them case-insensitively. The ancestor bloom must do the same,
+    // or a descendant selector silently misses a real match.
+    let doc = parse("<div CLASS=\"foo\"><span>hit</span></div>").unwrap();
+    let sel = doc.select(".foo span").unwrap();
+    assert_eq!(sel.len(), 1);
+    assert_eq!(sel.text(), "hit");
+}
+
+#[test]
+fn bloom_no_false_negative_uppercase_id_ancestor() {
+    let doc = parse("<div ID=\"bar\"><span>hit</span></div>").unwrap();
+    let sel = doc.select("#bar span").unwrap();
+    assert_eq!(sel.len(), 1);
+    assert_eq!(sel.text(), "hit");
+}
+
+#[test]
 fn bloom_deep_nesting() {
     let doc = parse(
         "<div><section><article><ul><li><a class=\"deep\">x</a></li></ul></article></section></div>",

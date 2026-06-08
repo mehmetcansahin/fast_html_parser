@@ -277,6 +277,247 @@ fn entity_in_text() {
     assert!(text.contains("a & b"), "text: {text}");
 }
 
+#[derive(Debug)]
+struct TextMarkupCase {
+    name: &'static str,
+    html: &'static str,
+    expected_text: &'static str,
+    expected_inner_html: &'static str,
+}
+
+#[test]
+fn literal_lt_in_text_is_preserved() {
+    let doc = parse("<p>1 < 2 && 3 > 0</p>").unwrap();
+    let p = doc.root().first_child().unwrap();
+
+    assert_eq!(p.text_content(), "1 < 2 && 3 > 0");
+    assert_eq!(p.inner_html(), "1 &lt; 2 &amp;&amp; 3 &gt; 0");
+}
+
+#[test]
+fn invalid_close_like_text_is_preserved() {
+    let doc = parse("<p>a </ b</p>").unwrap();
+    let p = doc.root().first_child().unwrap();
+
+    assert_eq!(p.text_content(), "a </ b");
+    assert_eq!(p.inner_html(), "a &lt;/ b");
+}
+
+#[test]
+fn text_markup_edge_cases_round_trip() {
+    let cases = [
+        TextMarkupCase {
+            name: "lt_before_space",
+            html: "<p>a < 2</p>",
+            expected_text: "a < 2",
+            expected_inner_html: "a &lt; 2",
+        },
+        TextMarkupCase {
+            name: "double_lt",
+            html: "<p>a << b</p>",
+            expected_text: "a << b",
+            expected_inner_html: "a &lt;&lt; b",
+        },
+        TextMarkupCase {
+            name: "lt_before_dot",
+            html: "<p>a <.b</p>",
+            expected_text: "a <.b",
+            expected_inner_html: "a &lt;.b",
+        },
+        TextMarkupCase {
+            name: "lt_before_hash",
+            html: "<p>a <#b</p>",
+            expected_text: "a <#b",
+            expected_inner_html: "a &lt;#b",
+        },
+        TextMarkupCase {
+            name: "lt_before_ampersand",
+            html: "<p>a <&b</p>",
+            expected_text: "a <&b",
+            expected_inner_html: "a &lt;&amp;b",
+        },
+        TextMarkupCase {
+            name: "slash_space",
+            html: "<p>a </ b</p>",
+            expected_text: "a </ b",
+            expected_inner_html: "a &lt;/ b",
+        },
+        TextMarkupCase {
+            name: "slash_digit",
+            html: "<p>a </2</p>",
+            expected_text: "a </2",
+            expected_inner_html: "a &lt;/2",
+        },
+        TextMarkupCase {
+            name: "trailing_lt",
+            html: "<p>a <</p>",
+            expected_text: "a <",
+            expected_inner_html: "a &lt;",
+        },
+        TextMarkupCase {
+            name: "lt_equal",
+            html: "<p>a <= b</p>",
+            expected_text: "a <= b",
+            expected_inner_html: "a &lt;= b",
+        },
+        TextMarkupCase {
+            name: "lt_percent",
+            html: "<p>a <% b</p>",
+            expected_text: "a <% b",
+            expected_inner_html: "a &lt;% b",
+        },
+        TextMarkupCase {
+            name: "invalid_lt_then_real_child",
+            html: "<p>a < 2 <span>b &amp; c</span></p>",
+            expected_text: "a < 2 b & c",
+            expected_inner_html: "a &lt; 2 <span>b &amp; c</span>",
+        },
+    ];
+
+    for case in cases {
+        let doc = parse(case.html).unwrap();
+        let p = doc.root().first_child().unwrap();
+
+        assert_eq!(
+            p.text_content(),
+            case.expected_text,
+            "case={}, html={}",
+            case.name,
+            case.html
+        );
+        assert_eq!(
+            p.inner_html(),
+            case.expected_inner_html,
+            "case={}, html={}",
+            case.name,
+            case.html
+        );
+    }
+}
+
+#[test]
+fn script_entities_remain_raw_text() {
+    let doc = parse("<script>const s = \"&amp;\";</script>").unwrap();
+    let script = doc.root().first_child().unwrap();
+
+    assert_eq!(script.text_content(), "const s = \"&amp;\";");
+    assert_eq!(script.inner_html(), "const s = \"&amp;\";");
+}
+
+#[derive(Debug)]
+struct RawTextCase {
+    name: &'static str,
+    html: &'static str,
+    expected_tag: Tag,
+    expected_text: &'static str,
+}
+
+#[test]
+fn raw_text_edge_cases_round_trip() {
+    let cases = [
+        RawTextCase {
+            name: "script_invalid_close_like_expression",
+            html: "<script>if (a </ b) { x = \"&amp;\"; }</script>",
+            expected_tag: Tag::Script,
+            expected_text: "if (a </ b) { x = \"&amp;\"; }",
+        },
+        RawTextCase {
+            name: "script_fake_other_close_tag",
+            html: "<script>const s = \"</not-script>\";</script>",
+            expected_tag: Tag::Script,
+            expected_text: "const s = \"</not-script>\";",
+        },
+        RawTextCase {
+            name: "script_prefix_close_name_is_text",
+            html: "<script>if (a </scripted) {}</script>",
+            expected_tag: Tag::Script,
+            expected_text: "if (a </scripted) {}",
+        },
+        RawTextCase {
+            name: "script_uppercase_close",
+            html: "<script>const ok = true;</SCRIPT>",
+            expected_tag: Tag::Script,
+            expected_text: "const ok = true;",
+        },
+        RawTextCase {
+            name: "style_lt_comparison",
+            html: "<style>.x { width: calc(100% < 2px); }</style>",
+            expected_tag: Tag::Style,
+            expected_text: ".x { width: calc(100% < 2px); }",
+        },
+        RawTextCase {
+            name: "style_entity_stays_raw",
+            html: "<style>.x::before { content: \"&lt;\"; }</style>",
+            expected_tag: Tag::Style,
+            expected_text: ".x::before { content: \"&lt;\"; }",
+        },
+    ];
+
+    for case in cases {
+        let doc = parse(case.html).unwrap();
+        let node = doc.root().first_child().unwrap();
+
+        assert_eq!(
+            node.tag(),
+            case.expected_tag,
+            "case={}, html={}",
+            case.name,
+            case.html
+        );
+        assert_eq!(
+            node.text_content(),
+            case.expected_text,
+            "case={}, html={}",
+            case.name,
+            case.html
+        );
+        assert_eq!(
+            node.inner_html(),
+            case.expected_text,
+            "case={}, html={}",
+            case.name,
+            case.html
+        );
+    }
+}
+
+#[test]
+fn empty_attribute_value_is_not_boolean_attribute() {
+    let doc = parse("<input value=\"\" disabled data-empty=''>").unwrap();
+    let input = doc.root().first_child().unwrap();
+
+    assert_eq!(input.attr("value"), Some(""));
+    assert_eq!(input.attr("disabled"), None);
+    assert_eq!(input.attr("data-empty"), Some(""));
+    assert_eq!(
+        input.outer_html(),
+        "<input value=\"\" disabled data-empty=\"\">"
+    );
+}
+
+#[test]
+fn long_attribute_value_is_not_truncated() {
+    for len in [65_535, 65_536, 70_000] {
+        let value = "a".repeat(len);
+        let html = format!("<div data-x=\"{value}\"></div>");
+        let doc = parse(&html).unwrap();
+        let div = doc.root().first_child().unwrap();
+
+        assert_eq!(div.attr("data-x").map(str::len), Some(value.len()));
+        assert_eq!(div.attr("data-x"), Some(value.as_str()));
+    }
+}
+
+#[test]
+fn long_attribute_name_is_not_truncated() {
+    let name = format!("data-{}", "x".repeat(70_000));
+    let html = format!("<div {name}=\"ok\"></div>");
+    let doc = parse(&html).unwrap();
+    let div = doc.root().first_child().unwrap();
+
+    assert_eq!(div.attr(&name), Some("ok"));
+}
+
 // ---------------------------------------------------------------
 // Comment and doctype
 // ---------------------------------------------------------------
@@ -305,4 +546,24 @@ fn has_class() {
     assert!(div.has_class("bar"));
     assert!(div.has_class("baz"));
     assert!(!div.has_class("qux"));
+}
+
+#[test]
+fn malformed_cdata_prefix_produces_valid_utf8() {
+    // Regression for a memory-safety bug: `<![` followed by arbitrary content
+    // (not the literal `<![CDATA[`) with a multibyte char straddling the
+    // assumed 9-byte offset used to fabricate an invalid-UTF-8 &str through the
+    // sink parse path (UB in release, panic in debug). The public parse() path
+    // must yield valid UTF-8 output for any input.
+    let doc = parse("<div><![ABCDE\u{20ac}]]></div>").unwrap();
+    let html = doc.to_html();
+    assert!(std::str::from_utf8(html.as_bytes()).is_ok());
+    let text = doc.root().text_content();
+    assert!(std::str::from_utf8(text.as_bytes()).is_ok());
+}
+
+#[test]
+fn wellformed_cdata_multibyte_roundtrips() {
+    let doc = parse("<div><![CDATA[a\u{20ac}b]]></div>").unwrap();
+    assert!(doc.root().text_content().contains("a\u{20ac}b"));
 }

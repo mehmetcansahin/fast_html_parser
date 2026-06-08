@@ -1,6 +1,6 @@
 [package]
 name = "fhp-tree"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -19,9 +19,9 @@ async-tokio = ["dep:tokio"]
 async-async-std = ["dep:async-std"]
 
 [dependencies]
-fhp-core = { version = "0.1", path = "../fhp-core" }
-fhp-encoding = { version = "0.1", path = "../fhp-encoding" }
-fhp-tokenizer = { version = "0.1", path = "../fhp-tokenizer", default-features = false }
+fhp-core = { version = "0.1.1", path = "../fhp-core" }
+fhp-encoding = { version = "0.1.1", path = "../fhp-encoding" }
+fhp-tokenizer = { version = "0.1.1", path = "../fhp-tokenizer", default-features = false }
 thiserror = { workspace = true }
 encoding_rs = { workspace = true }
 memchr = "2"

@@ -29,11 +29,14 @@
 //! ## CSS Selectors
 //!
 //! ```
+//! # #[cfg(feature = "css-selector")]
+//! # {
 //! use fast_html_parser::prelude::*;
 //!
 //! let doc = HtmlParser::parse("<ul><li>one</li><li>two</li></ul>").unwrap();
 //! let items = doc.select("li").unwrap();
 //! assert_eq!(items.len(), 2);
+//! # }
 //! ```
 //!
 //! ## Streaming

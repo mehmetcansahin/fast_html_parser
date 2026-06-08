@@ -349,10 +349,15 @@ impl TreeBuilder {
 
         #[cfg(feature = "entity-decode")]
         let node = {
-            let decoded = fhp_tokenizer::entity::decode_entities(raw);
-            match decoded {
-                std::borrow::Cow::Borrowed(s) => self.try_source_ref(depth, s),
-                std::borrow::Cow::Owned(s) => self.arena.new_text(depth, &s),
+            let parent_is_raw_text = self.arena.get(parent).tag.is_raw_text();
+            if parent_is_raw_text {
+                self.try_source_ref(depth, raw)
+            } else {
+                let decoded = fhp_tokenizer::entity::decode_entities(raw);
+                match decoded {
+                    std::borrow::Cow::Borrowed(s) => self.try_source_ref(depth, s),
+                    std::borrow::Cow::Owned(s) => self.arena.new_text(depth, &s),
+                }
             }
         };
 

@@ -17,9 +17,10 @@ use crate::node::{Node, NodeFlags, NodeId};
 #[derive(Clone, Debug)]
 pub struct Attribute {
     name_offset: u32,
-    name_len: u16,
+    name_len: u32,
     value_offset: u32,
-    value_len: u16,
+    value_len: u32,
+    has_value: bool,
 }
 
 /// Number of tag index buckets (Tag is `repr(u8)`, 256 possible values).
@@ -187,14 +188,14 @@ impl Arena {
         for attr in &attrs[..count as usize] {
             let name_offset = self.attr_str_slab.len() as u32;
             self.attr_str_slab.extend_from_slice(attr.name.as_bytes());
-            let name_len = attr.name.len() as u16;
+            let name_len = attr.name.len() as u32;
 
-            let (value_offset, value_len) = if let Some(ref v) = attr.value {
+            let (value_offset, value_len, has_value) = if let Some(ref v) = attr.value {
                 let vo = self.attr_str_slab.len() as u32;
                 self.attr_str_slab.extend_from_slice(v.as_bytes());
-                (vo, v.len() as u16)
+                (vo, v.len() as u32, true)
             } else {
-                (0, 0)
+                (0, 0, false)
             };
 
             self.attr_slab.push(Attribute {
@@ -202,6 +203,7 @@ impl Arena {
                 name_len,
                 value_offset,
                 value_len,
+                has_value,
             });
         }
 
@@ -254,7 +256,7 @@ impl Arena {
             let name_slab_offset = self.attr_str_slab.len() as u32;
             self.attr_str_slab
                 .extend_from_slice(&bytes[name_start..pos]);
-            let name_len = (pos - name_start) as u16;
+            let name_len = (pos - name_start) as u32;
 
             // Skip whitespace using fast byte scan.
             pos += bytes[pos..end]
@@ -294,6 +296,7 @@ impl Arena {
                         name_len,
                         value_offset,
                         value_len,
+                        has_value: true,
                     });
                 } else {
                     // Unquoted value.
@@ -308,6 +311,7 @@ impl Arena {
                         name_len,
                         value_offset,
                         value_len,
+                        has_value: true,
                     });
                 }
             } else {
@@ -317,6 +321,7 @@ impl Arena {
                     name_len,
                     value_offset: 0,
                     value_len: 0,
+                    has_value: false,
                 });
             }
 
@@ -383,19 +388,19 @@ impl Arena {
 
     /// Write an attribute value to the string slab, with optional entity decoding.
     #[cfg(feature = "entity-decode")]
-    fn push_attr_value(&mut self, raw_value: &str) -> (u32, u16) {
+    fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
         let offset = self.attr_str_slab.len() as u32;
         let decoded = fhp_tokenizer::entity::decode_entities(raw_value);
         self.attr_str_slab.extend_from_slice(decoded.as_bytes());
-        (offset, decoded.len() as u16)
+        (offset, decoded.len() as u32)
     }
 
     /// Write an attribute value to the string slab (no entity decoding).
     #[cfg(not(feature = "entity-decode"))]
-    fn push_attr_value(&mut self, raw_value: &str) -> (u32, u16) {
+    fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
         let offset = self.attr_str_slab.len() as u32;
         self.attr_str_slab.extend_from_slice(raw_value.as_bytes());
-        (offset, raw_value.len() as u16)
+        (offset, raw_value.len() as u32)
     }
 
     /// Set the 1-based element sibling index for a node.
@@ -466,7 +471,7 @@ impl Arena {
     /// Get the value of an attribute, or `None` for boolean attributes.
     #[inline]
     pub fn attr_value(&self, attr: &Attribute) -> Option<&str> {
-        if attr.value_len == 0 {
+        if !attr.has_value {
             return None;
         }
         let start = attr.value_offset as usize;

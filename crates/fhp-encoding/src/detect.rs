@@ -95,12 +95,12 @@ fn prescan_meta(input: &[u8]) -> Option<&'static Encoding> {
 
         // Try <meta charset="...">
         if let Some(enc) = extract_charset_attr(tag_bytes) {
-            return Some(enc);
+            return Some(remap_meta_encoding(enc));
         }
 
         // Try <meta http-equiv="Content-Type" content="...charset=...">
         if let Some(enc) = extract_http_equiv_charset(tag_bytes) {
-            return Some(enc);
+            return Some(remap_meta_encoding(enc));
         }
     }
     None
@@ -160,6 +160,20 @@ fn extract_http_equiv_charset(tag: &[u8]) -> Option<&'static Encoding> {
     let enc_str = enc_str.split(';').next().unwrap_or("").trim();
 
     Encoding::for_label(enc_str.as_bytes())
+}
+
+/// Apply the HTML spec's meta-prescan encoding remap.
+///
+/// A `<meta>`-declared `utf-16` / `utf-16le` / `utf-16be` label is changed to
+/// UTF-8: a document whose `<meta>` tag was found by an ASCII byte scan cannot
+/// actually be UTF-16 (UTF-16 interleaves NUL bytes that would have prevented
+/// the literal ASCII match), so decoding it as UTF-16 would produce mojibake.
+fn remap_meta_encoding(enc: &'static Encoding) -> &'static Encoding {
+    if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
+        encoding_rs::UTF_8
+    } else {
+        enc
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -303,6 +317,33 @@ mod tests {
     fn bom_takes_priority_over_meta() {
         // UTF-8 BOM but meta says windows-1252. BOM wins.
         let input = b"\xEF\xBB\xBF<html><head><meta charset=\"windows-1252\"></head></html>";
+        assert_eq!(detect(input).name(), "UTF-8");
+    }
+
+    #[test]
+    fn meta_charset_utf16_remaps_to_utf8() {
+        // A document that was ASCII-prescannable cannot actually be UTF-16;
+        // the HTML spec mandates remapping a meta-declared utf-16 label to UTF-8.
+        let input = b"<html><head><meta charset=\"utf-16\"></head><body>Hello</body></html>";
+        assert_eq!(detect(input).name(), "UTF-8");
+    }
+
+    #[test]
+    fn meta_charset_utf16le_remaps_to_utf8() {
+        let input = b"<meta charset=\"utf-16le\">Hello";
+        assert_eq!(detect(input).name(), "UTF-8");
+    }
+
+    #[test]
+    fn meta_charset_utf16be_remaps_to_utf8() {
+        let input = b"<meta charset=\"utf-16be\">Hello";
+        assert_eq!(detect(input).name(), "UTF-8");
+    }
+
+    #[test]
+    fn meta_http_equiv_utf16_remaps_to_utf8() {
+        let input =
+            b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-16\">Hello";
         assert_eq!(detect(input).name(), "UTF-8");
     }
 }

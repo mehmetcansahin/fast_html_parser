@@ -164,15 +164,18 @@ impl<'a> Parser<'a> {
     #[inline(always)]
     fn on_data_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'<' {
+            let after = self.peek(pos + 1);
+            let after2 = self.peek(pos + 2);
+            if !starts_markup_after_lt(after, after2) {
+                return;
+            }
+
             // Flush text before this `<`.
             self.flush_text_impl(pos, emit);
             self.tag_open_pos = pos;
             self.attr_quote = None;
 
             // Peek ahead to classify what follows `<`.
-            let after = self.peek(pos + 1);
-            let after2 = self.peek(pos + 2);
-
             if after == Some(b'!') {
                 // Could be comment, doctype, or CDATA.
                 if after2 == Some(b'-') && self.peek(pos + 3) == Some(b'-') {
@@ -181,7 +184,7 @@ impl<'a> Parser<'a> {
                 } else if after2.is_some_and(|b| b == b'D' || b == b'd') {
                     self.mode = Mode::InDoctype;
                     self.special_open_pos = pos;
-                } else if after2 == Some(b'[') {
+                } else if after2 == Some(b'[') && self.is_cdata_open(pos) {
                     self.mode = Mode::InCData;
                     self.special_open_pos = pos;
                 } else {
@@ -284,7 +287,7 @@ impl<'a> Parser<'a> {
     fn on_in_raw_text_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'<' && self.is_raw_text_close(pos) {
             // Flush raw text content.
-            self.flush_text_impl(pos, emit);
+            self.flush_text_raw_impl(pos, emit);
             self.tag_open_pos = pos;
             self.attr_quote = None;
             self.mode = Mode::InTag;
@@ -463,6 +466,20 @@ impl<'a> Parser<'a> {
         self.cursor = pos;
     }
 
+    /// Flush raw text from cursor to pos without entity decoding.
+    #[inline(always)]
+    fn flush_text_raw_impl(&mut self, pos: usize, emit: &mut impl FnMut(Token<'a>)) {
+        if pos > self.cursor {
+            let raw = self.str_slice(self.cursor, pos);
+            if !raw.is_empty() {
+                emit(Token::Text {
+                    content: Cow::Borrowed(raw),
+                });
+            }
+        }
+        self.cursor = pos;
+    }
+
     /// Flush trailing text at end of input (Vec mode).
     fn flush_trailing(&mut self, tokens: &mut Vec<Token<'a>>) {
         self.flush_trailing_impl(&mut |token| tokens.push(token));
@@ -491,12 +508,15 @@ impl<'a> Parser<'a> {
     #[inline(always)]
     fn on_data_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
         if byte == b'<' {
+            let after = self.peek(pos + 1);
+            let after2 = self.peek(pos + 2);
+            if !starts_markup_after_lt(after, after2) {
+                return;
+            }
+
             self.flush_text_sink(pos, sink);
             self.tag_open_pos = pos;
             self.attr_quote = None;
-
-            let after = self.peek(pos + 1);
-            let after2 = self.peek(pos + 2);
 
             if after == Some(b'!') {
                 if after2 == Some(b'-') && self.peek(pos + 3) == Some(b'-') {
@@ -505,7 +525,7 @@ impl<'a> Parser<'a> {
                 } else if after2.is_some_and(|b| b == b'D' || b == b'd') {
                     self.mode = Mode::InDoctype;
                     self.special_open_pos = pos;
-                } else if after2 == Some(b'[') {
+                } else if after2 == Some(b'[') && self.is_cdata_open(pos) {
                     self.mode = Mode::InCData;
                     self.special_open_pos = pos;
                 } else {
@@ -677,7 +697,11 @@ impl<'a> Parser<'a> {
         if end > self.cursor {
             let raw = self.str_slice(self.cursor, end);
             if !raw.is_empty() {
-                let content = maybe_decode_entities(raw);
+                let content = if self.mode == Mode::InRawText {
+                    Cow::Borrowed(raw)
+                } else {
+                    maybe_decode_entities(raw)
+                };
                 emit(Token::Text { content });
             }
         }
@@ -711,6 +735,20 @@ impl<'a> Parser<'a> {
         self.input.get(pos).copied()
     }
 
+    /// Check whether the input at `pos` begins the literal `<![CDATA[`.
+    ///
+    /// `pos` points at `<`; the caller has already matched `<![`. The CDATA
+    /// close handler assumes a 9-byte `<![CDATA[` prefix, so we must verify the
+    /// full literal before entering CDATA mode. Otherwise the assumed content
+    /// offset could fall in the middle of a multi-byte character and produce an
+    /// invalid-UTF-8 slice.
+    #[inline(always)]
+    fn is_cdata_open(&self, pos: usize) -> bool {
+        self.input
+            .get(pos + 3..pos + 9)
+            .is_some_and(|s| s == b"CDATA[")
+    }
+
     /// Get a `&str` slice from the input.
     #[inline(always)]
     fn str_slice(&self, start: usize, end: usize) -> &'a str {
@@ -730,6 +768,21 @@ impl<'a> Parser<'a> {
 #[inline(always)]
 fn is_whitespace(b: u8) -> bool {
     matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+}
+
+#[inline(always)]
+fn starts_markup_after_lt(after: Option<u8>, after2: Option<u8>) -> bool {
+    match after {
+        Some(b'!') | Some(b'?') => true,
+        Some(b'/') => after2.is_some_and(is_tag_name_start),
+        Some(b) => is_tag_name_start(b),
+        None => false,
+    }
+}
+
+#[inline(always)]
+fn is_tag_name_start(b: u8) -> bool {
+    b == b'_' || b.is_ascii_alphabetic()
 }
 
 #[cfg(test)]

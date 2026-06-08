@@ -1,6 +1,6 @@
 [package]
 name = "fhp-selector"
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,8 +13,8 @@ categories = ["parser-implementations", "web-programming"]
 exclude = ["benches/", "tests/"]
 
 [dependencies]
-fhp-core = { version = "0.1", path = "../fhp-core" }
-fhp-tree = { version = "0.1", path = "../fhp-tree" }
+fhp-core = { version = "0.1.1", path = "../fhp-core" }
+fhp-tree = { version = "0.1.1", path = "../fhp-tree" }
 thiserror = { workspace = true }
 
 [dev-dependencies]

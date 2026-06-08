@@ -8,6 +8,36 @@ use fhp_tokenizer::streaming::StreamTokenizer;
 use fhp_tokenizer::token::Token;
 use fhp_tokenizer::tokenize;
 
+fn text_content(tokens: &[Token<'_>]) -> String {
+    tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::Text { content } => Some(content.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn open_tag_names<'a>(tokens: &'a [Token<'_>]) -> Vec<&'a str> {
+    tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::OpenTag { name, .. } => Some(name.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn close_tag_names<'a>(tokens: &'a [Token<'_>]) -> Vec<&'a str> {
+    tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::CloseTag { name, .. } => Some(name.as_ref()),
+            _ => None,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------
 // Well-formed HTML — every token type
 // ---------------------------------------------------------------
@@ -193,6 +223,294 @@ fn malformed_script_with_lt() {
     });
     assert!(has_script_open, "should have script open tag: {tokens:?}");
     assert!(has_script_close, "should have script close tag: {tokens:?}");
+}
+
+#[test]
+fn script_entity_is_not_decoded_as_text() {
+    let tokens = tokenize("<script>const s = \"&amp;\";</script>");
+    let script_text = tokens.iter().find_map(|token| match token {
+        Token::Text { content } => Some(content.as_ref()),
+        _ => None,
+    });
+
+    assert_eq!(script_text, Some("const s = \"&amp;\";"));
+}
+
+#[test]
+fn invalid_close_like_text_is_preserved() {
+    let tokens = tokenize("<p>a </ b</p>");
+    let text = tokens.iter().find_map(|token| match token {
+        Token::Text { content } => Some(content.as_ref()),
+        _ => None,
+    });
+
+    assert_eq!(text, Some("a </ b"));
+}
+
+#[derive(Debug)]
+struct TextMarkupCase {
+    name: &'static str,
+    html: &'static str,
+    expected_text: &'static str,
+    expected_open_tags: &'static [&'static str],
+    expected_close_tags: &'static [&'static str],
+}
+
+#[test]
+fn invalid_lt_sequences_stay_in_text() {
+    let cases = [
+        TextMarkupCase {
+            name: "lt_before_space",
+            html: "<p>a < 2</p>",
+            expected_text: "a < 2",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "double_lt",
+            html: "<p>a << b</p>",
+            expected_text: "a << b",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "lt_before_dot",
+            html: "<p>a <.b</p>",
+            expected_text: "a <.b",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "lt_before_hash",
+            html: "<p>a <#b</p>",
+            expected_text: "a <#b",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "lt_before_ampersand",
+            html: "<p>a <&b</p>",
+            expected_text: "a <&b",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "slash_space",
+            html: "<p>a </ b</p>",
+            expected_text: "a </ b",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "slash_digit",
+            html: "<p>a </2</p>",
+            expected_text: "a </2",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "trailing_lt",
+            html: "<p>a <</p>",
+            expected_text: "a <",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "lt_equal",
+            html: "<p>a <= b</p>",
+            expected_text: "a <= b",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "lt_percent",
+            html: "<p>a <% b</p>",
+            expected_text: "a <% b",
+            expected_open_tags: &["p"],
+            expected_close_tags: &["p"],
+        },
+        TextMarkupCase {
+            name: "invalid_lt_then_real_child",
+            html: "<p>a < 2 <span>b</span></p>",
+            expected_text: "a < 2 b",
+            expected_open_tags: &["p", "span"],
+            expected_close_tags: &["span", "p"],
+        },
+    ];
+
+    for case in cases {
+        let tokens = tokenize(case.html);
+
+        assert_eq!(
+            text_content(&tokens),
+            case.expected_text,
+            "case={}, html={}, tokens={tokens:?}",
+            case.name,
+            case.html
+        );
+        assert_eq!(
+            open_tag_names(&tokens),
+            case.expected_open_tags,
+            "case={}, html={}, tokens={tokens:?}",
+            case.name,
+            case.html
+        );
+        assert_eq!(
+            close_tag_names(&tokens),
+            case.expected_close_tags,
+            "case={}, html={}, tokens={tokens:?}",
+            case.name,
+            case.html
+        );
+    }
+}
+
+#[test]
+fn valid_close_tags_still_close_after_lt_filtering() {
+    let tokens = tokenize("<p>a </p><p>b</p>");
+    let close_tags: Vec<_> = tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::CloseTag { name, .. } => Some(name.as_ref()),
+            _ => None,
+        })
+        .collect();
+    let text: String = tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::Text { content } => Some(content.as_ref()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(close_tags, ["p", "p"]);
+    assert_eq!(text, "a b");
+}
+
+#[derive(Debug)]
+struct RawTextCase {
+    name: &'static str,
+    html: &'static str,
+    expected_text: &'static str,
+    expected_open_tag: &'static str,
+    expected_close_tag: &'static str,
+    expected_tag: Tag,
+}
+
+#[test]
+fn raw_text_close_like_sequences_are_preserved() {
+    let cases = [
+        RawTextCase {
+            name: "script_invalid_close_like_expression",
+            html: "<script>if (a </ b) { x = \"&amp;\"; }</script>",
+            expected_text: "if (a </ b) { x = \"&amp;\"; }",
+            expected_open_tag: "script",
+            expected_close_tag: "script",
+            expected_tag: Tag::Script,
+        },
+        RawTextCase {
+            name: "script_fake_other_close_tag",
+            html: "<script>const s = \"</not-script>\";</script>",
+            expected_text: "const s = \"</not-script>\";",
+            expected_open_tag: "script",
+            expected_close_tag: "script",
+            expected_tag: Tag::Script,
+        },
+        RawTextCase {
+            name: "script_prefix_close_name_is_text",
+            html: "<script>if (a </scripted) {}</script>",
+            expected_text: "if (a </scripted) {}",
+            expected_open_tag: "script",
+            expected_close_tag: "script",
+            expected_tag: Tag::Script,
+        },
+        RawTextCase {
+            name: "script_uppercase_close",
+            html: "<script>const ok = true;</SCRIPT>",
+            expected_text: "const ok = true;",
+            expected_open_tag: "script",
+            expected_close_tag: "SCRIPT",
+            expected_tag: Tag::Script,
+        },
+        RawTextCase {
+            name: "style_lt_comparison",
+            html: "<style>.x { width: calc(100% < 2px); }</style>",
+            expected_text: ".x { width: calc(100% < 2px); }",
+            expected_open_tag: "style",
+            expected_close_tag: "style",
+            expected_tag: Tag::Style,
+        },
+        RawTextCase {
+            name: "style_entity_stays_raw",
+            html: "<style>.x::before { content: \"&lt;\"; }</style>",
+            expected_text: ".x::before { content: \"&lt;\"; }",
+            expected_open_tag: "style",
+            expected_close_tag: "style",
+            expected_tag: Tag::Style,
+        },
+    ];
+
+    for case in cases {
+        let tokens = tokenize(case.html);
+        let has_close = tokens.iter().any(|token| {
+            matches!(
+                token,
+                Token::CloseTag {
+                    tag: close_tag,
+                    ..
+                } if *close_tag == case.expected_tag
+            )
+        });
+
+        assert_eq!(
+            text_content(&tokens),
+            case.expected_text,
+            "case={}, html={}, tokens={tokens:?}",
+            case.name,
+            case.html
+        );
+        assert_eq!(
+            open_tag_names(&tokens),
+            [case.expected_open_tag],
+            "case={}, html={}, tokens={tokens:?}",
+            case.name,
+            case.html
+        );
+        assert_eq!(
+            close_tag_names(&tokens),
+            [case.expected_close_tag],
+            "case={}, html={}, tokens={tokens:?}",
+            case.name,
+            case.html
+        );
+        assert!(
+            has_close,
+            "case={}, html={}, tokens={tokens:?}",
+            case.name, case.html
+        );
+    }
+}
+
+#[test]
+fn attribute_value_presence_cases() {
+    let tokens = tokenize("<input value=\"\" disabled data-empty=''>");
+    let attrs = match &tokens[0] {
+        Token::OpenTag { attributes, .. } => attributes,
+        other => panic!("expected OpenTag, got {other:?}"),
+    };
+    let values: Vec<_> = attrs
+        .iter()
+        .map(|attr| (attr.name.as_ref(), attr.value.as_deref()))
+        .collect();
+
+    assert_eq!(
+        values,
+        [
+            ("value", Some("")),
+            ("disabled", None),
+            ("data-empty", Some(""))
+        ]
+    );
 }
 
 #[test]
@@ -420,4 +738,43 @@ fn long_input_over_1000_bytes() {
         .filter(|t| matches!(t, Token::OpenTag { tag: Tag::Span, .. }))
         .count();
     assert_eq!(span_opens, 100);
+}
+
+// ---------------------------------------------------------------
+// CDATA section handling (UB regression)
+// ---------------------------------------------------------------
+
+#[test]
+fn cdata_wellformed_extracts_content() {
+    let tokens = tokenize("<![CDATA[hello]]>");
+    let found = tokens
+        .iter()
+        .find_map(|t| match t {
+            Token::CData { content } => Some(content.as_ref()),
+            _ => None,
+        });
+    assert_eq!(found, Some("hello"));
+}
+
+#[test]
+fn cdata_wellformed_multibyte_content() {
+    // A multibyte char inside a real CDATA section must round-trip intact.
+    let tokens = tokenize("<![CDATA[a\u{20ac}b]]>");
+    let found = tokens
+        .iter()
+        .find_map(|t| match t {
+            Token::CData { content } => Some(content.as_ref()),
+            _ => None,
+        });
+    assert_eq!(found, Some("a\u{20ac}b"));
+}
+
+#[test]
+fn cdata_malformed_prefix_is_not_treated_as_cdata() {
+    // `<![` not followed by the literal `CDATA[` must not enter CDATA mode.
+    // With a multibyte char straddling the assumed 9-byte `<![CDATA[` offset
+    // this previously fabricated an invalid-UTF-8 &str: UB in release, a
+    // debug_assert panic in debug. The parser must not produce a CData token.
+    let tokens = tokenize("<![ABCDE\u{20ac}]]>");
+    assert!(!tokens.iter().any(|t| matches!(t, Token::CData { .. })));
 }

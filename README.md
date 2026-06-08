@@ -13,14 +13,14 @@ Uses SIMD instructions (SSE4.2, AVX2, NEON) for tokenization and builds a cache-
 
 ```toml
 [dependencies]
-fast-html-parser = "0.1"
+fast-html-parser = "0.1.1"
 ```
 
 To enable optional features:
 
 ```toml
 [dependencies]
-fast-html-parser = { version = "0.1", features = ["xpath", "encoding", "async-tokio"] }
+fast-html-parser = { version = "0.1.1", features = ["xpath", "encoding", "async-tokio"] }
 ```
 
 ## Quick Start

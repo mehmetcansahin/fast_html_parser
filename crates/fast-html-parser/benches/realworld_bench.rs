@@ -87,6 +87,7 @@ fn bench_realworld_select(c: &mut Criterion) {
     let mut group = c.benchmark_group("realworld_select/wikipedia");
 
     // fast-html-parser — string selector
+    #[cfg(feature = "css-selector")]
     {
         use fast_html_parser::Selectable;
         let doc = fast_html_parser::HtmlParser::parse(&wikipedia).unwrap();
@@ -103,6 +104,7 @@ fn bench_realworld_select(c: &mut Criterion) {
     }
 
     // fast-html-parser — compiled selector
+    #[cfg(feature = "css-selector")]
     {
         use fast_html_parser::{CompiledSelector, Selectable};
         let doc = fast_html_parser::HtmlParser::parse(&wikipedia).unwrap();

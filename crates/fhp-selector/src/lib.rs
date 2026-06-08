@@ -564,18 +564,19 @@ impl Selectable for Document {
 /// Pre-built index for O(1) id, class, and tag lookups.
 ///
 /// Build once with a single DFS pass, reuse for many lookups.
-pub struct DocumentIndex {
+pub struct DocumentIndex<'a> {
+    doc: &'a Document,
     id_map: HashMap<String, NodeId>,
     class_map: HashMap<String, Vec<NodeId>>,
     tag_map: HashMap<Tag, Vec<NodeId>>,
 }
 
-impl DocumentIndex {
+impl<'a> DocumentIndex<'a> {
     /// Build an index from a document by scanning all nodes in a single pass.
     ///
     /// If the arena has a pre-built tag index (constructed inline during tree
     /// building), the tag map is copied directly — avoiding the tag scan.
-    pub fn build(doc: &Document) -> Self {
+    pub fn build(doc: &'a Document) -> Self {
         let arena = doc.arena();
         let mut id_map = HashMap::with_capacity(arena.len() / 8);
         let mut class_map: HashMap<String, Vec<NodeId>> = HashMap::with_capacity(arena.len() / 4);
@@ -648,6 +649,7 @@ impl DocumentIndex {
         }
 
         Self {
+            doc,
             id_map,
             class_map,
             tag_map,
@@ -655,23 +657,32 @@ impl DocumentIndex {
     }
 
     /// Look up a node by its `id` attribute in O(1).
-    pub fn find_by_id<'a>(&self, doc: &'a Document, id: &str) -> Option<NodeRef<'a>> {
-        self.id_map.get(id).map(|&node_id| doc.get(node_id))
+    ///
+    /// The `doc` argument is retained for compatibility; lookups resolve against
+    /// the document used to build this index.
+    pub fn find_by_id(&self, _doc: &Document, id: &str) -> Option<NodeRef<'a>> {
+        self.id_map.get(id).map(|&node_id| self.doc.get(node_id))
     }
 
     /// Look up all nodes with a given CSS class in O(1).
-    pub fn find_by_class<'a>(&self, doc: &'a Document, class: &str) -> Vec<NodeRef<'a>> {
+    ///
+    /// The `doc` argument is retained for compatibility; lookups resolve against
+    /// the document used to build this index.
+    pub fn find_by_class(&self, _doc: &Document, class: &str) -> Vec<NodeRef<'a>> {
         self.class_map
             .get(class)
-            .map(|ids| ids.iter().map(|&id| doc.get(id)).collect())
+            .map(|ids| ids.iter().map(|&id| self.doc.get(id)).collect())
             .unwrap_or_default()
     }
 
     /// Look up all nodes with a given tag in O(1).
-    pub fn find_by_tag<'a>(&self, doc: &'a Document, tag: Tag) -> Vec<NodeRef<'a>> {
+    ///
+    /// The `doc` argument is retained for compatibility; lookups resolve against
+    /// the document used to build this index.
+    pub fn find_by_tag(&self, _doc: &Document, tag: Tag) -> Vec<NodeRef<'a>> {
         self.tag_map
             .get(&tag)
-            .map(|ids| ids.iter().map(|&id| doc.get(id)).collect())
+            .map(|ids| ids.iter().map(|&id| self.doc.get(id)).collect())
             .unwrap_or_default()
     }
 }
@@ -773,6 +784,16 @@ mod tests {
         let index = DocumentIndex::build(&doc);
         let node = index.find_by_id(&doc, "b").unwrap();
         assert_eq!(node.text_content(), "y");
+    }
+
+    #[test]
+    fn document_index_uses_document_it_was_built_from() {
+        let source_doc = parse("<div id=\"a\"><span>source</span></div>").unwrap();
+        let other_doc = parse("<p>other</p>").unwrap();
+        let index = DocumentIndex::build(&source_doc);
+
+        let node = index.find_by_id(&other_doc, "a").unwrap();
+        assert_eq!(node.text_content(), "source");
     }
 
     #[test]

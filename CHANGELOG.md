@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-06-03
+
+### Fixed
+
+- Correct crates.io homepage and repository metadata for all workspace crates to `https://github.com/mehmetcansahin/fast_html_parser`.
+
+### Changed
+
+- Bump internal workspace dependency requirements to `0.1.1` so new published crates resolve to the corrected metadata releases.
+
 ## [0.1.0] - 2026-03-17
 
 ### Added
