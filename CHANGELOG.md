@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-06-08
+
+### Fixed
+
+- CDATA: verify the full `<![CDATA[` literal before entering CDATA mode, preventing a panic / invalid-UTF-8 slice when `<![` was followed by a multi-byte character.
+- Tokenizer: treat a `<` not followed by valid markup (tag-name start, `!`, `?`, or `/tag`) as literal text instead of opening a tag.
+- Tokenizer: stop entity-decoding raw-text (`<script>` / `<style>`) content, which must be passed through verbatim.
+- Selector: bloom filter now matches `class` / `id` attribute names case-insensitively, fixing false-negative pre-filter rejection for uppercase attribute names.
+- Selector: `DocumentIndex` lookups now resolve against the document the index was built from, preventing cross-document `NodeId` misuse.
+- Encoding: remap a `<meta>`-declared `utf-16` charset to UTF-8 per the HTML spec (an ASCII-prescannable document cannot be UTF-16).
+- Tree: widen attribute name/value lengths from `u16` to `u32` (no truncation for attributes larger than 64 KiB) and add an explicit flag distinguishing an empty value from a valueless boolean attribute.
+
 ## [0.1.1] - 2026-06-03
 
 ### Fixed
