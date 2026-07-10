@@ -91,7 +91,7 @@ pub fn ops() -> &'static SimdOps {
                 classify_bytes: crate::avx2::classify_bytes,
                 skip_whitespace: crate::avx2::skip_whitespace,
                 compute_byte_mask: crate::avx2::compute_byte_mask,
-                compute_all_masks: crate::scalar::compute_all_masks,
+                compute_all_masks: crate::avx2::compute_all_masks,
                 level,
             },
             #[cfg(target_arch = "x86_64")]
@@ -100,7 +100,7 @@ pub fn ops() -> &'static SimdOps {
                 classify_bytes: crate::sse42::classify_bytes,
                 skip_whitespace: crate::sse42::skip_whitespace,
                 compute_byte_mask: crate::sse42::compute_byte_mask,
-                compute_all_masks: crate::scalar::compute_all_masks,
+                compute_all_masks: crate::sse42::compute_all_masks,
                 level,
             },
             #[cfg(target_arch = "aarch64")]

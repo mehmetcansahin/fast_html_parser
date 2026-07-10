@@ -257,6 +257,63 @@ pub unsafe fn compute_byte_mask(block: &[u8], byte: u8) -> u64 {
     result
 }
 
+/// Compute four delimiter bitmasks in a single pass over the block.
+///
+/// Loads each 32-byte chunk once and produces all 4 masks simultaneously.
+/// Only `<`, `>`, `"`, `'` are needed by the fused tokenizer pipeline.
+///
+/// # Safety
+///
+/// Caller must ensure the CPU supports AVX2.
+#[target_feature(enable = "avx2")]
+#[cfg(target_arch = "x86_64")]
+pub unsafe fn compute_all_masks(block: &[u8]) -> crate::AllMasks {
+    // Masks are 64-bit; only the first 64 bytes can be represented.
+    let len = block.len().min(64);
+    let ptr = block.as_ptr();
+    let mut masks = crate::AllMasks::default();
+    let mut offset = 0;
+
+    // SAFETY: all intrinsics below require AVX2, guaranteed by #[target_feature].
+    unsafe {
+        let lt = _mm256_set1_epi8(b'<' as i8);
+        let gt = _mm256_set1_epi8(b'>' as i8);
+        let quot = _mm256_set1_epi8(b'"' as i8);
+        let apos = _mm256_set1_epi8(b'\'' as i8);
+
+        while offset + 32 <= len {
+            let chunk = _mm256_loadu_si256(ptr.add(offset) as *const __m256i);
+
+            let m_lt = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, lt)) as u64;
+            let m_gt = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, gt)) as u64;
+            let m_quot = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, quot)) as u64;
+            let m_apos = _mm256_movemask_epi8(_mm256_cmpeq_epi8(chunk, apos)) as u64;
+
+            masks.lt |= m_lt << offset;
+            masks.gt |= m_gt << offset;
+            masks.quot |= m_quot << offset;
+            masks.apos |= m_apos << offset;
+
+            offset += 32;
+        }
+    }
+
+    // Scalar tail.
+    while offset < len {
+        let bit = 1u64 << offset;
+        match block[offset] {
+            b'<' => masks.lt |= bit,
+            b'>' => masks.gt |= bit,
+            b'"' => masks.quot |= bit,
+            b'\'' => masks.apos |= bit,
+            _ => {}
+        }
+        offset += 1;
+    }
+
+    masks
+}
+
 #[cfg(all(test, target_arch = "x86_64"))]
 mod tests {
     use super::*;
@@ -316,5 +373,53 @@ mod tests {
         let input = b"                                        X";
         let result = unsafe { skip_whitespace(input) };
         assert_eq!(result, 40);
+    }
+
+    #[test]
+    fn compute_all_masks_matches_scalar() {
+        if !has_avx2() {
+            return;
+        }
+        let input = b"Hello <World> & \"test\" = 'value' / 123\n\r\t end!!";
+        let avx2_masks = unsafe { compute_all_masks(input) };
+        let scalar_masks = crate::scalar::compute_all_masks_safe(input);
+        assert_eq!(avx2_masks.lt, scalar_masks.lt, "lt mismatch");
+        assert_eq!(avx2_masks.gt, scalar_masks.gt, "gt mismatch");
+        assert_eq!(avx2_masks.quot, scalar_masks.quot, "quot mismatch");
+        assert_eq!(avx2_masks.apos, scalar_masks.apos, "apos mismatch");
+    }
+
+    #[test]
+    fn compute_all_masks_64_byte_boundaries() {
+        if !has_avx2() {
+            return;
+        }
+        let mut input = vec![b'x'; 64];
+        input[0] = b'<';
+        input[31] = b'>';
+        input[32] = b'"';
+        input[63] = b'\'';
+        let masks = unsafe { compute_all_masks(&input) };
+        assert_eq!(masks.lt, 1u64 << 0);
+        assert_eq!(masks.gt, 1u64 << 31);
+        assert_eq!(masks.quot, 1u64 << 32);
+        assert_eq!(masks.apos, 1u64 << 63);
+    }
+
+    #[test]
+    fn compute_all_masks_ignores_bytes_after_64() {
+        if !has_avx2() {
+            return;
+        }
+        let mut input = vec![b'x'; 80];
+        input[64] = b'<';
+        input[65] = b'>';
+        input[66] = b'"';
+        input[67] = b'\'';
+        let masks = unsafe { compute_all_masks(&input) };
+        assert_eq!(masks.lt, 0);
+        assert_eq!(masks.gt, 0);
+        assert_eq!(masks.quot, 0);
+        assert_eq!(masks.apos, 0);
     }
 }

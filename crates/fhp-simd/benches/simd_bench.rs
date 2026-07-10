@@ -1,5 +1,6 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
+use fhp_simd::AllMasks;
 use fhp_simd::dispatch;
 use fhp_simd::scalar;
 
@@ -103,10 +104,48 @@ fn bench_skip_whitespace(c: &mut Criterion) {
     group.finish();
 }
 
+fn masks_checksum(masks: AllMasks) -> u64 {
+    masks.lt ^ masks.gt.rotate_left(1) ^ masks.quot.rotate_left(2) ^ masks.apos.rotate_left(3)
+}
+
+fn scan_all_masks_scalar(input: &[u8]) -> u64 {
+    input.chunks(64).fold(0, |acc, chunk| {
+        acc ^ masks_checksum(scalar::compute_all_masks_safe(chunk))
+    })
+}
+
+fn scan_all_masks_dispatch(input: &[u8]) -> u64 {
+    let ops = dispatch::ops();
+    input.chunks(64).fold(0, |acc, chunk| {
+        let masks = unsafe { (ops.compute_all_masks)(chunk) };
+        acc ^ masks_checksum(masks)
+    })
+}
+
+fn bench_compute_all_masks(c: &mut Criterion) {
+    let mut group = c.benchmark_group("compute_all_masks");
+
+    for size in [64, 1024, 64 * 1024] {
+        let html = make_html_like_input(size);
+        group.throughput(Throughput::Bytes(size as u64));
+
+        group.bench_with_input(BenchmarkId::new("scalar", size), &html, |b, input| {
+            b.iter(|| scan_all_masks_scalar(input))
+        });
+
+        group.bench_with_input(BenchmarkId::new("dispatch", size), &html, |b, input| {
+            b.iter(|| scan_all_masks_dispatch(input))
+        });
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_find_delimiters,
     bench_classify_bytes,
     bench_skip_whitespace,
+    bench_compute_all_masks,
 );
 criterion_main!(benches);
