@@ -14,11 +14,12 @@ categories = ["parser-implementations", "web-programming"]
 exclude = ["benches/", "tests/"]
 
 [features]
-default = ["css-selector", "entity-decode"]
+default = ["css-selector", "entity-decode", "encoding"]
 css-selector = ["dep:fhp-selector"]
 xpath = ["dep:fhp-selector", "css-selector"]
-encoding = ["dep:fhp-encoding"]
-async-tokio = ["fhp-tree/async-tokio"]
+encoding = ["dep:fhp-encoding", "fhp-tree/encoding"]
+async-tokio = ["fhp-tree/async-tokio", "encoding"]
+async-async-std = ["fhp-tree/async-async-std", "encoding"]
 entity-decode = ["fhp-tree/entity-decode", "fhp-tokenizer/entity-decode"]
 simd = []  # SIMD acceleration marker (NEON/SSE4.2/AVX2 runtime dispatch)
 
@@ -39,6 +40,7 @@ lol_html = "2"
 [[bench]]
 name = "e2e_bench"
 harness = false
+required-features = ["encoding"]
 
 [[bench]]
 name = "comparison_bench"
@@ -61,6 +63,7 @@ required-features = ["css-selector"]
 
 [[example]]
 name = "streaming"
+required-features = ["encoding"]
 
 [[example]]
 name = "xpath_query"

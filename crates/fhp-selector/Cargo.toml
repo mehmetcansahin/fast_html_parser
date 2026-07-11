@@ -14,7 +14,7 @@ exclude = ["benches/", "tests/"]
 
 [dependencies]
 fhp-core = { version = "0.1.2", path = "../fhp-core" }
-fhp-tree = { version = "0.1.2", path = "../fhp-tree" }
+fhp-tree = { version = "0.1.2", path = "../fhp-tree", default-features = false }
 thiserror = { workspace = true }
 
 [dev-dependencies]

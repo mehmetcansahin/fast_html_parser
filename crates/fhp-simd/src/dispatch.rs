@@ -179,6 +179,23 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_skip_whitespace_matches_scalar_at_every_short_length() {
+        const HTML_WHITESPACE: &[u8] = b" \t\n\r\x0C";
+        let o = ops();
+
+        for len in 0..=128 {
+            let mut input = Vec::with_capacity(len + 1);
+            input.extend((0..len).map(|index| HTML_WHITESPACE[index % HTML_WHITESPACE.len()]));
+            input.push(b'X');
+
+            let dispatched = unsafe { (o.skip_whitespace)(&input) };
+            let scalar = crate::scalar::skip_whitespace_safe(&input);
+            assert_eq!(dispatched, scalar, "mismatch at whitespace length {len}");
+            assert_eq!(dispatched, len);
+        }
+    }
+
+    #[test]
     fn dispatch_compute_byte_mask() {
         let o = ops();
         let input = b"hello <world> & end";

@@ -98,7 +98,7 @@ pub unsafe fn classify_bytes(input: &[u8]) -> Vec<u8> {
         while offset + 32 <= len {
             let chunk = _mm256_loadu_si256(ptr.add(offset) as *const __m256i);
 
-            // Whitespace: space, tab, newline, CR.
+            // HTML whitespace: space, tab, newline, form feed, CR.
             let ws_mask = _mm256_or_si256(
                 _mm256_or_si256(
                     _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b' ' as i8)),
@@ -106,7 +106,10 @@ pub unsafe fn classify_bytes(input: &[u8]) -> Vec<u8> {
                 ),
                 _mm256_or_si256(
                     _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\n' as i8)),
-                    _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\r' as i8)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\x0C' as i8)),
+                        _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\r' as i8)),
+                    ),
                 ),
             );
 
@@ -187,7 +190,7 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
         while offset + 32 <= len {
             let chunk = _mm256_loadu_si256(ptr.add(offset) as *const __m256i);
 
-            // Check all 4 whitespace bytes.
+            // Check all five HTML whitespace bytes.
             let ws_mask = _mm256_or_si256(
                 _mm256_or_si256(
                     _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b' ' as i8)),
@@ -195,7 +198,10 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
                 ),
                 _mm256_or_si256(
                     _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\n' as i8)),
-                    _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\r' as i8)),
+                    _mm256_or_si256(
+                        _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\x0C' as i8)),
+                        _mm256_cmpeq_epi8(chunk, _mm256_set1_epi8(b'\r' as i8)),
+                    ),
                 ),
             );
 
@@ -373,6 +379,26 @@ mod tests {
         let input = b"                                        X";
         let result = unsafe { skip_whitespace(input) };
         assert_eq!(result, 40);
+    }
+
+    #[test]
+    fn skip_whitespace_matches_scalar_at_every_short_length() {
+        if !has_avx2() {
+            return;
+        }
+        const HTML_WHITESPACE: &[u8] = b" \t\n\r\x0C";
+
+        for len in 0..=128 {
+            let mut input = Vec::with_capacity(len + 1);
+            input.extend((0..len).map(|index| HTML_WHITESPACE[index % HTML_WHITESPACE.len()]));
+            input.push(b'X');
+
+            assert_eq!(
+                unsafe { skip_whitespace(&input) },
+                crate::scalar::skip_whitespace_safe(&input),
+                "mismatch at whitespace length {len}"
+            );
+        }
     }
 
     #[test]

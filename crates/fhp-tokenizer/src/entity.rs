@@ -6,6 +6,14 @@
 
 use std::borrow::Cow;
 
+/// Maximum number of bytes considered for a character-reference body.
+///
+/// HTML named references are short (the longest standard name is well below
+/// this bound), while numeric references need at most ten decimal digits.
+/// Bounding the search prevents an input containing many `&` bytes without a
+/// terminating `;` from repeatedly scanning the entire remaining suffix.
+const MAX_ENTITY_BODY_LEN: usize = 64;
+
 /// Decode HTML entities in a string.
 ///
 /// Fast path: if no `&` is present, returns `Cow::Borrowed` with zero
@@ -40,9 +48,15 @@ fn decode_entities_slow(input: &str) -> Cow<'_, str> {
         // Preserve all UTF-8 before '&' verbatim.
         result.push_str(&input[cursor..amp]);
 
-        // Look for the closing ';' after '&'.
-        if let Some(rel_semi) = input[amp + 1..].find(';') {
-            let semi = amp + 1 + rel_semi;
+        // Look for a nearby closing ';' after '&'. Character references have
+        // bounded names; scanning the whole suffix for every ampersand makes
+        // inputs such as "&&&&..." quadratic.
+        let search_end = (amp + 1 + MAX_ENTITY_BODY_LEN + 1).min(input.len());
+        if let Some(semi) = input.as_bytes()[amp + 1..search_end]
+            .iter()
+            .position(|&b| b == b';')
+            .map(|rel| amp + 1 + rel)
+        {
             let entity_body = &input[amp + 1..semi];
             if try_decode_entity_into(entity_body, &mut result) {
                 cursor = semi + 1;
@@ -133,6 +147,15 @@ mod tests {
     }
 
     #[test]
+    fn numeric_references_apply_html_replacement_semantics() {
+        assert_eq!(decode_entities("&#xD800;"), "\u{FFFD}");
+        assert_eq!(decode_entities("&#1114112;"), "\u{FFFD}");
+        assert_eq!(decode_entities("&#999999999999999999999999;"), "\u{FFFD}");
+        assert_eq!(decode_entities("&#128; &#x82;"), "\u{20AC} \u{201A}");
+        assert_eq!(decode_entities("&#xFDD0;"), "\u{FDD0}");
+    }
+
+    #[test]
     fn mixed_entities() {
         assert_eq!(decode_entities("a &amp; b &lt; c &#62; d"), "a & b < c > d");
     }
@@ -162,5 +185,19 @@ mod tests {
     #[test]
     fn consecutive_entities() {
         assert_eq!(decode_entities("&lt;&gt;&amp;"), "<>&");
+    }
+
+    #[test]
+    fn many_unterminated_ampersands_are_preserved() {
+        // Regression: the old implementation searched the entire remaining
+        // suffix for every ampersand, making this pattern O(n^2).
+        let input = "&".repeat(100_000);
+        assert_eq!(decode_entities(&input), input);
+    }
+
+    #[test]
+    fn excessively_long_entity_body_is_preserved() {
+        let input = format!("&{};", "a".repeat(MAX_ENTITY_BODY_LEN + 1));
+        assert_eq!(decode_entities(&input), input);
     }
 }

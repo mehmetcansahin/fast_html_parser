@@ -182,6 +182,15 @@ fn meta_charset_with_other_attrs() {
     assert_eq!(detect(html).name(), "UTF-8");
 }
 
+#[test]
+fn commented_meta_does_not_corrupt_utf8() {
+    let html = "<!-- <meta charset=windows-1252> --><p>€</p>".as_bytes();
+    let (text, encoding) = decode_or_detect(html).unwrap();
+
+    assert_eq!(encoding.name(), "UTF-8");
+    assert!(text.contains('€'));
+}
+
 // ---------------------------------------------------------------------------
 // Fallback / edge cases
 // ---------------------------------------------------------------------------

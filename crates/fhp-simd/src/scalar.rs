@@ -64,7 +64,7 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
 pub fn skip_whitespace_safe(input: &[u8]) -> usize {
     input
         .iter()
-        .position(|&b| !b.is_ascii_whitespace())
+        .position(|&b| !crate::is_html_whitespace(b))
         .unwrap_or(input.len())
 }
 
@@ -202,6 +202,12 @@ mod tests {
     }
 
     #[test]
+    fn classify_form_feed_as_html_whitespace() {
+        assert_eq!(unsafe { classify_bytes(b"\x0C") }, [class::WHITESPACE]);
+        assert_eq!(unsafe { classify_bytes(b"\x0B") }, [class::OTHER]);
+    }
+
+    #[test]
     fn skip_whitespace_leading() {
         let result = unsafe { skip_whitespace(b"   hello") };
         assert_eq!(result, 3);
@@ -211,6 +217,12 @@ mod tests {
     fn skip_whitespace_mixed() {
         let result = unsafe { skip_whitespace(b" \t\n\rX") };
         assert_eq!(result, 4);
+    }
+
+    #[test]
+    fn skip_whitespace_includes_form_feed_but_not_vertical_tab() {
+        assert_eq!(unsafe { skip_whitespace(b"\x0C X") }, 2);
+        assert_eq!(unsafe { skip_whitespace(b"\x0B X") }, 0);
     }
 
     #[test]

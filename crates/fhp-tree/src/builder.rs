@@ -13,6 +13,13 @@ use crate::node::NodeId;
 /// Maximum nesting depth to prevent stack overflow on pathological input.
 const MAX_DEPTH: u16 = 512;
 
+/// Cap capacity heuristics for very large inputs.
+///
+/// The vectors still grow normally when a document is genuinely node-dense,
+/// but a large plain-text document no longer reserves hundreds of megabytes
+/// for nodes and attributes that it will never create.
+const MAX_CAPACITY_HINT_INPUT: usize = 8 * 1024 * 1024;
+
 /// Implicit close lookup table.
 ///
 /// `IMPLICIT_CLOSE[open_tag][new_tag]` is `true` when the arrival of
@@ -83,6 +90,10 @@ fn implicit_close_index(tag: Tag) -> Option<usize> {
 /// Check whether `new_tag` should implicitly close `open_tag`.
 #[inline]
 fn should_implicit_close(open_tag: Tag, new_tag: Tag) -> bool {
+    if open_tag == Tag::P && closes_p_element(new_tag) {
+        return true;
+    }
+
     if let (Some(open_idx), Some(new_idx)) = (
         implicit_close_index(open_tag),
         implicit_close_index(new_tag),
@@ -93,6 +104,38 @@ fn should_implicit_close(open_tag: Tag, new_tag: Tag) -> bool {
     }
 }
 
+/// Known block-level starts that imply the end of an open `<p>` element.
+///
+/// This covers every such element represented by the compact [`Tag`] enum;
+/// unknown/custom elements do not implicitly close a paragraph.
+#[inline]
+fn closes_p_element(tag: Tag) -> bool {
+    matches!(
+        tag,
+        Tag::Article
+            | Tag::Aside
+            | Tag::Div
+            | Tag::Footer
+            | Tag::Form
+            | Tag::H1
+            | Tag::H2
+            | Tag::H3
+            | Tag::H4
+            | Tag::H5
+            | Tag::H6
+            | Tag::Header
+            | Tag::Hr
+            | Tag::Main
+            | Tag::Nav
+            | Tag::Ol
+            | Tag::P
+            | Tag::Pre
+            | Tag::Section
+            | Tag::Table
+            | Tag::Ul
+    )
+}
+
 /// Builds a DOM tree from a token stream.
 ///
 /// Maintains an open-elements stack and processes each token to either
@@ -101,7 +144,7 @@ pub struct TreeBuilder {
     /// The arena that owns all nodes.
     pub(crate) arena: Arena,
     /// Stack of open element node ids with cached tags and element child count.
-    open_elements: Vec<(NodeId, Tag, u16)>,
+    open_elements: Vec<(NodeId, Tag, u32)>,
     /// The synthetic root node (document root).
     root: NodeId,
     /// Base address of the original input (for source-backed text).
@@ -124,10 +167,11 @@ impl TreeBuilder {
     /// Uses heuristics to estimate node, text, and attribute counts from the
     /// input byte length, reducing reallocations for large documents.
     pub fn with_capacity_hint(input_len: usize) -> Self {
-        let node_cap = (input_len / 32).max(256);
+        let capacity_hint_len = input_len.min(MAX_CAPACITY_HINT_INPUT);
+        let node_cap = (capacity_hint_len / 32).max(256);
         // Source-backed text uses offsets, not slab — smaller alloc suffices.
-        let text_cap = (input_len / 16).max(4096);
-        let attr_cap = (input_len / 128).max(64);
+        let text_cap = (capacity_hint_len / 16).max(4096);
+        let attr_cap = (capacity_hint_len / 128).max(64);
         let mut arena = Arena::with_capacity(node_cap, text_cap, attr_cap);
         // Create a synthetic document root.
         let root = arena.new_element(Tag::Unknown, 0);
@@ -258,12 +302,11 @@ impl TreeBuilder {
         // Append to parent and set element index from parent's counter.
         self.arena.append_child(parent, node);
         if let Some(parent_entry) = self.open_elements.last_mut() {
-            // Saturating: the element index is a u16, so a parent with more
-            // than u16::MAX element children pins later children at u16::MAX
-            // rather than overflowing (debug panic / release wrap to 0, which
-            // would make a node look like "not an element" to :nth-child).
+            // NodeId itself is u32, so saturating the full sibling index at
+            // u32::MAX keeps arithmetic defined even at the representational
+            // limit. Arena also stores a compact saturated u16 mirror.
             parent_entry.2 = parent_entry.2.saturating_add(1);
-            self.arena.set_element_index(node, parent_entry.2);
+            self.arena.set_full_element_index(node, parent_entry.2);
         }
 
         // Void elements and self-closing tags don't go on the stack.
@@ -405,6 +448,18 @@ impl TreeBuilder {
 
     /// Apply implicit close rules based on the new tag.
     fn apply_implicit_close(&mut self, new_tag: Tag) {
+        // A block-level start closes an open paragraph even when phrasing
+        // elements are currently above it on the stack (`<p><span><div>`).
+        if closes_p_element(new_tag) {
+            if let Some(p_idx) = self
+                .open_elements
+                .iter()
+                .rposition(|&(_, tag, _)| tag == Tag::P)
+            {
+                self.open_elements.truncate(p_idx);
+            }
+        }
+
         // Check if the current open element should be implicitly closed.
         // Tag is read from the cached tuple — no arena access needed.
         while self.open_elements.len() > 1 {
@@ -444,12 +499,9 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
 
         self.arena.append_child(parent, node);
         if let Some(parent_entry) = self.open_elements.last_mut() {
-            // Saturating: the element index is a u16, so a parent with more
-            // than u16::MAX element children pins later children at u16::MAX
-            // rather than overflowing (debug panic / release wrap to 0, which
-            // would make a node look like "not an element" to :nth-child).
+            // See the equivalent path in `handle_open_tag`.
             parent_entry.2 = parent_entry.2.saturating_add(1);
-            self.arena.set_element_index(node, parent_entry.2);
+            self.arena.set_full_element_index(node, parent_entry.2);
         }
 
         if tag.is_void() || self_closing {
@@ -590,6 +642,36 @@ mod tests {
     }
 
     #[test]
+    fn block_start_closes_nested_paragraph() {
+        let mut builder = TreeBuilder::new();
+        builder.process(&make_open(Tag::P));
+        builder.process(&make_open(Tag::Span));
+        builder.process(&make_text("first"));
+        builder.process(&make_open(Tag::Div));
+        builder.process(&make_text("second"));
+
+        let (arena, root) = builder.finish();
+        let p = arena.get(root).first_child;
+        let div = arena.get(p).next_sibling;
+
+        assert_eq!(arena.get(p).tag, Tag::P);
+        assert_eq!(arena.get(div).tag, Tag::Div);
+        assert_eq!(arena.get(div).parent, root);
+    }
+
+    #[test]
+    fn large_plain_text_hint_does_not_preallocate_for_every_possible_node() {
+        let input_len = 256 * 1024 * 1024;
+        let builder = TreeBuilder::with_capacity_hint(input_len);
+
+        assert!(
+            builder.arena.nodes.capacity() < input_len / 64,
+            "node capacity {} is disproportionate to a plain-text input",
+            builder.arena.nodes.capacity()
+        );
+    }
+
+    #[test]
     fn mismatched_close_finds_nearest() {
         // <div><span></div> — should close both span and div.
         let mut builder = TreeBuilder::new();
@@ -646,6 +728,8 @@ mod tests {
     #[test]
     fn should_implicit_close_rules() {
         assert!(should_implicit_close(Tag::P, Tag::P));
+        assert!(should_implicit_close(Tag::P, Tag::Div));
+        assert!(should_implicit_close(Tag::P, Tag::Table));
         assert!(should_implicit_close(Tag::Li, Tag::Li));
         assert!(should_implicit_close(Tag::Td, Tag::Td));
         assert!(should_implicit_close(Tag::Td, Tag::Th));

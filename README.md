@@ -117,8 +117,9 @@ let doc = HtmlParser::parse_bytes(b"<p>Hello</p>").unwrap();
 | `css-selector` | Yes | CSS selector engine (type, class, ID, attribute, pseudo-class, combinators) |
 | `entity-decode` | Yes | HTML entity decoding |
 | `xpath` | No | XPath expression support |
-| `encoding` | No | Auto-detect encoding from raw bytes (BOM, meta charset) |
+| `encoding` | Yes | Raw-byte and streaming parsing with encoding detection (BOM, meta charset) |
 | `async-tokio` | No | Async parsing via Tokio |
+| `async-async-std` | No | Async parsing via async-std |
 
 ## Architecture
 

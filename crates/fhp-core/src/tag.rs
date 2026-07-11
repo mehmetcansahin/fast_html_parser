@@ -228,14 +228,23 @@ impl Tag {
         (self as u8) < VOID_COUNT
     }
 
-    /// Returns `true` if this is a raw text element (`<script>`, `<style>`).
+    /// Returns `true` if this is a raw text element.
     ///
     /// Raw text elements' content must not be entity-escaped during
     /// serialization, and the tokenizer enters a special raw-text mode for
     /// them.
     #[inline(always)]
     pub const fn is_raw_text(self) -> bool {
-        matches!(self, Tag::Script | Tag::Style)
+        matches!(self, Tag::Script | Tag::Style | Tag::Iframe)
+    }
+
+    /// Returns `true` if this is an RCDATA element (`<title>`, `<textarea>`).
+    ///
+    /// RCDATA is tokenized like raw text except that character references are
+    /// decoded. Markup other than the matching end tag remains text.
+    #[inline(always)]
+    pub const fn is_rcdata(self) -> bool {
+        matches!(self, Tag::Title | Tag::Textarea)
     }
 
     /// Returns the canonical lowercase tag name, or `None` for [`Tag::Unknown`].
@@ -377,10 +386,19 @@ mod tests {
     fn raw_text_elements() {
         assert!(Tag::Script.is_raw_text());
         assert!(Tag::Style.is_raw_text());
+        assert!(Tag::Iframe.is_raw_text());
         assert!(!Tag::Div.is_raw_text());
         assert!(!Tag::Textarea.is_raw_text());
         assert!(!Tag::Title.is_raw_text());
         assert!(!Tag::Unknown.is_raw_text());
+    }
+
+    #[test]
+    fn rcdata_elements() {
+        assert!(Tag::Textarea.is_rcdata());
+        assert!(Tag::Title.is_rcdata());
+        assert!(!Tag::Script.is_rcdata());
+        assert!(!Tag::Div.is_rcdata());
     }
 
     #[test]

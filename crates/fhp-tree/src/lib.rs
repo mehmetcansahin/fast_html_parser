@@ -19,11 +19,17 @@ pub mod arena;
 /// Async HTML parser (requires `async-tokio` feature).
 #[cfg(feature = "async-tokio")]
 pub mod async_parser;
+/// Async HTML parser powered by async-std (requires `async-async-std`).
+#[cfg(feature = "async-async-std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async-async-std")))]
+pub mod async_std_parser;
 /// Tree builder — converts a [`Token`](fhp_tokenizer::token::Token) stream into a DOM tree.
 pub mod builder;
 /// Cache-line aligned [`Node`](crate::node::Node) layout.
 pub mod node;
 /// Streaming and incremental parsing — [`StreamParser`](crate::streaming::StreamParser) and [`EarlyStopParser`](crate::streaming::EarlyStopParser).
+#[cfg(feature = "encoding")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub mod streaming;
 /// Allocation-free traversal iterators (uses [`VecDeque`](std::collections::VecDeque) for BFS).
 pub mod traverse;
@@ -59,6 +65,11 @@ pub enum HtmlError {
 /// Maximum input size (256 MiB).
 pub(crate) const MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
 
+/// Arena offsets and lengths are stored as `u32`; inputs larger than this
+/// cannot be represented without truncation even when a caller raises the
+/// normal safety limit.
+const MAX_REPRESENTABLE_INPUT_SIZE: usize = u32::MAX as usize;
+
 /// Parse an HTML string into a [`Document`].
 ///
 /// Runs the tokenizer and tree builder in sequence.
@@ -77,12 +88,17 @@ pub(crate) const MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
 /// assert!(root.children().count() > 0);
 /// ```
 pub fn parse(input: &str) -> Result<Document, HtmlError> {
-    if input.len() > MAX_INPUT_SIZE {
-        return Err(HtmlError::InputTooLarge {
-            size: input.len(),
-            max: MAX_INPUT_SIZE,
-        });
-    }
+    parse_with_limit(input, MAX_INPUT_SIZE)
+}
+
+/// Parse an HTML string with a caller-provided maximum input size.
+///
+/// # Errors
+///
+/// Returns [`HtmlError::InputTooLarge`] if the input exceeds `max_input_size`
+/// or the arena's `u32` representation limit.
+pub fn parse_with_limit(input: &str, max_input_size: usize) -> Result<Document, HtmlError> {
+    ensure_input_size(input.len(), max_input_size)?;
 
     let mut builder = TreeBuilder::with_capacity_hint(input.len());
     builder.set_source(input);
@@ -113,12 +129,17 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
 /// assert_eq!(doc.root().text_content(), "Hello");
 /// ```
 pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
-    if input.len() > MAX_INPUT_SIZE {
-        return Err(HtmlError::InputTooLarge {
-            size: input.len(),
-            max: MAX_INPUT_SIZE,
-        });
-    }
+    parse_owned_with_limit(input, MAX_INPUT_SIZE)
+}
+
+/// Parse an owned HTML string with a caller-provided maximum input size.
+///
+/// # Errors
+///
+/// Returns [`HtmlError::InputTooLarge`] if the input exceeds `max_input_size`
+/// or the arena's `u32` representation limit.
+pub fn parse_owned_with_limit(input: String, max_input_size: usize) -> Result<Document, HtmlError> {
+    ensure_input_size(input.len(), max_input_size)?;
 
     let mut builder = TreeBuilder::with_capacity_hint(input.len());
     // Set source pointer tracking without copying data.
@@ -153,16 +174,38 @@ pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
 /// let root = doc.root();
 /// assert_eq!(root.text_content(), "Hello");
 /// ```
+#[cfg(feature = "encoding")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
-    if input.len() > MAX_INPUT_SIZE {
-        return Err(HtmlError::InputTooLarge {
-            size: input.len(),
-            max: MAX_INPUT_SIZE,
-        });
-    }
+    parse_bytes_with_limit(input, MAX_INPUT_SIZE)
+}
+
+/// Parse raw bytes with a caller-provided maximum input size, auto-detecting
+/// the encoding.
+///
+/// # Errors
+///
+/// Returns [`HtmlError::InputTooLarge`] if either the raw or decoded input
+/// exceeds `max_input_size` or the arena's `u32` representation limit, or
+/// [`HtmlError::Encoding`] if decoding fails.
+#[cfg(feature = "encoding")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
+pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Document, HtmlError> {
+    ensure_input_size(input.len(), max_input_size)?;
 
     let (text, _encoding) = fhp_encoding::decode_or_detect(input)?;
-    parse(&text)
+    parse_with_limit(&text, max_input_size)
+}
+
+fn ensure_input_size(size: usize, max: usize) -> Result<(), HtmlError> {
+    let effective_max = max.min(MAX_REPRESENTABLE_INPUT_SIZE);
+    if size > effective_max {
+        return Err(HtmlError::InputTooLarge {
+            size,
+            max: effective_max,
+        });
+    }
+    Ok(())
 }
 
 /// A parsed HTML document backed by an arena.
@@ -770,12 +813,14 @@ mod tests {
     // ---- parse_bytes tests ----
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn parse_bytes_utf8() {
         let doc = parse_bytes(b"<div><p>Hello</p></div>").unwrap();
         assert_eq!(doc.root().text_content(), "Hello");
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn parse_bytes_utf8_bom() {
         let html = b"\xEF\xBB\xBF<div><p>BOM test</p></div>";
         let doc = parse_bytes(html).unwrap();
@@ -783,6 +828,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn parse_bytes_windows_1254_meta() {
         // Turkish ü=0xFC in windows-1254.
         let html = b"<meta charset=\"windows-1254\"><p>Merhaba d\xFCnya</p>";
@@ -792,6 +838,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn parse_bytes_utf16le_bom() {
         let mut bytes = vec![0xFF, 0xFE]; // BOM
         for &ch in b"<p>UTF16</p>" {
@@ -804,21 +851,53 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn parse_bytes_empty() {
         let doc = parse_bytes(b"").unwrap();
         assert!(!doc.root().has_children());
+    }
+
+    #[test]
+    fn caller_limit_is_not_clamped_to_the_default() {
+        let above_default = MAX_INPUT_SIZE + 1;
+        assert!(ensure_input_size(above_default, above_default).is_ok());
+        assert!(matches!(
+            ensure_input_size(above_default, MAX_INPUT_SIZE),
+            Err(HtmlError::InputTooLarge { size, max })
+                if size == above_default && max == MAX_INPUT_SIZE
+        ));
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn caller_limit_is_capped_at_the_arena_representation_limit() {
+        let unrepresentable = MAX_REPRESENTABLE_INPUT_SIZE + 1;
+        assert!(matches!(
+            ensure_input_size(unrepresentable, usize::MAX),
+            Err(HtmlError::InputTooLarge { size, max })
+                if size == unrepresentable && max == MAX_REPRESENTABLE_INPUT_SIZE
+        ));
     }
 
     // ---- serialization / escaping tests ----
 
     #[test]
     fn text_escaping_in_inner_html() {
-        // Input uses entities; parser decodes them; serializer must re-encode.
         let doc = parse("<p>1 &lt; 2 &amp; 3 &gt; 0</p>").unwrap();
         let p = doc.root().first_child().unwrap();
-        assert_eq!(p.text_content(), "1 < 2 & 3 > 0");
+        let expected_text = if cfg!(feature = "entity-decode") {
+            "1 < 2 & 3 > 0"
+        } else {
+            "1 &lt; 2 &amp; 3 &gt; 0"
+        };
+        assert_eq!(p.text_content(), expected_text);
         let inner = p.inner_html();
-        assert_eq!(inner, "1 &lt; 2 &amp; 3 &gt; 0");
+        let expected_inner = if cfg!(feature = "entity-decode") {
+            "1 &lt; 2 &amp; 3 &gt; 0"
+        } else {
+            "1 &amp;lt; 2 &amp;amp; 3 &amp;gt; 0"
+        };
+        assert_eq!(inner, expected_inner);
     }
 
     #[test]
@@ -901,11 +980,15 @@ mod tests {
     fn round_trip_with_special_chars() {
         let input = "<p>1 &lt; 2 &amp; 3 &gt; 0</p>";
         let doc1 = parse(input).unwrap();
-        assert_eq!(doc1.root().text_content(), "1 < 2 & 3 > 0");
-
         let html = doc1.to_html();
-        let doc2 = parse(&html).unwrap();
-        assert_eq!(doc2.root().text_content(), "1 < 2 & 3 > 0");
+        if cfg!(feature = "entity-decode") {
+            assert_eq!(doc1.root().text_content(), "1 < 2 & 3 > 0");
+            let doc2 = parse(&html).unwrap();
+            assert_eq!(doc2.root().text_content(), "1 < 2 & 3 > 0");
+        } else {
+            assert_eq!(doc1.root().text_content(), "1 &lt; 2 &amp; 3 &gt; 0");
+            assert!(html.contains("1 &amp;lt; 2 &amp;amp; 3 &amp;gt; 0"));
+        }
     }
 
     #[test]

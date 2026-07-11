@@ -162,7 +162,7 @@ fn well_formed_full_document() {
     assert!(tag_names.contains(&"div"));
     assert!(tag_names.contains(&"p"));
 
-    // Should have decoded entity in text.
+    // Entity decoding follows the feature flag.
     let text_tokens: Vec<&str> = tokens
         .iter()
         .filter_map(|t| match t {
@@ -170,8 +170,13 @@ fn well_formed_full_document() {
             _ => None,
         })
         .collect();
+    let expected = if cfg!(feature = "entity-decode") {
+        "Hello & world"
+    } else {
+        "Hello &amp; world"
+    };
     assert!(
-        text_tokens.iter().any(|t| t.contains("Hello & world")),
+        text_tokens.iter().any(|t| t.contains(expected)),
         "text: {text_tokens:?}"
     );
 }
@@ -492,6 +497,101 @@ fn raw_text_close_like_sequences_are_preserved() {
 }
 
 #[test]
+fn rcdata_treats_markup_as_text_and_decodes_entities() {
+    for (tag, expected_tag) in [("textarea", Tag::Textarea), ("title", Tag::Title)] {
+        let html = format!("<{tag}>a <b>not markup</b> &amp;</{tag}>");
+        let tokens = tokenize(&html);
+
+        let expected = if cfg!(feature = "entity-decode") {
+            "a <b>not markup</b> &"
+        } else {
+            "a <b>not markup</b> &amp;"
+        };
+        assert_eq!(text_content(&tokens), expected);
+        assert_eq!(
+            tokens
+                .iter()
+                .filter(|token| matches!(token, Token::OpenTag { .. }))
+                .count(),
+            1,
+            "tokens={tokens:?}"
+        );
+        assert!(
+            tokens
+                .iter()
+                .any(|token| matches!(token, Token::OpenTag { tag, .. } if *tag == expected_tag))
+        );
+    }
+}
+
+#[test]
+fn iframe_content_is_raw_text() {
+    let tokens = tokenize("<iframe><b>not markup</b> &amp;</iframe>");
+
+    assert_eq!(text_content(&tokens), "<b>not markup</b> &amp;");
+    assert_eq!(open_tag_names(&tokens), ["iframe"]);
+    assert_eq!(close_tag_names(&tokens), ["iframe"]);
+}
+
+#[test]
+fn raw_text_and_rcdata_end_tags_accept_a_trailing_solidus() {
+    for (tag, expected_tag) in [
+        ("script", Tag::Script),
+        ("title", Tag::Title),
+        ("textarea", Tag::Textarea),
+    ] {
+        let html = format!("<{tag}>x</{tag}/><img src=x>");
+        let tokens = tokenize(&html);
+        let streamed = collect_streaming(html.as_bytes(), 1);
+
+        for result in [&tokens[..], &streamed[..]] {
+            assert!(
+                result.iter().any(
+                    |token| matches!(token, Token::CloseTag { tag, .. } if *tag == expected_tag)
+                )
+            );
+            assert!(
+                result
+                    .iter()
+                    .any(|token| matches!(token, Token::OpenTag { tag: Tag::Img, .. }))
+            );
+            assert_eq!(text_content(result), "x");
+        }
+    }
+}
+
+#[test]
+fn self_closing_text_elements_do_not_capture_following_markup() {
+    for tag in ["script", "title", "textarea"] {
+        let html = format!("<{tag}/>a<b>y</b><p>z</p>");
+        let one_shot = tokenize(&html);
+        let streamed = collect_streaming(html.as_bytes(), 1);
+
+        for result in [&one_shot[..], &streamed[..]] {
+            let opens = open_tag_names(result);
+            assert!(opens.contains(&"b"), "tag={tag}, tokens={result:?}");
+            assert!(opens.contains(&"p"), "tag={tag}, tokens={result:?}");
+            assert_eq!(text_content(result), "ayz");
+        }
+    }
+}
+
+#[test]
+fn quoted_doctype_identifier_does_not_end_at_inner_gt() {
+    let tokens = tokenize("<!DOCTYPE html SYSTEM \"a>b\"><p>x</p>");
+    let doctypes: Vec<_> = tokens
+        .iter()
+        .filter_map(|token| match token {
+            Token::Doctype { content } => Some(content.as_ref()),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(doctypes, ["html SYSTEM \"a>b\""]);
+    assert_eq!(text_content(&tokens), "x");
+}
+
+#[test]
 fn attribute_value_presence_cases() {
     let tokens = tokenize("<input value=\"\" disabled data-empty=''>");
     let attrs = match &tokens[0] {
@@ -633,7 +733,12 @@ fn entity_only() {
     assert_eq!(tokens.len(), 1);
     match &tokens[0] {
         Token::Text { content } => {
-            assert_eq!(content.as_ref(), "&<>");
+            let expected = if cfg!(feature = "entity-decode") {
+                "&<>"
+            } else {
+                "&amp;&lt;&gt;"
+            };
+            assert_eq!(content.as_ref(), expected);
         }
         other => panic!("expected Text, got {other:?}"),
     }
@@ -747,12 +852,10 @@ fn long_input_over_1000_bytes() {
 #[test]
 fn cdata_wellformed_extracts_content() {
     let tokens = tokenize("<![CDATA[hello]]>");
-    let found = tokens
-        .iter()
-        .find_map(|t| match t {
-            Token::CData { content } => Some(content.as_ref()),
-            _ => None,
-        });
+    let found = tokens.iter().find_map(|t| match t {
+        Token::CData { content } => Some(content.as_ref()),
+        _ => None,
+    });
     assert_eq!(found, Some("hello"));
 }
 
@@ -760,12 +863,10 @@ fn cdata_wellformed_extracts_content() {
 fn cdata_wellformed_multibyte_content() {
     // A multibyte char inside a real CDATA section must round-trip intact.
     let tokens = tokenize("<![CDATA[a\u{20ac}b]]>");
-    let found = tokens
-        .iter()
-        .find_map(|t| match t {
-            Token::CData { content } => Some(content.as_ref()),
-            _ => None,
-        });
+    let found = tokens.iter().find_map(|t| match t {
+        Token::CData { content } => Some(content.as_ref()),
+        _ => None,
+    });
     assert_eq!(found, Some("a\u{20ac}b"));
 }
 

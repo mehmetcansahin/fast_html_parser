@@ -1,5 +1,7 @@
 //! Integration tests for streaming, early-stop, and async parsing.
 
+#![cfg(feature = "encoding")]
+
 use fhp_core::tag::Tag;
 use fhp_tree::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
 use fhp_tree::{parse, parse_bytes};

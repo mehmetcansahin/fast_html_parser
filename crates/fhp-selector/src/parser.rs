@@ -309,10 +309,26 @@ impl<'a> Parser<'a> {
                     parts.push(self.parse_pseudo()?);
                 }
                 Some(b'*') => {
+                    if !parts.is_empty() {
+                        return Err(SelectorError::Invalid {
+                            reason: format!(
+                                "type or universal selector must be first at position {}",
+                                self.pos
+                            ),
+                        });
+                    }
                     self.advance();
                     parts.push(SimpleSelector::Universal);
                 }
                 Some(b) if b.is_ascii_alphabetic() || b == b'_' => {
+                    if !parts.is_empty() {
+                        return Err(SelectorError::Invalid {
+                            reason: format!(
+                                "type or universal selector must be first at position {}",
+                                self.pos
+                            ),
+                        });
+                    }
                     let name = self.read_ident()?;
                     let tag = Tag::from_bytes(name.as_bytes());
                     if tag == Tag::Unknown {
@@ -437,7 +453,7 @@ impl<'a> Parser<'a> {
         }
 
         // Parse an+b
-        let mut sign: i32 = 1;
+        let mut sign: i64 = 1;
         if self.peek() == Some(b'-') {
             sign = -1;
             self.advance();
@@ -453,9 +469,14 @@ impl<'a> Parser<'a> {
         let has_number = self.pos > num_start;
         let number = if has_number {
             let s = std::str::from_utf8(&self.input[num_start..self.pos]).unwrap();
-            sign * s.parse::<i32>().unwrap_or(0)
+            let magnitude = s.parse::<i64>().map_err(|_| SelectorError::Invalid {
+                reason: "integer in :nth-child is out of range".to_string(),
+            })?;
+            i32::try_from(sign * magnitude).map_err(|_| SelectorError::Invalid {
+                reason: "integer in :nth-child is out of range".to_string(),
+            })?
         } else {
-            sign // implicit 1 or -1 before n
+            sign as i32 // implicit 1 or -1 before n
         };
 
         if self.peek() == Some(b'n') || self.peek() == Some(b'N') {
@@ -467,12 +488,12 @@ impl<'a> Parser<'a> {
                 Some(b'+') => {
                     self.advance();
                     self.skip_whitespace();
-                    self.read_int()?
+                    self.read_int(1)?
                 }
                 Some(b'-') => {
                     self.advance();
                     self.skip_whitespace();
-                    -self.read_int()?
+                    self.read_int(-1)?
                 }
                 _ => 0,
             };
@@ -488,8 +509,8 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Read a positive integer.
-    fn read_int(&mut self) -> Result<i32, SelectorError> {
+    /// Read an integer magnitude and apply `sign` before the i32 range check.
+    fn read_int(&mut self, sign: i64) -> Result<i32, SelectorError> {
         let start = self.pos;
         while self.pos < self.input.len() && self.input[self.pos].is_ascii_digit() {
             self.pos += 1;
@@ -500,7 +521,12 @@ impl<'a> Parser<'a> {
             });
         }
         let s = std::str::from_utf8(&self.input[start..self.pos]).unwrap();
-        Ok(s.parse::<i32>().unwrap_or(0))
+        let magnitude = s.parse::<i64>().map_err(|_| SelectorError::Invalid {
+            reason: "integer in :nth-child is out of range".to_string(),
+        })?;
+        i32::try_from(sign * magnitude).map_err(|_| SelectorError::Invalid {
+            reason: "integer in :nth-child is out of range".to_string(),
+        })
     }
 
     /// Check if the current position starts with a keyword (case-insensitive).

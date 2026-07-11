@@ -6,7 +6,7 @@
 
 use std::io::{self, Read};
 
-use encoding_rs::{Decoder, Encoding};
+use encoding_rs::{CoderResult, Decoder, Encoding};
 
 /// A streaming decoder that wraps a byte source and produces UTF-8 output.
 ///
@@ -40,6 +40,8 @@ pub struct DecodingReader<R> {
     decoded_len: usize,
     /// Whether the inner reader has reached EOF.
     eof: bool,
+    /// Whether the decoder accepted the final input and must not be called again.
+    finished: bool,
 }
 
 /// Default chunk size for reading from the inner source (8 KB).
@@ -57,6 +59,7 @@ impl<R: Read> DecodingReader<R> {
             decoded_pos: 0,
             decoded_len: 0,
             eof: false,
+            finished: false,
         }
     }
 
@@ -71,6 +74,10 @@ impl<R: Read> DecodingReader<R> {
         self.decoded_pos = 0;
         self.decoded_len = 0;
 
+        if self.finished {
+            return Ok(());
+        }
+
         // Decode buffered bytes, reading more whenever a pass produces no
         // output. A single pass can yield zero bytes when the only buffered
         // bytes are an incomplete multi-byte sequence straddling a read
@@ -78,7 +85,7 @@ impl<R: Read> DecodingReader<R> {
         // that case we must read more from `inner` and decode again rather than
         // reporting a premature EOF.
         loop {
-            let (_result, read, written, _had_errors) = self.decoder.decode_to_utf8(
+            let (result, read, written, _had_errors) = self.decoder.decode_to_utf8(
                 &self.raw_buf[..self.raw_len],
                 &mut self.decoded_buf,
                 self.eof,
@@ -93,13 +100,17 @@ impl<R: Read> DecodingReader<R> {
                 self.raw_len = 0;
             }
 
+            if self.eof && result == CoderResult::InputEmpty {
+                self.finished = true;
+            }
+
             if written > 0 {
                 self.decoded_len = written;
                 return Ok(());
             }
 
             // No output this pass. If the input is exhausted, we are done.
-            if self.eof {
+            if self.finished {
                 return Ok(());
             }
 
@@ -244,5 +255,32 @@ mod tests {
             .read_to_string(&mut out)
             .unwrap();
         assert_eq!(out, text);
+    }
+
+    #[test]
+    fn stream_malformed_utf8_at_eof_is_replaced_once() {
+        let data: &[u8] = &[0xFF];
+        let mut reader = DecodingReader::new(data, encoding_rs::UTF_8);
+        let mut output = String::new();
+
+        reader.read_to_string(&mut output).unwrap();
+
+        assert_eq!(output, "\u{FFFD}");
+        let mut byte = [0u8; 1];
+        assert_eq!(reader.read(&mut byte).unwrap(), 0);
+        assert_eq!(reader.read(&mut byte).unwrap(), 0);
+    }
+
+    #[test]
+    fn stream_truncated_utf8_at_eof_is_replaced_once() {
+        let data: &[u8] = &[0xE2, 0x82];
+        let mut reader = DecodingReader::new(data, encoding_rs::UTF_8);
+        let mut output = String::new();
+
+        reader.read_to_string(&mut output).unwrap();
+
+        assert_eq!(output, "\u{FFFD}");
+        let mut byte = [0u8; 1];
+        assert_eq!(reader.read(&mut byte).unwrap(), 0);
     }
 }

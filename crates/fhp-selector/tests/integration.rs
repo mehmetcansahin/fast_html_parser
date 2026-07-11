@@ -596,7 +596,7 @@ fn xpath_text_nested() {
     match result {
         XPathResult::Strings(texts) => {
             assert_eq!(texts.len(), 1);
-            assert_eq!(texts[0], "bold text");
+            assert_eq!(texts[0], " text");
         }
         _ => panic!("expected Strings"),
     }

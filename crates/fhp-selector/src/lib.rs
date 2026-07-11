@@ -74,7 +74,7 @@ use fhp_tree::{Document, NodeRef};
 
 use matcher::{select_all_list, select_first_list};
 use parser::parse_selector;
-use xpath::ast::XPathResult;
+use xpath::ast::{XPathExpr, XPathResult};
 
 #[inline]
 fn is_document_element(n: &fhp_tree::node::Node) -> bool {
@@ -326,6 +326,28 @@ impl<'a> Selection<'a> {
     /// for a document-wide query, evaluate from the document root instead.
     pub fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError> {
         let parsed = xpath::parser::parse_xpath(expr)?;
+
+        if matches!(parsed, XPathExpr::TextExtract(_)) {
+            let mut text_nodes = Vec::new();
+            let mut seen = std::collections::HashSet::new();
+            for &node_id in &self.nodes {
+                for text_node in
+                    xpath::eval::evaluate_text_nodes(&parsed, self.doc.arena(), node_id)
+                        .unwrap_or_default()
+                {
+                    if seen.insert(text_node) {
+                        text_nodes.push(text_node);
+                    }
+                }
+            }
+            return Ok(XPathResult::Strings(
+                text_nodes
+                    .into_iter()
+                    .map(|id| self.doc.arena().text(id).to_owned())
+                    .collect(),
+            ));
+        }
+
         let mut all_nodes = Vec::new();
         let mut all_strings = Vec::new();
         let mut seen = std::collections::HashSet::new();
@@ -627,11 +649,7 @@ impl<'a> DocumentIndex<'a> {
                 let attr_name = arena.attr_name(attr);
                 if attr_name.eq_ignore_ascii_case("id") {
                     if let Some(val) = arena.attr_value(attr) {
-                        if let Some(existing) = id_map.get_mut(val) {
-                            *existing = node_id;
-                        } else {
-                            id_map.insert(val.to_owned(), node_id);
-                        }
+                        id_map.entry(val.to_owned()).or_insert(node_id);
                     }
                 }
                 if attr_name.eq_ignore_ascii_case("class") {

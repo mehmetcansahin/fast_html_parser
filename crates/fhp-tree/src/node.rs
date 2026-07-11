@@ -110,7 +110,7 @@ impl NodeFlags {
 /// | 24     | 4     | `text_offset` |
 /// | 28     | 4     | `text_len` |
 /// | 32     | 4     | `attr_offset` |
-/// | 36     | 4     | `attr_raw_offset` |
+/// | 36     | 4     | `attr_raw_offset` (full element sibling index) |
 /// | 40     | 8     | `class_hash` |
 /// | 48     | 4     | `id_hash` |
 /// | 52     | 2     | `attr_raw_len` |
@@ -146,8 +146,11 @@ pub struct Node {
     // u32s first, then u16s, then byte-array padding.
     /// Byte offset into the attribute slab.
     pub attr_offset: u32,
-    /// Reserved (formerly the raw attribute region offset for lazy parsing,
-    /// which was removed). Kept to preserve the 64-byte layout.
+    /// Full 1-based index among element siblings.
+    ///
+    /// This compatibility slot formerly stored the raw attribute offset. It
+    /// now backs selectors beyond the compact [`Self::element_index`] range
+    /// without changing the 64-byte node layout.
     pub attr_raw_offset: u32,
     /// 64-bit bloom filter of class attribute tokens.
     ///
@@ -164,7 +167,9 @@ pub struct Node {
     /// Reserved (formerly the raw attribute region length for lazy parsing,
     /// which was removed). Kept to preserve the 64-byte layout.
     pub attr_raw_len: u16,
-    /// 1-based index among element siblings (0 = not computed or text node).
+    /// Compact 1-based index among element siblings, saturated at `u16::MAX`
+    /// (0 = not computed or text node). Use `attr_raw_offset` for the full
+    /// value.
     pub element_index: u16,
     /// Number of attributes.
     pub attr_count: u16,

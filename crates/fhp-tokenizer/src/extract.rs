@@ -27,9 +27,13 @@ fn maybe_decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
 
 /// Extract tokens from pre-indexed UTF-8 input.
 ///
-/// `input` must be the same text that was passed to
-/// [`StructuralIndexer::index`](crate::structural::StructuralIndexer::index)
-/// as bytes.
+/// `input` must have the same length and structural delimiters as the bytes
+/// passed to [`StructuralIndexer::index`](crate::structural::StructuralIndexer::index).
+/// Each recorded delimiter is validated before that indexed position is used.
+///
+/// # Panics
+///
+/// Panics if the index length or a recorded delimiter does not match `input`.
 ///
 /// # Example
 ///
@@ -44,10 +48,22 @@ fn maybe_decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
 /// assert!(tokens.len() >= 3); // OpenTag, Text, CloseTag
 /// ```
 pub fn extract_tokens<'a>(input: &'a str, index: &StructuralIndex) -> Vec<Token<'a>> {
+    assert_eq!(
+        input.len(),
+        index.input_len(),
+        "structural index does not match input: input length differs"
+    );
+
     let mut tokens = Vec::with_capacity(index.estimated_token_count());
     let mut parser = Parser::new(input);
 
     for delim in index.iter_delimiters() {
+        assert_eq!(
+            input.as_bytes().get(delim.pos).copied(),
+            Some(delim.byte),
+            "structural index does not match input: delimiter differs at byte {}",
+            delim.pos
+        );
         parser.on_delimiter(delim.pos, delim.byte, &mut tokens);
     }
 
@@ -58,6 +74,10 @@ pub fn extract_tokens<'a>(input: &'a str, index: &StructuralIndex) -> Vec<Token<
 }
 
 /// Extract tokens from pre-indexed raw bytes after UTF-8 validation.
+///
+/// # Panics
+///
+/// Panics if the index length or a recorded delimiter does not match `input`.
 pub fn extract_tokens_bytes<'a>(
     input: &'a [u8],
     index: &StructuralIndex,
@@ -79,8 +99,10 @@ enum Mode {
     InDoctype,
     /// Inside a CDATA section (`<![CDATA[ ... ]]>`).
     InCData,
-    /// Inside raw text element (script/style).
+    /// Inside a raw text element (script/style/iframe).
     InRawText,
+    /// Inside an RCDATA element (title/textarea).
+    InRcData,
 }
 
 /// Direct input parser driven by structural delimiter positions.
@@ -156,7 +178,7 @@ impl<'a> Parser<'a> {
             Mode::InComment => self.on_in_comment_impl(pos, byte, emit),
             Mode::InDoctype => self.on_in_doctype_impl(pos, byte, emit),
             Mode::InCData => self.on_in_cdata_impl(pos, byte, emit),
-            Mode::InRawText => self.on_in_raw_text_impl(pos, byte, emit),
+            Mode::InRawText | Mode::InRcData => self.on_in_raw_text_impl(pos, byte, emit),
         }
     }
 
@@ -210,8 +232,8 @@ impl<'a> Parser<'a> {
                 // Parse the tag content between `<` and `>`.
                 self.parse_tag_impl(self.tag_open_pos, pos, emit);
                 self.cursor = pos + 1;
-                // parse_tag may have set InRawText for script/style — don't override.
-                if self.mode != Mode::InRawText {
+                // parse_tag may have entered a text-element mode — don't override.
+                if !matches!(self.mode, Mode::InRawText | Mode::InRcData) {
                     self.mode = Mode::Data;
                 }
             }
@@ -243,9 +265,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// In doctype mode: `>` closes it.
+    /// In doctype mode: an unquoted `>` closes it.
     fn on_in_doctype_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        if byte == b'>' {
+        if matches!(byte, b'"' | b'\'') {
+            self.update_attr_quote(byte);
+            return;
+        }
+        if byte == b'>' && self.attr_quote.is_none() {
             // Content between `<!` and `>`.
             let inner_start = self.special_open_pos + 2; // after `<!`
             let content = self.str_slice(inner_start, pos).trim();
@@ -283,11 +309,14 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// In raw text mode: only look for `</script>` or `</style>`.
+    /// In raw text/RCDATA mode, only the matching end tag is markup.
     fn on_in_raw_text_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
         if byte == b'<' && self.is_raw_text_close(pos) {
-            // Flush raw text content.
-            self.flush_text_raw_impl(pos, emit);
+            if self.mode == Mode::InRcData {
+                self.flush_text_impl(pos, emit);
+            } else {
+                self.flush_text_raw_impl(pos, emit);
+            }
             self.tag_open_pos = pos;
             self.attr_quote = None;
             self.mode = Mode::InTag;
@@ -308,7 +337,7 @@ impl<'a> Parser<'a> {
         if first == b'/' {
             pos += 1;
             let name_start = pos;
-            while pos < close && !is_whitespace(self.input[pos]) {
+            while pos < close && !is_whitespace(self.input[pos]) && self.input[pos] != b'/' {
                 pos += 1;
             }
             let name = self.str_slice(name_start, pos);
@@ -352,9 +381,12 @@ impl<'a> Parser<'a> {
             self_closing,
         });
 
-        // Enter raw text mode for script/style.
-        if tag.is_raw_text() {
+        // Enter the appropriate text-element mode.
+        if !self_closing && tag.is_raw_text() {
             self.mode = Mode::InRawText;
+            self.raw_text_tag = tag;
+        } else if !self_closing && tag.is_rcdata() {
+            self.mode = Mode::InRcData;
             self.raw_text_tag = tag;
         }
     }
@@ -500,7 +532,7 @@ impl<'a> Parser<'a> {
             Mode::InComment => self.on_in_comment_sink(pos, byte, sink),
             Mode::InDoctype => self.on_in_doctype_sink(pos, byte, sink),
             Mode::InCData => self.on_in_cdata_sink(pos, byte, sink),
-            Mode::InRawText => self.on_in_raw_text_sink(pos, byte, sink),
+            Mode::InRawText | Mode::InRcData => self.on_in_raw_text_sink(pos, byte, sink),
         }
     }
 
@@ -547,7 +579,7 @@ impl<'a> Parser<'a> {
             b'>' if self.attr_quote.is_none() => {
                 self.parse_tag_sink(self.tag_open_pos, pos, sink);
                 self.cursor = pos + 1;
-                if self.mode != Mode::InRawText {
+                if !matches!(self.mode, Mode::InRawText | Mode::InRcData) {
                     self.mode = Mode::Data;
                 }
             }
@@ -571,9 +603,13 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// In doctype mode (sink): `>` closes it.
+    /// In doctype mode (sink): an unquoted `>` closes it.
     fn on_in_doctype_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        if byte == b'>' {
+        if matches!(byte, b'"' | b'\'') {
+            self.update_attr_quote(byte);
+            return;
+        }
+        if byte == b'>' && self.attr_quote.is_none() {
             let inner_start = self.special_open_pos + 2;
             let content = self.str_slice(inner_start, pos).trim();
             let content =
@@ -604,7 +640,7 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// In raw text mode (sink): only look for `</script>` or `</style>`.
+    /// In raw text/RCDATA mode (sink), only the matching end tag is markup.
     fn on_in_raw_text_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
         if byte == b'<' && self.is_raw_text_close(pos) {
             self.flush_text_sink(pos, sink);
@@ -630,7 +666,7 @@ impl<'a> Parser<'a> {
         if first == b'/' {
             pos += 1;
             let name_start = pos;
-            while pos < close && !is_whitespace(self.input[pos]) {
+            while pos < close && !is_whitespace(self.input[pos]) && self.input[pos] != b'/' {
                 pos += 1;
             }
             let name = self.str_slice(name_start, pos);
@@ -660,9 +696,12 @@ impl<'a> Parser<'a> {
 
         sink.open_tag(tag, name, attr_raw, self_closing);
 
-        // Enter raw text mode for script/style.
-        if tag.is_raw_text() {
+        // Enter the appropriate text-element mode.
+        if !self_closing && tag.is_raw_text() {
             self.mode = Mode::InRawText;
+            self.raw_text_tag = tag;
+        } else if !self_closing && tag.is_rcdata() {
+            self.mode = Mode::InRcData;
             self.raw_text_tag = tag;
         }
     }
@@ -726,7 +765,7 @@ impl<'a> Parser<'a> {
             return false;
         }
         let after = remaining[2 + name_len];
-        after == b'>' || is_whitespace(after)
+        after == b'>' || after == b'/' || is_whitespace(after)
     }
 
     /// Peek at a byte in the input, returning `None` if out of bounds.
@@ -755,19 +794,16 @@ impl<'a> Parser<'a> {
         if start >= end || end > self.input.len() {
             return "";
         }
-        debug_assert!(self.input_str.is_char_boundary(start));
-        debug_assert!(self.input_str.is_char_boundary(end));
-        // SAFETY: `start/end` are derived from ASCII delimiter boundaries
-        // and parser cursor positions, which are UTF-8 char boundaries for
-        // a validated `&str` input.
-        unsafe { self.input_str.get_unchecked(start..end) }
+        self.input_str
+            .get(start..end)
+            .expect("tokenizer produced a range outside UTF-8 character boundaries")
     }
 }
 
 /// Check if a byte is ASCII whitespace.
 #[inline(always)]
 fn is_whitespace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+    matches!(b, b' ' | b'\t' | b'\n' | 0x0C | b'\r')
 }
 
 #[inline(always)]
@@ -888,11 +924,43 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "structural index does not match input")]
+    fn rejects_structural_index_from_different_input() {
+        let indexer = StructuralIndexer::new();
+        let index = indexer.index(b"<div>");
+
+        let _ = extract_tokens("xxxxx", &index);
+    }
+
+    #[test]
+    #[should_panic(expected = "structural index does not match input")]
+    fn rejects_structural_index_with_different_length() {
+        let indexer = StructuralIndexer::new();
+        let index = indexer.index(b"<div>");
+
+        let _ = extract_tokens("<div></div>", &index);
+    }
+
+    #[test]
+    #[should_panic(expected = "structural index does not match input")]
+    fn bytes_reject_structural_index_from_different_input() {
+        let indexer = StructuralIndexer::new();
+        let index = indexer.index(b"<div>");
+
+        let _ = extract_tokens_bytes(b"xxxxx", &index);
+    }
+
+    #[test]
     fn entity_in_text() {
         let tokens = tokenize("a &amp; b");
         match &tokens[0] {
             Token::Text { content } => {
-                assert_eq!(content.as_ref(), "a & b");
+                let expected = if cfg!(feature = "entity-decode") {
+                    "a & b"
+                } else {
+                    "a &amp; b"
+                };
+                assert_eq!(content.as_ref(), expected);
             }
             other => panic!("expected Text, got {other:?}"),
         }
@@ -937,7 +1005,12 @@ mod tests {
         match &tokens[0] {
             Token::OpenTag { attributes, .. } => {
                 assert_eq!(attributes.len(), 1);
-                assert_eq!(attributes[0].value.as_deref(), Some("a & b"));
+                let expected = if cfg!(feature = "entity-decode") {
+                    "a & b"
+                } else {
+                    "a &amp; b"
+                };
+                assert_eq!(attributes[0].value.as_deref(), Some(expected));
             }
             other => panic!("expected OpenTag, got {other:?}"),
         }

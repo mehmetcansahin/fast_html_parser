@@ -91,7 +91,7 @@ pub unsafe fn classify_bytes(input: &[u8]) -> Vec<u8> {
         while offset + 16 <= len {
             let chunk = vld1q_u8(ptr.add(offset));
 
-            // Whitespace: space, tab, newline, CR.
+            // HTML whitespace: space, tab, newline, form feed, CR.
             let ws_mask = vorrq_u8(
                 vorrq_u8(
                     vceqq_u8(chunk, vdupq_n_u8(b' ')),
@@ -99,7 +99,10 @@ pub unsafe fn classify_bytes(input: &[u8]) -> Vec<u8> {
                 ),
                 vorrq_u8(
                     vceqq_u8(chunk, vdupq_n_u8(b'\n')),
-                    vceqq_u8(chunk, vdupq_n_u8(b'\r')),
+                    vorrq_u8(
+                        vceqq_u8(chunk, vdupq_n_u8(b'\x0C')),
+                        vceqq_u8(chunk, vdupq_n_u8(b'\r')),
+                    ),
                 ),
             );
 
@@ -183,7 +186,10 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
                 ),
                 vorrq_u8(
                     vceqq_u8(chunk, vdupq_n_u8(b'\n')),
-                    vceqq_u8(chunk, vdupq_n_u8(b'\r')),
+                    vorrq_u8(
+                        vceqq_u8(chunk, vdupq_n_u8(b'\x0C')),
+                        vceqq_u8(chunk, vdupq_n_u8(b'\r')),
+                    ),
                 ),
             );
 
@@ -478,6 +484,23 @@ mod tests {
                 scalar_result,
                 "mismatch for input {:?}",
                 std::str::from_utf8(input)
+            );
+        }
+    }
+
+    #[test]
+    fn skip_whitespace_matches_scalar_at_every_short_length() {
+        const HTML_WHITESPACE: &[u8] = b" \t\n\r\x0C";
+
+        for len in 0..=128 {
+            let mut input = Vec::with_capacity(len + 1);
+            input.extend((0..len).map(|index| HTML_WHITESPACE[index % HTML_WHITESPACE.len()]));
+            input.push(b'X');
+
+            assert_eq!(
+                unsafe { skip_whitespace(&input) },
+                crate::scalar::skip_whitespace_safe(&input),
+                "mismatch at whitespace length {len}"
             );
         }
     }

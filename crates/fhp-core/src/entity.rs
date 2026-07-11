@@ -22,9 +22,10 @@ pub fn decode_named(name: &str) -> Option<&'static str> {
 /// Accepts the digits **without** `&#`, `&#x`, or the trailing `;`.
 /// `is_hex` indicates whether the reference uses hexadecimal.
 ///
-/// Returns `None` if the codepoint is not a valid Unicode scalar value
-/// or is a disallowed control character (per the HTML spec, U+0000 is
-/// replaced with U+FFFD).
+/// Applies HTML's numeric-reference corrections: null, surrogate, out-of-range,
+/// and overflowing values become U+FFFD, while C1 controls use the Windows-1252
+/// replacement table. Returns `None` only when `digits` is empty or contains a
+/// digit that is invalid for the selected radix.
 ///
 /// # Examples
 ///
@@ -36,15 +37,62 @@ pub fn decode_named(name: &str) -> Option<&'static str> {
 /// assert_eq!(decode_numeric("0", false), Some('\u{FFFD}'));
 /// ```
 pub fn decode_numeric(digits: &str, is_hex: bool) -> Option<char> {
-    let codepoint = if is_hex {
-        u32::from_str_radix(digits, 16).ok()?
-    } else {
-        digits.parse::<u32>().ok()?
-    };
+    if digits.is_empty() {
+        return None;
+    }
 
-    if codepoint == 0 {
+    let radix = if is_hex { 16 } else { 10 };
+    let mut codepoint = 0u32;
+    for byte in digits.bytes() {
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' if is_hex => u32::from(byte - b'a') + 10,
+            b'A'..=b'F' if is_hex => u32::from(byte - b'A') + 10,
+            _ => return None,
+        };
+        codepoint = match codepoint
+            .checked_mul(radix)
+            .and_then(|value| value.checked_add(digit))
+        {
+            Some(value) => value,
+            None => return Some('\u{FFFD}'),
+        };
+    }
+
+    if codepoint == 0 || codepoint > 0x10_FFFF || (0xD800..=0xDFFF).contains(&codepoint) {
         return Some('\u{FFFD}');
     }
+
+    let codepoint = match codepoint {
+        0x80 => 0x20AC,
+        0x82 => 0x201A,
+        0x83 => 0x0192,
+        0x84 => 0x201E,
+        0x85 => 0x2026,
+        0x86 => 0x2020,
+        0x87 => 0x2021,
+        0x88 => 0x02C6,
+        0x89 => 0x2030,
+        0x8A => 0x0160,
+        0x8B => 0x2039,
+        0x8C => 0x0152,
+        0x8E => 0x017D,
+        0x91 => 0x2018,
+        0x92 => 0x2019,
+        0x93 => 0x201C,
+        0x94 => 0x201D,
+        0x95 => 0x2022,
+        0x96 => 0x2013,
+        0x97 => 0x2014,
+        0x98 => 0x02DC,
+        0x99 => 0x2122,
+        0x9A => 0x0161,
+        0x9B => 0x203A,
+        0x9C => 0x0153,
+        0x9E => 0x017E,
+        0x9F => 0x0178,
+        _ => codepoint,
+    };
 
     char::from_u32(codepoint)
 }
@@ -424,9 +472,27 @@ mod tests {
 
     #[test]
     fn numeric_invalid() {
-        assert_eq!(decode_numeric("FFFFFF", true), None); // > U+10FFFF
+        assert_eq!(decode_numeric("FFFFFF", true), Some('\u{FFFD}'));
+        assert_eq!(decode_numeric("D800", true), Some('\u{FFFD}'));
+        assert_eq!(
+            decode_numeric("999999999999999999999999", false),
+            Some('\u{FFFD}')
+        );
         assert_eq!(decode_numeric("abc", false), None); // not decimal
         assert_eq!(decode_numeric("", false), None);
+    }
+
+    #[test]
+    fn numeric_c1_controls_use_html_replacements() {
+        assert_eq!(decode_numeric("128", false), Some('\u{20AC}'));
+        assert_eq!(decode_numeric("82", true), Some('\u{201A}'));
+        assert_eq!(decode_numeric("9F", true), Some('\u{0178}'));
+        assert_eq!(decode_numeric("81", true), Some('\u{0081}'));
+    }
+
+    #[test]
+    fn numeric_noncharacters_are_preserved() {
+        assert_eq!(decode_numeric("FDD0", true), Some('\u{FDD0}'));
     }
 
     #[test]

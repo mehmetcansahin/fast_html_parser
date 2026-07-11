@@ -408,7 +408,17 @@ impl Arena {
     /// Called by [`TreeBuilder`](crate::builder::TreeBuilder) after appending an element child.
     #[inline]
     pub fn set_element_index(&mut self, node: NodeId, index: u16) {
-        self.nodes[node.index()].element_index = index;
+        let target = &mut self.nodes[node.index()];
+        target.attr_raw_offset = u32::from(index);
+        target.element_index = index;
+    }
+
+    /// Set the full sibling index while maintaining the compact public field.
+    #[inline]
+    pub(crate) fn set_full_element_index(&mut self, node: NodeId, index: u32) {
+        let target = &mut self.nodes[node.index()];
+        target.attr_raw_offset = index;
+        target.element_index = index.min(u32::from(u16::MAX)) as u16;
     }
 
     /// Set the self-closing flag on a node.
@@ -421,51 +431,89 @@ impl Arena {
     /// Append `child` as the last child of `parent`.
     ///
     /// Updates all tree links: parent, first_child, last_child, prev_sibling,
-    /// next_sibling. Uses unchecked indexing since NodeIds are always valid
-    /// indices created by this arena.
+    /// next_sibling.
     ///
     /// `child` must be a freshly allocated, not-yet-linked node, distinct from
-    /// `parent` (and therefore from `parent`'s current last child). Internal
-    /// callers always satisfy this; the debug assertions below catch misuse.
+    /// `parent` (and therefore from `parent`'s current last child).
+    ///
+    /// # Panics
+    ///
+    /// Panics if either id is out of bounds, both ids refer to the same node,
+    /// `child` is already linked, or the parent's existing child links are
+    /// inconsistent.
     pub fn append_child(&mut self, parent: NodeId, child: NodeId) {
-        debug_assert!(
-            parent != child,
-            "append_child: parent and child must be distinct nodes (aliasing &mut)"
+        let parent_index = parent.index();
+        let child_index = child.index();
+        let node_count = self.nodes.len();
+
+        assert!(
+            parent_index < node_count,
+            "append_child: parent NodeId is out of bounds"
         );
-        let nodes = self.nodes.as_mut_ptr();
-        // SAFETY: parent and child indices were created by this arena via
-        // new_element/new_text/etc., so they are always in bounds. The three
-        // `&mut` references taken below (parent, child, and parent.last_child)
-        // never alias: `parent != child` (asserted), and `last` is a previously
-        // appended child, so it differs from both the pre-existing `parent` and
-        // the freshly allocated `child`.
-        unsafe {
-            let p = &mut *nodes.add(parent.index());
-            let c = &mut *nodes.add(child.index());
-            let last = p.last_child;
-            c.parent = parent;
-            if last.is_null() {
-                p.first_child = child;
-            } else {
-                debug_assert!(
-                    last != parent && last != child,
-                    "append_child: parent.last_child must differ from parent and child"
-                );
-                (*nodes.add(last.index())).next_sibling = child;
-                c.prev_sibling = last;
-            }
-            p.last_child = child;
-            p.flags.set(NodeFlags::HAS_CHILDREN);
+        assert!(
+            child_index < node_count,
+            "append_child: child NodeId is out of bounds"
+        );
+        assert!(
+            parent != child,
+            "append_child: parent and child must be distinct nodes"
+        );
+
+        let child_node = &self.nodes[child_index];
+        assert!(
+            child_node.parent.is_null()
+                && child_node.prev_sibling.is_null()
+                && child_node.next_sibling.is_null(),
+            "append_child: child is already linked"
+        );
+        assert!(
+            child_node.first_child.is_null() && child_node.last_child.is_null(),
+            "append_child: child already owns a subtree"
+        );
+
+        let first = self.nodes[parent_index].first_child;
+        let last = self.nodes[parent_index].last_child;
+        assert_eq!(
+            first.is_null(),
+            last.is_null(),
+            "append_child: parent child links are inconsistent"
+        );
+
+        let last_index = if last.is_null() {
+            None
+        } else {
+            let index = last.index();
+            assert!(
+                index < node_count,
+                "append_child: parent last_child NodeId is out of bounds"
+            );
+            assert!(
+                last != parent && last != child,
+                "append_child: parent last_child aliases parent or child"
+            );
+            let last_node = &self.nodes[index];
+            assert!(
+                last_node.parent == parent && last_node.next_sibling.is_null(),
+                "append_child: parent last_child link is inconsistent"
+            );
+            Some(index)
+        };
+
+        self.nodes[child_index].parent = parent;
+        if let Some(index) = last_index {
+            self.nodes[index].next_sibling = child;
+            self.nodes[child_index].prev_sibling = last;
+        } else {
+            self.nodes[parent_index].first_child = child;
         }
+        self.nodes[parent_index].last_child = child;
+        self.nodes[parent_index].flags.set(NodeFlags::HAS_CHILDREN);
     }
 
     /// Get the name of an attribute.
     #[inline]
     pub fn attr_name(&self, attr: &Attribute) -> &str {
-        let start = attr.name_offset as usize;
-        let end = start + attr.name_len as usize;
-        // SAFETY: attr names are sourced from tokenizer `&str` slices (valid UTF-8).
-        unsafe { std::str::from_utf8_unchecked(&self.attr_str_slab[start..end]) }
+        checked_attr_slice(&self.attr_str_slab, attr.name_offset, attr.name_len)
     }
 
     /// Get the value of an attribute, or `None` for boolean attributes.
@@ -474,10 +522,11 @@ impl Arena {
         if !attr.has_value {
             return None;
         }
-        let start = attr.value_offset as usize;
-        let end = start + attr.value_len as usize;
-        // SAFETY: attr values are sourced from tokenizer `&str` slices (valid UTF-8).
-        Some(unsafe { std::str::from_utf8_unchecked(&self.attr_str_slab[start..end]) })
+        Some(checked_attr_slice(
+            &self.attr_str_slab,
+            attr.value_offset,
+            attr.value_len,
+        ))
     }
 
     /// Get the attributes for a node (read-only, requires prior parse).
@@ -502,14 +551,10 @@ impl Arena {
         if n.text_len == 0 {
             return "";
         }
-        let start = n.text_offset as usize;
-        let end = start + n.text_len as usize;
         if n.flags.has(NodeFlags::IS_TEXT) && n.flags.has(NodeFlags::IS_TEXT_FROM_SOURCE) {
-            // SAFETY: source is a copy of the input &str (valid UTF-8).
-            unsafe { std::str::from_utf8_unchecked(&self.source[start..end]) }
+            checked_text_slice(&self.source, n.text_offset, n.text_len)
         } else {
-            // SAFETY: text slab is always valid UTF-8 (we only write str bytes).
-            unsafe { std::str::from_utf8_unchecked(&self.text_slab[start..end]) }
+            checked_text_slice(&self.text_slab, n.text_offset, n.text_len)
         }
     }
 
@@ -520,10 +565,11 @@ impl Arena {
         if n.tag != Tag::Unknown || n.text_len == 0 {
             return None;
         }
-        let start = n.text_offset as usize;
-        let end = start + n.text_len as usize;
-        // SAFETY: the tag name is sourced from tokenizer `&str` slices.
-        Some(unsafe { std::str::from_utf8_unchecked(&self.text_slab[start..end]) })
+        Some(checked_text_slice(
+            &self.text_slab,
+            n.text_offset,
+            n.text_len,
+        ))
     }
 
     /// Get a reference to a node by id.
@@ -560,13 +606,45 @@ impl Default for Arena {
 /// Check if a byte is ASCII whitespace (for attribute parsing).
 #[inline(always)]
 fn is_attr_whitespace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r')
+    matches!(b, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
 }
 
 /// Check if a byte terminates an attribute name.
 #[inline(always)]
 fn is_attr_name_end(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\r' | b'=' | b'/' | b'>')
+    matches!(
+        b,
+        b' ' | b'\t' | b'\n' | b'\x0C' | b'\r' | b'=' | b'/' | b'>'
+    )
+}
+
+/// Resolve arena-owned text metadata without trusting mutable `Node` fields.
+#[inline]
+fn checked_text_slice(bytes: &[u8], offset: u32, len: u32) -> &str {
+    let start = offset as usize;
+    let end = start
+        .checked_add(len as usize)
+        .expect("arena text range is out of bounds");
+    let slice = bytes
+        .get(start..end)
+        .expect("arena text range is out of bounds");
+    std::str::from_utf8(slice).expect("arena text range is not valid UTF-8")
+}
+
+/// Resolve an attribute's string metadata without assuming it belongs to this
+/// arena. `Attribute` values can be cloned and passed to another arena through
+/// the safe public API, so both the byte range and UTF-8 boundaries must be
+/// checked here.
+#[inline]
+fn checked_attr_slice(bytes: &[u8], offset: u32, len: u32) -> &str {
+    let start = offset as usize;
+    let end = start
+        .checked_add(len as usize)
+        .expect("arena attribute range is out of bounds");
+    let slice = bytes
+        .get(start..end)
+        .expect("arena attribute range is out of bounds");
+    std::str::from_utf8(slice).expect("arena attribute range is not valid UTF-8")
 }
 
 #[cfg(test)]
@@ -631,6 +709,80 @@ mod tests {
     }
 
     #[test]
+    #[should_panic(expected = "append_child: child is already linked")]
+    fn append_child_rejects_relinked_child() {
+        let mut arena = Arena::new();
+        let first_parent = arena.new_element(Tag::Div, 0);
+        let second_parent = arena.new_element(Tag::Section, 0);
+        let child = arena.new_element(Tag::Span, 1);
+
+        arena.append_child(first_parent, child);
+        arena.append_child(second_parent, child);
+    }
+
+    #[test]
+    #[should_panic(expected = "append_child: child already owns a subtree")]
+    fn append_child_rejects_cycle_through_child_subtree() {
+        let mut arena = Arena::new();
+        let ancestor = arena.new_element(Tag::Div, 0);
+        let descendant = arena.new_element(Tag::Span, 1);
+
+        arena.append_child(ancestor, descendant);
+        arena.append_child(descendant, ancestor);
+    }
+
+    #[test]
+    #[should_panic(expected = "append_child: parent and child must be distinct nodes")]
+    fn append_child_rejects_aliasing_ids() {
+        let mut arena = Arena::new();
+        let node = arena.new_element(Tag::Div, 0);
+
+        arena.append_child(node, node);
+    }
+
+    #[test]
+    #[should_panic(expected = "append_child: parent NodeId is out of bounds")]
+    fn append_child_rejects_invalid_parent_id() {
+        let mut arena = Arena::new();
+        let child = arena.new_element(Tag::Span, 0);
+
+        arena.append_child(NodeId(10), child);
+    }
+
+    #[test]
+    #[should_panic(expected = "append_child: child NodeId is out of bounds")]
+    fn append_child_rejects_invalid_child_id() {
+        let mut arena = Arena::new();
+        let parent = arena.new_element(Tag::Div, 0);
+
+        arena.append_child(parent, NodeId(10));
+    }
+
+    #[test]
+    #[should_panic(expected = "arena text range is out of bounds")]
+    fn text_rejects_corrupted_range() {
+        let mut arena = Arena::new();
+        let text = arena.new_text(0, "hello");
+        let node = arena.get_mut(text);
+        node.text_offset = u32::MAX;
+        node.text_len = 1;
+
+        let _ = arena.text(text);
+    }
+
+    #[test]
+    #[should_panic(expected = "arena text range is not valid UTF-8")]
+    fn text_rejects_corrupted_utf8_boundary() {
+        let mut arena = Arena::new();
+        let text = arena.new_text(0, "é");
+        let node = arena.get_mut(text);
+        node.text_offset = 1;
+        node.text_len = 1;
+
+        let _ = arena.text(text);
+    }
+
+    #[test]
     fn attrs_roundtrip() {
         use fhp_tokenizer::token::Attribute as TokAttr;
 
@@ -655,6 +807,64 @@ mod tests {
         assert_eq!(arena.attr_value(&attrs[0]), Some("https://example.com"));
         assert_eq!(arena.attr_name(&attrs[1]), "class");
         assert_eq!(arena.attr_value(&attrs[1]), Some("link"));
+    }
+
+    #[test]
+    #[should_panic(expected = "arena attribute range is not valid UTF-8")]
+    fn attr_name_rejects_attribute_from_another_arena_at_invalid_boundary() {
+        use fhp_tokenizer::token::Attribute as TokAttr;
+
+        let mut source = Arena::new();
+        let source_node = source.new_element(Tag::Div, 0);
+        source.set_attrs(
+            source_node,
+            &[TokAttr {
+                name: Cow::Borrowed("é"),
+                value: None,
+            }],
+        );
+        let foreign_attr = source.attrs(source_node)[0].clone();
+
+        let mut target = Arena::new();
+        let target_node = target.new_element(Tag::Div, 0);
+        target.set_attrs(
+            target_node,
+            &[TokAttr {
+                name: Cow::Borrowed("aé"),
+                value: None,
+            }],
+        );
+
+        let _ = target.attr_name(&foreign_attr);
+    }
+
+    #[test]
+    #[should_panic(expected = "arena attribute range is not valid UTF-8")]
+    fn attr_value_rejects_attribute_from_another_arena_at_invalid_boundary() {
+        use fhp_tokenizer::token::Attribute as TokAttr;
+
+        let mut source = Arena::new();
+        let source_node = source.new_element(Tag::Div, 0);
+        source.set_attrs(
+            source_node,
+            &[TokAttr {
+                name: Cow::Borrowed("x"),
+                value: Some(Cow::Borrowed("é")),
+            }],
+        );
+        let foreign_attr = source.attrs(source_node)[0].clone();
+
+        let mut target = Arena::new();
+        let target_node = target.new_element(Tag::Div, 0);
+        target.set_attrs(
+            target_node,
+            &[TokAttr {
+                name: Cow::Borrowed("x"),
+                value: Some(Cow::Borrowed("aé")),
+            }],
+        );
+
+        let _ = target.attr_value(&foreign_attr);
     }
 
     #[test]

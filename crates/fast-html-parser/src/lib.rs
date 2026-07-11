@@ -42,11 +42,14 @@
 //! ## Streaming
 //!
 //! ```
+//! # #[cfg(feature = "encoding")]
+//! # {
 //! use fast_html_parser::streaming::parse_stream;
 //!
 //! let html = b"<div><p>Hello</p></div>";
 //! let doc = parse_stream(html.chunks(8)).unwrap();
 //! assert_eq!(doc.root().text_content(), "Hello");
+//! # }
 //! ```
 //!
 //! ## Feature Flags
@@ -56,8 +59,9 @@
 //! | `css-selector` | Yes | CSS selector engine |
 //! | `entity-decode` | Yes | HTML entity decoding |
 //! | `xpath` | No | XPath expression support |
-//! | `encoding` | No | Auto-detect encoding from raw bytes |
+//! | `encoding` | Yes | Raw-byte and streaming parsing with encoding detection |
 //! | `async-tokio` | No | Async parsing via Tokio |
+//! | `async-async-std` | No | Async parsing via async-std |
 
 // ---------------------------------------------------------------------------
 // Re-exports: core types
@@ -82,6 +86,8 @@ pub use fhp_tree::{Document, HtmlError, NodeRef};
 pub use fhp_tree::node::NodeId;
 
 /// Streaming and incremental parsing.
+#[cfg(feature = "encoding")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub mod streaming {
     pub use fhp_tree::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
 }
@@ -114,6 +120,13 @@ pub mod encoding {
 #[cfg_attr(docsrs, doc(cfg(feature = "async-tokio")))]
 pub mod async_parser {
     pub use fhp_tree::async_parser::{AsyncParser, parse_async};
+}
+
+/// Async parser powered by async-std (requires `async-async-std`).
+#[cfg(feature = "async-async-std")]
+#[cfg_attr(docsrs, doc(cfg(feature = "async-async-std")))]
+pub mod async_std_parser {
+    pub use fhp_tree::async_std_parser::{AsyncStdParser, parse_async_std};
 }
 
 // ---------------------------------------------------------------------------
@@ -289,6 +302,8 @@ impl HtmlParser {
     /// let doc = HtmlParser::parse_bytes(b"<p>Hello</p>").unwrap();
     /// assert_eq!(doc.root().text_content(), "Hello");
     /// ```
+    #[cfg(feature = "encoding")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
     pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
         fhp_tree::parse_bytes(input)
     }
@@ -300,13 +315,7 @@ impl HtmlParser {
     /// Returns [`HtmlError::InputTooLarge`] if the input exceeds the
     /// configured limit.
     pub fn parse_str(&self, input: &str) -> Result<Document, HtmlError> {
-        if input.len() > self.max_input_size {
-            return Err(HtmlError::InputTooLarge {
-                size: input.len(),
-                max: self.max_input_size,
-            });
-        }
-        fhp_tree::parse(input)
+        fhp_tree::parse_with_limit(input, self.max_input_size)
     }
 
     /// Parse an owned `String` with the current configuration.
@@ -319,13 +328,7 @@ impl HtmlParser {
     /// Returns [`HtmlError::InputTooLarge`] if the input exceeds the
     /// configured limit.
     pub fn parse_str_owned(&self, input: String) -> Result<Document, HtmlError> {
-        if input.len() > self.max_input_size {
-            return Err(HtmlError::InputTooLarge {
-                size: input.len(),
-                max: self.max_input_size,
-            });
-        }
-        fhp_tree::parse_owned(input)
+        fhp_tree::parse_owned_with_limit(input, self.max_input_size)
     }
 
     /// Parse raw bytes with the current configuration, auto-detecting encoding.
@@ -334,14 +337,10 @@ impl HtmlParser {
     ///
     /// Returns [`HtmlError::InputTooLarge`] or [`HtmlError::Encoding`] on
     /// failure.
+    #[cfg(feature = "encoding")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
     pub fn parse_raw(&self, input: &[u8]) -> Result<Document, HtmlError> {
-        if input.len() > self.max_input_size {
-            return Err(HtmlError::InputTooLarge {
-                size: input.len(),
-                max: self.max_input_size,
-            });
-        }
-        fhp_tree::parse_bytes(input)
+        fhp_tree::parse_bytes_with_limit(input, self.max_input_size)
     }
 }
 
@@ -377,6 +376,8 @@ pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
 /// let doc = fast_html_parser::parse_bytes(b"<p>Quick</p>").unwrap();
 /// assert_eq!(doc.root().text_content(), "Quick");
 /// ```
+#[cfg(feature = "encoding")]
+#[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
     HtmlParser::parse_bytes(input)
 }
@@ -396,6 +397,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn parse_bytes_convenience() {
         let doc = parse_bytes(b"<div><p>Hello</p></div>").unwrap();
         assert_eq!(doc.root().text_content(), "Hello");
@@ -412,7 +414,10 @@ mod tests {
     fn builder_max_input_size() {
         let parser = HtmlParser::builder().max_input_size(10).build();
         let result = parser.parse_str("<p>this is too long</p>");
-        assert!(result.is_err());
+        assert!(matches!(
+            result,
+            Err(HtmlError::InputTooLarge { size: 23, max: 10 })
+        ));
     }
 
     #[test]
@@ -423,6 +428,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn builder_parse_raw() {
         let parser = HtmlParser::builder().build();
         let doc = parser.parse_raw(b"<p>bytes</p>").unwrap();
@@ -430,6 +436,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn builder_parse_raw_too_large() {
         let parser = HtmlParser::builder().max_input_size(5).build();
         let result = parser.parse_raw(b"<p>too large</p>");
@@ -443,6 +450,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn static_parse_bytes_method() {
         let doc = HtmlParser::parse_bytes(b"<i>italic</i>").unwrap();
         assert_eq!(doc.root().text_content(), "italic");
@@ -457,6 +465,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "encoding")]
     fn streaming_reexport() {
         let doc = streaming::parse_stream(b"<p>stream</p>".chunks(4)).unwrap();
         assert_eq!(doc.root().text_content(), "stream");

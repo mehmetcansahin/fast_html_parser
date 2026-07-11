@@ -63,6 +63,19 @@ fn implicit_close_p_p() {
 }
 
 #[test]
+fn block_element_implicitly_closes_paragraph() {
+    let doc = parse("<p>one<span>two</span><div>three</div>four").unwrap();
+    let root = doc.root();
+    let children: Vec<_> = root.children().map(|id| doc.get(id)).collect();
+
+    assert_eq!(children[0].tag(), Tag::P);
+    assert_eq!(children[0].text_content(), "onetwo");
+    assert_eq!(children[1].tag(), Tag::Div);
+    assert_eq!(children[1].text_content(), "three");
+    assert_eq!(children[2].text(), "four");
+}
+
+#[test]
 fn implicit_close_li_li() {
     let doc = parse("<ul><li>a<li>b<li>c</ul>").unwrap();
     let root = doc.root();
@@ -274,7 +287,12 @@ fn entity_in_text() {
     let doc = parse("<p>a &amp; b</p>").unwrap();
     let root = doc.root();
     let text = root.text_content();
-    assert!(text.contains("a & b"), "text: {text}");
+    let expected = if cfg!(feature = "entity-decode") {
+        "a & b"
+    } else {
+        "a &amp; b"
+    };
+    assert!(text.contains(expected), "text: {text}");
 }
 
 #[derive(Debug)]
@@ -378,16 +396,29 @@ fn text_markup_edge_cases_round_trip() {
         let doc = parse(case.html).unwrap();
         let p = doc.root().first_child().unwrap();
 
+        let expected_text =
+            if !cfg!(feature = "entity-decode") && case.name == "invalid_lt_then_real_child" {
+                "a < 2 b &amp; c"
+            } else {
+                case.expected_text
+            };
+        let expected_inner =
+            if !cfg!(feature = "entity-decode") && case.name == "invalid_lt_then_real_child" {
+                "a &lt; 2 <span>b &amp;amp; c</span>"
+            } else {
+                case.expected_inner_html
+            };
+
         assert_eq!(
             p.text_content(),
-            case.expected_text,
+            expected_text,
             "case={}, html={}",
             case.name,
             case.html
         );
         assert_eq!(
             p.inner_html(),
-            case.expected_inner_html,
+            expected_inner,
             "case={}, html={}",
             case.name,
             case.html
@@ -402,6 +433,34 @@ fn script_entities_remain_raw_text() {
 
     assert_eq!(script.text_content(), "const s = \"&amp;\";");
     assert_eq!(script.inner_html(), "const s = \"&amp;\";");
+}
+
+#[test]
+fn rcdata_markup_remains_text_but_entities_decode() {
+    for (tag, expected) in [("textarea", Tag::Textarea), ("title", Tag::Title)] {
+        let html = format!("<{tag}>a <b>not markup</b> &amp;</{tag}>");
+        let doc = parse(&html).unwrap();
+        let element = doc.root().first_child().unwrap();
+
+        assert_eq!(element.tag(), expected);
+        let expected = if cfg!(feature = "entity-decode") {
+            "a <b>not markup</b> &"
+        } else {
+            "a <b>not markup</b> &amp;"
+        };
+        assert_eq!(element.text_content(), expected);
+        assert_eq!(element.children().count(), 1);
+    }
+}
+
+#[test]
+fn iframe_markup_remains_raw_text() {
+    let doc = parse("<iframe><b>not markup</b> &amp;</iframe>").unwrap();
+    let iframe = doc.root().first_child().unwrap();
+
+    assert_eq!(iframe.tag(), Tag::Iframe);
+    assert_eq!(iframe.text_content(), "<b>not markup</b> &amp;");
+    assert_eq!(iframe.children().count(), 1);
 }
 
 #[derive(Debug)]
@@ -493,6 +552,15 @@ fn empty_attribute_value_is_not_boolean_attribute() {
         input.outer_html(),
         "<input value=\"\" disabled data-empty=\"\">"
     );
+}
+
+#[test]
+fn form_feed_separates_html_attributes() {
+    let doc = parse("<div\x0Cid=target\x0Cclass=box></div>").unwrap();
+    let div = doc.root().first_child().unwrap();
+
+    assert_eq!(div.attr("id"), Some("target"));
+    assert_eq!(div.attr("class"), Some("box"));
 }
 
 #[test]

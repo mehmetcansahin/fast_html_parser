@@ -16,6 +16,7 @@ fn many_element_children_do_not_overflow_index() {
 
     let doc = parse(&html).unwrap();
     assert_eq!(doc.select("i").unwrap().len(), 70_000);
+    assert_eq!(doc.select("i:nth-child(70000)").unwrap().len(), 1);
 }
 
 #[test]

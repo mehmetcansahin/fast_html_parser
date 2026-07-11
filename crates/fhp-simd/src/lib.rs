@@ -55,7 +55,7 @@ impl DelimiterResult {
 /// Each bit represents a category. A byte may belong to multiple categories
 /// (e.g. `<` is both `DELIMITER` and `OTHER` is absent).
 pub mod class {
-    /// ASCII whitespace: space, tab, newline, carriage return.
+    /// HTML ASCII whitespace: space, tab, newline, form feed, carriage return.
     pub const WHITESPACE: u8 = 0b0000_0001;
     /// ASCII alphabetic: `a-z`, `A-Z`.
     pub const ALPHA: u8 = 0b0000_0010;
@@ -88,10 +88,16 @@ pub struct AllMasks {
 #[inline(always)]
 pub fn classify_byte(b: u8) -> u8 {
     match b {
-        b' ' | b'\t' | b'\n' | b'\r' => class::WHITESPACE,
+        b' ' | b'\t' | b'\n' | b'\x0C' | b'\r' => class::WHITESPACE,
         b'a'..=b'z' | b'A'..=b'Z' => class::ALPHA,
         b'0'..=b'9' => class::DIGIT,
         b'<' | b'>' | b'&' | b'"' | b'\'' | b'=' | b'/' => class::DELIMITER,
         _ => class::OTHER,
     }
+}
+
+/// Return whether a byte is one of the five HTML ASCII whitespace characters.
+#[inline(always)]
+pub(crate) fn is_html_whitespace(b: u8) -> bool {
+    matches!(b, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
 }

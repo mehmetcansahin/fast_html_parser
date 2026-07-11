@@ -91,16 +91,20 @@ pub unsafe fn classify_bytes(input: &[u8]) -> Vec<u8> {
         while offset + 16 <= len {
             let chunk = _mm_loadu_si128(ptr.add(offset) as *const __m128i);
 
-            // Whitespace check: compare against space, tab, newline, CR.
+            // HTML whitespace: space, tab, newline, form feed, CR.
             let space = _mm_set1_epi8(b' ' as i8);
             let tab = _mm_set1_epi8(b'\t' as i8);
             let nl = _mm_set1_epi8(b'\n' as i8);
+            let ff = _mm_set1_epi8(b'\x0C' as i8);
             let cr = _mm_set1_epi8(b'\r' as i8);
 
             // _mm_cmpeq_epi8: 0xFF where equal, 0x00 where not.
             let ws_mask = _mm_or_si128(
                 _mm_or_si128(_mm_cmpeq_epi8(chunk, space), _mm_cmpeq_epi8(chunk, tab)),
-                _mm_or_si128(_mm_cmpeq_epi8(chunk, nl), _mm_cmpeq_epi8(chunk, cr)),
+                _mm_or_si128(
+                    _mm_or_si128(_mm_cmpeq_epi8(chunk, nl), _mm_cmpeq_epi8(chunk, ff)),
+                    _mm_cmpeq_epi8(chunk, cr),
+                ),
             );
 
             // Alpha check: (b | 0x20) - 'a' <= 25 (unsigned)
@@ -182,13 +186,15 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
 
     // SAFETY: all intrinsics below require SSE4.2, guaranteed by #[target_feature].
     unsafe {
-        // Whitespace needle: space, tab, newline, CR. As in `find_delimiters`,
+        // HTML whitespace: space, tab, newline, form feed, CR. As in
+        // `find_delimiters`,
         // we use explicit-length equality compares instead of `_mm_cmpistri`,
         // whose NUL-termination semantics would treat a `\0` (a non-whitespace
         // byte) as still inside the run and over-skip past it.
         let space = _mm_set1_epi8(b' ' as i8);
         let tab = _mm_set1_epi8(b'\t' as i8);
         let nl = _mm_set1_epi8(b'\n' as i8);
+        let ff = _mm_set1_epi8(b'\x0C' as i8);
         let cr = _mm_set1_epi8(b'\r' as i8);
 
         while offset + 16 <= len {
@@ -197,7 +203,10 @@ pub unsafe fn skip_whitespace(input: &[u8]) -> usize {
             // 0xFF in lanes that ARE whitespace.
             let ws = _mm_or_si128(
                 _mm_or_si128(_mm_cmpeq_epi8(chunk, space), _mm_cmpeq_epi8(chunk, tab)),
-                _mm_or_si128(_mm_cmpeq_epi8(chunk, nl), _mm_cmpeq_epi8(chunk, cr)),
+                _mm_or_si128(
+                    _mm_or_si128(_mm_cmpeq_epi8(chunk, nl), _mm_cmpeq_epi8(chunk, ff)),
+                    _mm_cmpeq_epi8(chunk, cr),
+                ),
             );
             let mask = _mm_movemask_epi8(ws) as u16;
             // First non-whitespace byte = first zero bit in the mask.
@@ -375,6 +384,26 @@ mod tests {
         }
         let result = unsafe { skip_whitespace(b"                    ") };
         assert_eq!(result, 20);
+    }
+
+    #[test]
+    fn skip_whitespace_matches_scalar_at_every_short_length() {
+        if !has_sse42() {
+            return;
+        }
+        const HTML_WHITESPACE: &[u8] = b" \t\n\r\x0C";
+
+        for len in 0..=128 {
+            let mut input = Vec::with_capacity(len + 1);
+            input.extend((0..len).map(|index| HTML_WHITESPACE[index % HTML_WHITESPACE.len()]));
+            input.push(b'X');
+
+            assert_eq!(
+                unsafe { skip_whitespace(&input) },
+                crate::scalar::skip_whitespace_safe(&input),
+                "mismatch at whitespace length {len}"
+            );
+        }
     }
 
     #[test]

@@ -13,20 +13,21 @@ categories = ["parser-implementations"]
 exclude = ["benches/", "tests/"]
 
 [features]
-default = ["entity-decode"]
+default = ["entity-decode", "encoding"]
 entity-decode = ["fhp-tokenizer/entity-decode"]
-async-tokio = ["dep:tokio"]
-async-async-std = ["dep:async-std"]
+encoding = ["dep:fhp-encoding", "dep:encoding_rs"]
+async-tokio = ["dep:tokio", "encoding"]
+async-async-std = ["dep:async-std", "encoding"]
 
 [dependencies]
 fhp-core = { version = "0.1.2", path = "../fhp-core" }
-fhp-encoding = { version = "0.1.2", path = "../fhp-encoding" }
+fhp-encoding = { version = "0.1.2", path = "../fhp-encoding", optional = true }
 fhp-tokenizer = { version = "0.1.2", path = "../fhp-tokenizer", default-features = false }
 thiserror = { workspace = true }
-encoding_rs = { workspace = true }
+encoding_rs = { workspace = true, optional = true }
 memchr = "2"
 tokio = { workspace = true, features = ["io-util"], optional = true }
-async-std = { workspace = true, optional = true }
+async-std = { workspace = true, optional = true, features = ["std"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

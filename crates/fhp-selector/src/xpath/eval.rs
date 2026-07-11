@@ -32,12 +32,12 @@ pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
         }
 
         XPathExpr::PositionPredicate { tag, pos } => {
-            let nodes = find_descendants_by_tag(arena, root, *tag);
-            if *pos >= 1 && *pos <= nodes.len() {
-                XPathResult::Nodes(vec![nodes[*pos - 1]])
-            } else {
-                XPathResult::Nodes(vec![])
-            }
+            let predicate = Predicate::Position(*pos);
+            let nodes = find_descendants_by_tag(arena, root, *tag)
+                .into_iter()
+                .filter(|&node| matches_predicate(arena, node, &predicate))
+                .collect();
+            XPathResult::Nodes(nodes)
         }
 
         XPathExpr::AbsolutePath(steps) => {
@@ -45,16 +45,14 @@ pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
             XPathResult::Nodes(nodes)
         }
 
-        XPathExpr::TextExtract(inner) => {
-            let inner_result = evaluate(inner, arena, root);
-            match inner_result {
-                XPathResult::Nodes(nodes) => {
-                    let texts: Vec<String> =
-                        nodes.iter().map(|&id| collect_text(arena, id)).collect();
-                    XPathResult::Strings(texts)
-                }
-                other => other,
-            }
+        XPathExpr::TextExtract(_) => {
+            let text_nodes = evaluate_text_nodes(expr, arena, root).unwrap_or_default();
+            XPathResult::Strings(
+                text_nodes
+                    .into_iter()
+                    .map(|id| arena.text(id).to_owned())
+                    .collect(),
+            )
         }
 
         XPathExpr::DescendantWildcard => {
@@ -82,6 +80,30 @@ pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
             }
         }
     }
+}
+
+/// Evaluate a `.../text()` expression to the underlying text node ids.
+///
+/// Keeping node identity available lets callers that combine overlapping
+/// context roots deduplicate the same text node without collapsing distinct
+/// text nodes that happen to contain equal strings.
+pub(crate) fn evaluate_text_nodes(
+    expr: &XPathExpr,
+    arena: &Arena,
+    root: NodeId,
+) -> Option<Vec<NodeId>> {
+    let XPathExpr::TextExtract(inner) = expr else {
+        return None;
+    };
+    let XPathResult::Nodes(nodes) = evaluate(inner, arena, root) else {
+        return Some(Vec::new());
+    };
+
+    let mut text_nodes = Vec::new();
+    for node in nodes {
+        collect_direct_text_children(arena, node, &mut text_nodes);
+    }
+    Some(text_nodes)
 }
 
 // ---------------------------------------------------------------------------
@@ -145,7 +167,8 @@ fn find_descendants_by_tag_and_attr(
             is_element(n)
                 && n.tag == tag
                 && a.attrs(id).iter().any(|at| {
-                    a.attr_name(at).eq_ignore_ascii_case(attr) && a.attr_value(at) == value
+                    a.attr_name(at).eq_ignore_ascii_case(attr)
+                        && value.is_some_and(|expected| a.attr_value(at).unwrap_or("") == expected)
                 })
         },
         &mut results,
@@ -193,7 +216,7 @@ fn find_descendants_by_tag_and_contains(
                 && n.tag == tag
                 && a.attrs(id).iter().any(|at| {
                     a.attr_name(at).eq_ignore_ascii_case(attr)
-                        && a.attr_value(at).is_some_and(|v| v.contains(substr))
+                        && a.attr_value(at).unwrap_or("").contains(substr)
                 })
         },
         &mut results,
@@ -218,7 +241,8 @@ fn find_all_elements_by_attr(
             }
             match value {
                 Some(val) => a.attrs(id).iter().any(|at| {
-                    a.attr_name(at).eq_ignore_ascii_case(attr) && a.attr_value(at) == Some(val)
+                    a.attr_name(at).eq_ignore_ascii_case(attr)
+                        && a.attr_value(at).unwrap_or("") == val
                 }),
                 None => a
                     .attrs(id)
@@ -310,14 +334,13 @@ fn collect_element_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) 
 fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
     match pred {
         Predicate::AttrEquals { attr, value } => arena.attrs(node).iter().any(|a| {
-            arena.attr_name(a).eq_ignore_ascii_case(attr) && arena.attr_value(a) == Some(value)
+            arena.attr_name(a).eq_ignore_ascii_case(attr)
+                && arena.attr_value(a).unwrap_or("") == value
         }),
 
         Predicate::Contains { attr, substr } => arena.attrs(node).iter().any(|a| {
             arena.attr_name(a).eq_ignore_ascii_case(attr)
-                && arena
-                    .attr_value(a)
-                    .is_some_and(|v| v.contains(substr.as_str()))
+                && arena.attr_value(a).unwrap_or("").contains(substr.as_str())
         }),
 
         Predicate::Position(pos) => {
@@ -349,24 +372,16 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
     }
 }
 
-/// Recursively collect text content from a node.
-fn collect_text(arena: &Arena, node: NodeId) -> String {
-    let mut out = String::new();
-    collect_text_inner(arena, node, &mut out);
-    out
-}
-
-/// DFS text collection helper.
-fn collect_text_inner(arena: &Arena, node: NodeId, out: &mut String) {
+/// Collect the direct child text nodes selected by XPath's `text()` node test.
+fn collect_direct_text_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) {
     let n = arena.get(node);
-    if n.flags.has(NodeFlags::IS_TEXT) {
-        out.push_str(arena.text(node));
-        return;
-    }
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_text_inner(arena, child, out);
-        child = arena.get(child).next_sibling;
+        let child_node = arena.get(child);
+        if child_node.flags.has(NodeFlags::IS_TEXT) {
+            out.push(child);
+        }
+        child = child_node.next_sibling;
     }
 }
 

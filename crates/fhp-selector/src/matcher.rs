@@ -71,7 +71,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             // "no id attribute" sentinel, so it cannot represent a real id that
             // hashes to 0; when the target itself hashes to 0 we skip the fast
             // path and verify directly to avoid a false negative.
-            if *target_hash != 0 && n.id_hash != *target_hash {
+            if id_hash_rejects(arena, node, *target_hash) {
                 return false;
             }
             // Hash matched (or target hash is 0) — verify via real attribute
@@ -105,30 +105,33 @@ fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
         {
             continue;
         }
-        let val = arena.attr_value(attr);
+        // In HTML, a valueless (boolean) attribute has an empty string value
+        // for selector matching. `Arena::attr_value` uses `None` only to
+        // preserve whether the value was explicitly written.
+        let val = arena.attr_value(attr).unwrap_or("");
         match sel.op {
             AttrOp::Exists => return true,
             AttrOp::Equals => {
-                return val == sel.value.as_deref();
+                return Some(val) == sel.value.as_deref();
             }
             AttrOp::Includes => {
-                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
-                    return contains_class_token(v, sel_val.as_str());
+                if let Some(sel_val) = &sel.value {
+                    return contains_class_token(val, sel_val.as_str());
                 }
             }
             AttrOp::StartsWith => {
-                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
-                    return v.starts_with(sel_val.as_str());
+                if let Some(sel_val) = &sel.value {
+                    return !sel_val.is_empty() && val.starts_with(sel_val.as_str());
                 }
             }
             AttrOp::EndsWith => {
-                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
-                    return v.ends_with(sel_val.as_str());
+                if let Some(sel_val) = &sel.value {
+                    return !sel_val.is_empty() && val.ends_with(sel_val.as_str());
                 }
             }
             AttrOp::Substring => {
-                if let (Some(v), Some(sel_val)) = (val, &sel.value) {
-                    return v.contains(sel_val.as_str());
+                if let Some(sel_val) = &sel.value {
+                    return !sel_val.is_empty() && val.contains(sel_val.as_str());
                 }
             }
         }
@@ -211,14 +214,21 @@ fn is_last_element_child(arena: &Arena, node: NodeId) -> bool {
 
 /// Check if the node is the nth element child (1-based) matching `an+b`.
 ///
-/// Uses the precomputed `element_index` field on the node for O(1) lookup
-/// instead of walking siblings.
+/// Uses the precomputed full sibling index for O(1) lookup. A compact u16
+/// mirror remains in `element_index` for layout compatibility.
 fn is_nth_element_child(arena: &Arena, node: NodeId, a: i32, b: i32) -> bool {
     let n = arena.get(node);
     if n.parent.is_null() || n.element_index == 0 {
         return false;
     }
-    matches_nth(a, b, n.element_index as i32)
+
+    let index = i64::from(if n.attr_raw_offset == 0 {
+        u32::from(n.element_index)
+    } else {
+        n.attr_raw_offset
+    });
+
+    matches_nth(a, b, index)
 }
 
 /// Check if a 1-based `index` satisfies `an+b`.
@@ -226,8 +236,8 @@ fn is_nth_element_child(arena: &Arena, node: NodeId, a: i32, b: i32) -> bool {
 /// Arithmetic is done in `i64` so an adversarial `b` (e.g. `n-2147483647`)
 /// cannot overflow the `index - b` subtraction.
 #[inline]
-fn matches_nth(a: i32, b: i32, index: i32) -> bool {
-    let (a, b, index) = (a as i64, b as i64, index as i64);
+fn matches_nth(a: i32, b: i32, index: i64) -> bool {
+    let (a, b) = (i64::from(a), i64::from(b));
     if a == 0 {
         return index == b;
     }
@@ -396,17 +406,8 @@ pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<
     if list.selectors.len() == 1 {
         return select_all(arena, root, &list.selectors[0]);
     }
-    let has_any_descendant = list.selectors.iter().any(has_descendant_combinator);
-    let shared_blooms = has_any_descendant.then(|| build_ancestor_blooms(arena, root));
     let mut results = Vec::new();
-    let mut seen = std::collections::HashSet::new();
-    for sel in &list.selectors {
-        for id in select_all_with_blooms(arena, root, sel, shared_blooms.as_deref()) {
-            if seen.insert(id) {
-                results.push(id);
-            }
-        }
-    }
+    collect_list(arena, root, list, &mut results);
     results
 }
 
@@ -453,6 +454,26 @@ fn collect_simple(arena: &Arena, node: NodeId, selector: &Selector, results: &mu
     let mut child = n.first_child;
     while !child.is_null() {
         collect_simple(arena, child, selector, results);
+        child = arena.get(child).next_sibling;
+    }
+}
+
+/// Single DFS for a selector list. Traversing the actual links, rather than
+/// sorting allocation ids, preserves document order for public arenas whose
+/// nodes were allocated before they were attached.
+fn collect_list(arena: &Arena, node: NodeId, list: &SelectorList, results: &mut Vec<NodeId>) {
+    if node.is_null() {
+        return;
+    }
+
+    let current = arena.get(node);
+    if is_element(current) && match_selector_list(arena, node, list) {
+        results.push(node);
+    }
+
+    let mut child = current.first_child;
+    while !child.is_null() {
+        collect_list(arena, child, list, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -662,16 +683,35 @@ fn simple_tag_selector(selector: &Selector) -> Option<Tag> {
 
 #[inline]
 fn node_has_id(arena: &Arena, node: NodeId, target_id: &str) -> bool {
-    let n = arena.get(node);
     let target_hash = selector_hash(target_id.as_bytes());
     // `id_hash == 0` is also the "no id" sentinel; when the target hashes to 0,
     // skip the fast path and verify directly (see SimpleSelector::Id).
-    if target_hash != 0 && n.id_hash != target_hash {
+    if id_hash_rejects(arena, node, target_hash) {
         return false;
     }
     arena.attrs(node).iter().any(|a| {
         arena.attr_name(a).eq_ignore_ascii_case("id") && arena.attr_value(a) == Some(target_id)
     })
+}
+
+/// Return whether the cached id hash can conclusively reject this node.
+///
+/// The arena stores one hash, while malformed HTML can retain duplicate `id`
+/// attributes. A mismatch is therefore conclusive only when at most one `id`
+/// attribute exists; duplicate attributes require the full value scan.
+#[inline]
+fn id_hash_rejects(arena: &Arena, node: NodeId, target_hash: u32) -> bool {
+    let n = arena.get(node);
+    if target_hash == 0 || n.id_hash == target_hash {
+        return false;
+    }
+
+    arena
+        .attrs(node)
+        .iter()
+        .filter(|attr| arena.attr_name(attr).eq_ignore_ascii_case("id"))
+        .nth(1)
+        .is_none()
 }
 
 #[cfg(test)]
@@ -703,6 +743,20 @@ mod tests {
         let list = parse_selector("p").unwrap();
         let first = select_first_list(doc.arena(), doc.root_id(), &list).unwrap();
         assert_eq!(doc.get(first).text_content(), "a");
+    }
+
+    #[test]
+    fn selector_list_uses_tree_order_not_allocation_order() {
+        let mut arena = Arena::new();
+        let root = arena.new_element(Tag::Unknown, 0);
+        let span = arena.new_element(Tag::Span, 1);
+        let div = arena.new_element(Tag::Div, 1);
+        arena.append_child(root, div);
+        arena.append_child(root, span);
+
+        let list = parse_selector("span, div").unwrap();
+        assert_eq!(select_all_list(&arena, root, &list), [div, span]);
+        assert_eq!(select_first_list(&arena, root, &list), Some(div));
     }
 
     #[test]
