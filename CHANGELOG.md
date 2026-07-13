@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Reproducible local benchmark verification, baseline comparison, regression
+  policy, environment metadata, and publishable result summaries.
+- Cross-parser observable-result contracts and fixture provenance metadata for
+  benchmark comparisons.
+- A full Apple M1 benchmark report and a same-source local-baseline
+  repeatability report documenting when regression candidates require reruns.
+
+### Changed
+
+- Namespace Criterion benchmarks by regression, comparison, and diagnostic
+  purpose; separate parse construction from lifecycle teardown and split
+  selector/XPath compilation from evaluation.
+- Replace untraceable README speed claims with summaries generated from
+  categorized, contract-checked benchmark runs.
+- Clarify in the benchmark and contribution guides that a single local
+  threshold failure must be confirmed before it is described as a regression.
+
 ## [0.1.2] - 2026-06-08
 
 ### Fixed

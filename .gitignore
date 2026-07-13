@@ -1,5 +1,9 @@
 /target
 
+# Python benchmark tooling
+__pycache__/
+*.py[cod]
+
 # IDE
 .idea/
 .vscode/

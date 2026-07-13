@@ -1,6 +1,7 @@
 [package]
 name = "fast-html-parser"
 version = "0.1.2"
+autobenches = false
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -45,6 +46,7 @@ required-features = ["encoding"]
 [[bench]]
 name = "comparison_bench"
 harness = false
+required-features = ["css-selector", "entity-decode"]
 
 [[bench]]
 name = "profile_bench"
@@ -53,6 +55,7 @@ harness = false
 [[bench]]
 name = "realworld_bench"
 harness = false
+required-features = ["css-selector", "entity-decode"]
 
 [[example]]
 name = "basic_parse"

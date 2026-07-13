@@ -1,7 +1,8 @@
 //! Benchmarks for XPath evaluation throughput.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use fhp_selector::Selectable;
+use fhp_selector::xpath::{eval::evaluate, parser::parse_xpath};
 use fhp_tree::parse;
 
 fn load_testdata(name: &str) -> String {
@@ -12,70 +13,75 @@ fn load_testdata(name: &str) -> String {
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
 }
 
-fn bench_xpath(c: &mut Criterion) {
-    let medium = load_testdata("medium_100kb.html");
-    let doc = parse(&medium).unwrap();
+const EXPRESSIONS: [(&str, &str); 7] = [
+    ("descendant_p", "//p"),
+    ("descendant_attr", "//a[@href]"),
+    ("absolute_path", "/html/body/div"),
+    ("wildcard_all", "//*"),
+    ("contains", "//div[contains(@class, 'content')]"),
+    ("text_extract", "//p/text()"),
+    ("position", "//li[1]"),
+];
 
-    let mut group = c.benchmark_group("xpath");
+fn bench_xpath_compile(c: &mut Criterion) {
+    let mut group = c.benchmark_group("regression/fhp-selector/xpath_bench/compile");
 
-    // Descendant: //tag
-    group.bench_function("descendant_p", |b| {
-        b.iter(|| {
-            let r = doc.xpath("//p").unwrap();
-            std::hint::black_box(&r);
+    for (name, xpath) in EXPRESSIONS {
+        group.bench_with_input(BenchmarkId::from_parameter(name), xpath, |b, xpath| {
+            b.iter_batched(
+                || xpath,
+                |xpath| parse_xpath(xpath).unwrap(),
+                BatchSize::LargeInput,
+            );
         });
-    });
-
-    // Descendant with attribute predicate: //tag[@attr='value']
-    group.bench_function("descendant_attr", |b| {
-        b.iter(|| {
-            let r = doc.xpath("//a[@href]").unwrap();
-            std::hint::black_box(&r);
-        });
-    });
-
-    // Absolute path: /html/body/div
-    group.bench_function("absolute_path", |b| {
-        b.iter(|| {
-            let r = doc.xpath("/html/body/div").unwrap();
-            std::hint::black_box(&r);
-        });
-    });
-
-    // Wildcard: //*
-    group.bench_function("wildcard_all", |b| {
-        b.iter(|| {
-            let r = doc.xpath("//*").unwrap();
-            std::hint::black_box(&r);
-        });
-    });
-
-    // Contains function: //tag[contains(@attr, 'sub')]
-    group.bench_function("contains", |b| {
-        b.iter(|| {
-            let r = doc.xpath("//div[contains(@class, 'content')]").unwrap();
-            std::hint::black_box(&r);
-        });
-    });
-
-    // Text extraction: //tag/text()
-    group.bench_function("text_extract", |b| {
-        b.iter(|| {
-            let r = doc.xpath("//p/text()").unwrap();
-            std::hint::black_box(&r);
-        });
-    });
-
-    // Position predicate: //tag[1]
-    group.bench_function("position", |b| {
-        b.iter(|| {
-            let r = doc.xpath("//li[1]").unwrap();
-            std::hint::black_box(&r);
-        });
-    });
+    }
 
     group.finish();
 }
 
-criterion_group!(benches, bench_xpath);
+fn bench_xpath_evaluate(c: &mut Criterion) {
+    let medium = load_testdata("medium_100kb.html");
+    let doc = parse(&medium).unwrap();
+    let compiled: Vec<_> = EXPRESSIONS
+        .iter()
+        .map(|(name, xpath)| (*name, parse_xpath(xpath).unwrap()))
+        .collect();
+
+    let mut group = c.benchmark_group("regression/fhp-selector/xpath_bench/evaluate");
+    for (name, expression) in &compiled {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(name),
+            expression,
+            |b, expression| {
+                b.iter_batched(
+                    || (),
+                    |_| evaluate(expression, doc.arena(), doc.root_id()),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
+    }
+    group.finish();
+}
+
+fn bench_xpath_string_convenience(c: &mut Criterion) {
+    let medium = load_testdata("medium_100kb.html");
+    let doc = parse(&medium).unwrap();
+
+    let mut group = c.benchmark_group("diagnostic/fhp-selector/xpath_bench/string_convenience");
+    for (name, xpath) in EXPRESSIONS {
+        group.bench_with_input(BenchmarkId::from_parameter(name), xpath, |b, xpath| {
+            b.iter_batched(|| (), |_| doc.xpath(xpath).unwrap(), BatchSize::LargeInput);
+        });
+    }
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_xpath_compile,
+    bench_xpath_evaluate,
+    bench_xpath_string_convenience,
+);
 criterion_main!(benches);

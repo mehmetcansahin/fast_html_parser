@@ -72,11 +72,38 @@ cargo fmt --all -- --check
 
 ### Benchmarks
 
-If your change touches a hot path or adds a new feature, run the benchmarks to check for regressions:
+Validate the benchmark contracts and compile every harness:
 
 ```bash
-cargo bench
+python3 scripts/bench.py verify
 ```
+
+Run a short local measurement while iterating:
+
+```bash
+python3 scripts/bench.py quick
+```
+
+For a performance-sensitive change, save a baseline before editing and compare
+against it afterward on the same machine and toolchain:
+
+```bash
+python3 scripts/bench.py save before-change
+python3 scripts/bench.py compare before-change
+```
+
+The compare command gates only `regression/` benchmark IDs. Published results
+must be generated with `python3 scripts/bench.py publish`; do not copy numbers
+from an ad hoc Criterion run into the README.
+
+Treat a failed local comparison as a regression candidate. Before attributing
+it to a code change, rerun the exact failing benchmark at least twice against
+the same immutable baseline. Short selector/XPath compilation measurements,
+Tokio benchmarks, and lifecycle/drop variants are especially sensitive to
+machine state and workload order. If the result remains material, repeat the
+full save/compare experiment under controlled conditions. See the
+[local baseline repeatability report](benchmarks/results/2026-07-13-local-baseline-repeatability.md)
+for a same-source validation example.
 
 ## Coding Standards
 

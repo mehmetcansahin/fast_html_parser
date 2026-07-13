@@ -23,26 +23,34 @@ fn make_no_delimiters(size: usize) -> Vec<u8> {
     vec![b'a'; size]
 }
 
+fn make_tail_delimiter(size: usize) -> Vec<u8> {
+    let mut input = make_no_delimiters(size);
+    if let Some(last) = input.last_mut() {
+        *last = b'<';
+    }
+    input
+}
+
 fn bench_find_delimiters(c: &mut Criterion) {
-    let mut group = c.benchmark_group("find_delimiters");
+    let ops = dispatch::ops();
+    let mut group = c.benchmark_group("regression/fhp-simd/simd_bench/find_delimiters");
 
     for size in [64, 1024, 64 * 1024] {
-        let html = make_html_like_input(size);
+        let tail_match = make_tail_delimiter(size);
         let no_delim = make_no_delimiters(size);
 
         group.throughput(Throughput::Bytes(size as u64));
 
-        group.bench_with_input(BenchmarkId::new("scalar/html", size), &html, |b, input| {
-            b.iter(|| scalar::find_delimiters_safe(input))
-        });
+        group.bench_with_input(
+            BenchmarkId::new("scalar/tail_match", size),
+            &tail_match,
+            |b, input| b.iter(|| scalar::find_delimiters_safe(input)),
+        );
 
         group.bench_with_input(
-            BenchmarkId::new("dispatch/html", size),
-            &html,
-            |b, input| {
-                let ops = dispatch::ops();
-                b.iter(|| unsafe { (ops.find_delimiters)(input) })
-            },
+            BenchmarkId::new("dispatch/tail_match", size),
+            &tail_match,
+            |b, input| b.iter(|| unsafe { (ops.find_delimiters)(input) }),
         );
 
         group.bench_with_input(
@@ -54,18 +62,35 @@ fn bench_find_delimiters(c: &mut Criterion) {
         group.bench_with_input(
             BenchmarkId::new("dispatch/no_match", size),
             &no_delim,
-            |b, input| {
-                let ops = dispatch::ops();
-                b.iter(|| unsafe { (ops.find_delimiters)(input) })
-            },
+            |b, input| b.iter(|| unsafe { (ops.find_delimiters)(input) }),
         );
     }
 
     group.finish();
 }
 
+fn bench_find_delimiters_early_match(c: &mut Criterion) {
+    let ops = dispatch::ops();
+    let mut group = c.benchmark_group("diagnostic/fhp-simd/simd_bench/find_delimiters_early_match");
+
+    for size in [64, 1024, 64 * 1024] {
+        let html = make_html_like_input(size);
+
+        group.bench_with_input(BenchmarkId::new("scalar", size), &html, |b, input| {
+            b.iter(|| scalar::find_delimiters_safe(input))
+        });
+
+        group.bench_with_input(BenchmarkId::new("dispatch", size), &html, |b, input| {
+            b.iter(|| unsafe { (ops.find_delimiters)(input) })
+        });
+    }
+
+    group.finish();
+}
+
 fn bench_classify_bytes(c: &mut Criterion) {
-    let mut group = c.benchmark_group("classify_bytes");
+    let ops = dispatch::ops();
+    let mut group = c.benchmark_group("regression/fhp-simd/simd_bench/classify_bytes");
 
     for size in [64, 1024, 64 * 1024] {
         let html = make_html_like_input(size);
@@ -76,7 +101,6 @@ fn bench_classify_bytes(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("dispatch", size), &html, |b, input| {
-            let ops = dispatch::ops();
             b.iter(|| unsafe { (ops.classify_bytes)(input) })
         });
     }
@@ -85,7 +109,8 @@ fn bench_classify_bytes(c: &mut Criterion) {
 }
 
 fn bench_skip_whitespace(c: &mut Criterion) {
-    let mut group = c.benchmark_group("skip_whitespace");
+    let ops = dispatch::ops();
+    let mut group = c.benchmark_group("regression/fhp-simd/simd_bench/skip_whitespace");
 
     for size in [64, 1024, 64 * 1024] {
         let ws = make_whitespace_heavy(size);
@@ -96,7 +121,6 @@ fn bench_skip_whitespace(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("dispatch", size), &ws, |b, input| {
-            let ops = dispatch::ops();
             b.iter(|| unsafe { (ops.skip_whitespace)(input) })
         });
     }
@@ -114,16 +138,17 @@ fn scan_all_masks_scalar(input: &[u8]) -> u64 {
     })
 }
 
-fn scan_all_masks_dispatch(input: &[u8]) -> u64 {
-    let ops = dispatch::ops();
+fn scan_all_masks_dispatch(input: &[u8], compute_all_masks: unsafe fn(&[u8]) -> AllMasks) -> u64 {
     input.chunks(64).fold(0, |acc, chunk| {
-        let masks = unsafe { (ops.compute_all_masks)(chunk) };
+        let masks = unsafe { compute_all_masks(chunk) };
         acc ^ masks_checksum(masks)
     })
 }
 
 fn bench_compute_all_masks(c: &mut Criterion) {
-    let mut group = c.benchmark_group("compute_all_masks");
+    let ops = dispatch::ops();
+    let compute_all_masks = ops.compute_all_masks;
+    let mut group = c.benchmark_group("regression/fhp-simd/simd_bench/compute_all_masks");
 
     for size in [64, 1024, 64 * 1024] {
         let html = make_html_like_input(size);
@@ -134,18 +159,32 @@ fn bench_compute_all_masks(c: &mut Criterion) {
         });
 
         group.bench_with_input(BenchmarkId::new("dispatch", size), &html, |b, input| {
-            b.iter(|| scan_all_masks_dispatch(input))
+            b.iter(|| scan_all_masks_dispatch(input, compute_all_masks))
         });
     }
 
     group.finish();
 }
 
+fn bench_dispatch_lookup(c: &mut Criterion) {
+    // Force initialization before timing so this measures only the steady-state
+    // OnceLock lookup. Hot-path benchmarks above call the cached function table.
+    std::hint::black_box(dispatch::ops());
+
+    let mut group = c.benchmark_group("diagnostic/fhp-simd/simd_bench/dispatch_lookup");
+    group.bench_function("warm_once_lock", |b| {
+        b.iter(|| std::hint::black_box(dispatch::ops()))
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_find_delimiters,
+    bench_find_delimiters_early_match,
     bench_classify_bytes,
     bench_skip_whitespace,
     bench_compute_all_masks,
+    bench_dispatch_lookup,
 );
 criterion_main!(benches);

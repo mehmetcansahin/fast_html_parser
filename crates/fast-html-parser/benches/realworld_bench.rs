@@ -1,6 +1,15 @@
-//! Real-world HTML benchmark — actual pages from Wikipedia, GitHub, HN, StackOverflow.
+//! Contract-checked comparisons on pinned real-world HTML snapshots.
 
-use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+mod benchmark_support;
+mod contract_support;
+
+use benchmark_support::register_parse_groups;
+#[cfg(feature = "css-selector")]
+use benchmark_support::register_selector_groups;
+#[cfg(feature = "css-selector")]
+use contract_support::validate_fixture_contract;
+use contract_support::{fhp_bench_order, fixture_contract, validate_lol_html_passthrough};
+use criterion::{Criterion, criterion_group, criterion_main};
 
 fn load_testdata(name: &str) -> String {
     let path = format!(
@@ -9,172 +18,84 @@ fn load_testdata(name: &str) -> String {
             .trim_end_matches("crates/fast-html-parser")
             .trim_end_matches('/')
     );
-    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
+    std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
+}
+
+fn load_pages() -> Vec<(&'static str, &'static str, String)> {
+    vec![
+        (
+            "hackernews_34kb",
+            "realworld_hackernews_34kb",
+            load_testdata("hackernews.html"),
+        ),
+        (
+            "github_301kb",
+            "realworld_github_301kb",
+            load_testdata("github.html"),
+        ),
+        (
+            "stackoverflow_415kb",
+            "realworld_stackoverflow_415kb",
+            load_testdata("stackoverflow.html"),
+        ),
+        (
+            "wikipedia_590kb",
+            "realworld_wikipedia_590kb",
+            load_testdata("wikipedia.html"),
+        ),
+    ]
+}
+
+fn validate_realworld_fixtures(_c: &mut Criterion) {
+    let _ = fhp_bench_order();
+    for (_, contract_id, html) in load_pages() {
+        #[cfg(feature = "css-selector")]
+        validate_fixture_contract(fixture_contract(contract_id), &html);
+        validate_lol_html_passthrough(contract_id, &html);
+    }
 }
 
 fn bench_realworld_parse(c: &mut Criterion) {
-    let pages: Vec<(&str, String)> = vec![
-        ("hackernews_34kb", load_testdata("hackernews.html")),
-        ("github_301kb", load_testdata("github.html")),
-        ("stackoverflow_415kb", load_testdata("stackoverflow.html")),
-        ("wikipedia_590kb", load_testdata("wikipedia.html")),
-    ];
-
-    for (name, html) in &pages {
-        let mut group = c.benchmark_group(format!("realworld/{name}"));
-        group.throughput(Throughput::Bytes(html.len() as u64));
-
-        // fast-html-parser
-        group.bench_function("fast_html_parser", |b| {
-            b.iter(|| fast_html_parser::HtmlParser::parse(html).unwrap());
-        });
-
-        // tl
-        group.bench_function("tl", |b| {
-            b.iter(|| tl::parse(html, tl::ParserOptions::default()).unwrap());
-        });
-
-        // scraper (html5ever)
-        group.bench_function("scraper", |b| {
-            b.iter(|| scraper::Html::parse_document(html));
-        });
-
-        // lol_html (streaming)
-        group.bench_function("lol_html", |b| {
-            let bytes = html.as_bytes();
-            b.iter(|| {
-                let mut rewriter = lol_html::HtmlRewriter::new(
-                    lol_html::Settings {
-                        element_content_handlers: vec![lol_html::element!("*", |_el| Ok(()))],
-                        ..lol_html::Settings::new()
-                    },
-                    |_: &[u8]| {},
-                );
-                rewriter.write(bytes).unwrap();
-                rewriter.end().unwrap();
-            });
-        });
-
-        group.finish();
+    let order = fhp_bench_order();
+    for (benchmark_id, contract_id, html) in load_pages() {
+        register_parse_groups(
+            c,
+            "comparison/fast-html-parser/realworld_bench/realworld",
+            benchmark_id,
+            &html,
+            fixture_contract(contract_id),
+            order,
+        );
     }
 }
 
-fn bench_realworld_parse_owned(c: &mut Criterion) {
-    let pages: Vec<(&str, String)> = vec![
-        ("hackernews_34kb", load_testdata("hackernews.html")),
-        ("wikipedia_590kb", load_testdata("wikipedia.html")),
-    ];
-
-    for (name, html) in &pages {
-        let mut group = c.benchmark_group(format!("realworld_owned/{name}"));
-        group.throughput(criterion::Throughput::Bytes(html.len() as u64));
-
-        group.bench_function("parse", |b| {
-            b.iter(|| fast_html_parser::HtmlParser::parse(html).unwrap());
-        });
-
-        group.bench_function("parse_owned", |b| {
-            b.iter(|| fast_html_parser::HtmlParser::parse_owned(html.clone()).unwrap());
-        });
-
-        group.finish();
-    }
-}
-
+#[cfg(feature = "css-selector")]
 fn bench_realworld_select(c: &mut Criterion) {
+    const SELECTORS: &[(&str, &str)] = &[
+        ("link_with_href", "a[href]"),
+        ("class_mw_body", "main.mw-body"),
+        ("descendant_table_td", "table td"),
+    ];
+
     let wikipedia = load_testdata("wikipedia.html");
-
-    let mut group = c.benchmark_group("realworld_select/wikipedia");
-
-    // fast-html-parser — string selector
-    #[cfg(feature = "css-selector")]
-    {
-        use fast_html_parser::Selectable;
-        let doc = fast_html_parser::HtmlParser::parse(&wikipedia).unwrap();
-
-        group.bench_function("fhp/a[href]", |b| {
-            b.iter(|| doc.select("a[href]").unwrap());
-        });
-        group.bench_function("fhp/div.mw-body", |b| {
-            b.iter(|| doc.select("div.mw-body").unwrap());
-        });
-        group.bench_function("fhp/table td", |b| {
-            b.iter(|| doc.select("table td").unwrap());
-        });
-    }
-
-    // fast-html-parser — compiled selector
-    #[cfg(feature = "css-selector")]
-    {
-        use fast_html_parser::{CompiledSelector, Selectable};
-        let doc = fast_html_parser::HtmlParser::parse(&wikipedia).unwrap();
-        let sel_a = CompiledSelector::new("a[href]").unwrap();
-        let sel_div = CompiledSelector::new("div.mw-body").unwrap();
-        let sel_td = CompiledSelector::new("table td").unwrap();
-
-        group.bench_function("fhp_compiled/a[href]", |b| {
-            b.iter(|| doc.select_compiled(&sel_a).unwrap());
-        });
-        group.bench_function("fhp_compiled/div.mw-body", |b| {
-            b.iter(|| doc.select_compiled(&sel_div).unwrap());
-        });
-        group.bench_function("fhp_compiled/table td", |b| {
-            b.iter(|| doc.select_compiled(&sel_td).unwrap());
-        });
-    }
-
-    // scraper
-    {
-        let doc = scraper::Html::parse_document(&wikipedia);
-        let sel_a = scraper::Selector::parse("a[href]").unwrap();
-        let sel_div = scraper::Selector::parse("div.mw-body").unwrap();
-        let sel_td = scraper::Selector::parse("table td").unwrap();
-
-        group.bench_function("scraper/a[href]", |b| {
-            b.iter(|| doc.select(&sel_a).count());
-        });
-        group.bench_function("scraper/div.mw-body", |b| {
-            b.iter(|| doc.select(&sel_div).count());
-        });
-        group.bench_function("scraper/table td", |b| {
-            b.iter(|| doc.select(&sel_td).count());
-        });
-    }
-
-    // tl
-    {
-        let dom = tl::parse(&wikipedia, tl::ParserOptions::default()).unwrap();
-
-        group.bench_function("tl/a[href]", |b| {
-            b.iter(|| {
-                dom.query_selector("a[href]")
-                    .map(|iter| iter.count())
-                    .unwrap_or(0)
-            });
-        });
-        group.bench_function("tl/div.mw-body", |b| {
-            b.iter(|| {
-                dom.query_selector("div.mw-body")
-                    .map(|iter| iter.count())
-                    .unwrap_or(0)
-            });
-        });
-        group.bench_function("tl/table td", |b| {
-            b.iter(|| {
-                dom.query_selector("table td")
-                    .map(|iter| iter.count())
-                    .unwrap_or(0)
-            });
-        });
-    }
-
-    group.finish();
+    register_selector_groups(
+        c,
+        "comparison/fast-html-parser/realworld_bench/realworld",
+        "wikipedia_590kb",
+        &wikipedia,
+        "realworld_wikipedia_590kb",
+        SELECTORS,
+        fhp_bench_order(),
+    );
 }
+
+#[cfg(not(feature = "css-selector"))]
+fn bench_realworld_select(_c: &mut Criterion) {}
 
 criterion_group!(
     benches,
+    validate_realworld_fixtures,
     bench_realworld_parse,
-    bench_realworld_parse_owned,
     bench_realworld_select
 );
 criterion_main!(benches);

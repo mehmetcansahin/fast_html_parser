@@ -1,7 +1,7 @@
 //! Benchmarks for fhp-selector: select throughput and matching speed.
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use fhp_selector::Selectable;
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
+use fhp_selector::{CompiledSelector, Selectable};
 use fhp_tree::parse;
 
 fn load_testdata(name: &str) -> String {
@@ -31,14 +31,24 @@ fn bench_select(c: &mut Criterion) {
         ("complex", "div > ul li a"),
     ];
 
-    let mut group = c.benchmark_group("select");
-    for (name, css) in &selectors {
-        group.bench_with_input(BenchmarkId::from_parameter(name), *css, |b, css| {
-            b.iter(|| {
-                let sel = doc.select(css).unwrap();
-                std::hint::black_box(sel.len());
-            });
-        });
+    let compiled: Vec<_> = selectors
+        .iter()
+        .map(|(name, css)| (*name, CompiledSelector::new(css).unwrap()))
+        .collect();
+
+    let mut group = c.benchmark_group("regression/fhp-selector/selector_bench/evaluate");
+    for (name, selector) in &compiled {
+        group.bench_with_input(
+            BenchmarkId::from_parameter(name),
+            selector,
+            |b, selector| {
+                b.iter_batched(
+                    || (),
+                    |_| doc.select_compiled(selector).unwrap(),
+                    BatchSize::LargeInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -47,20 +57,22 @@ fn bench_find_convenience(c: &mut Criterion) {
     let medium = load_testdata("medium_100kb.html");
     let doc = parse(&medium).unwrap();
 
-    let mut group = c.benchmark_group("find");
+    let mut group = c.benchmark_group("regression/fhp-selector/selector_bench/find");
 
     group.bench_function("find_by_tag", |b| {
-        b.iter(|| {
-            let sel = doc.find_by_tag(fhp_core::tag::Tag::P);
-            std::hint::black_box(sel.len());
-        });
+        b.iter_batched(
+            || (),
+            |_| doc.find_by_tag(fhp_core::tag::Tag::P),
+            BatchSize::LargeInput,
+        );
     });
 
     group.bench_function("find_by_class", |b| {
-        b.iter(|| {
-            let sel = doc.find_by_class("highlight");
-            std::hint::black_box(sel.len());
-        });
+        b.iter_batched(
+            || (),
+            |_| doc.find_by_class("highlight"),
+            BatchSize::LargeInput,
+        );
     });
 
     group.bench_function("find_by_id", |b| {
@@ -71,10 +83,11 @@ fn bench_find_convenience(c: &mut Criterion) {
     });
 
     group.bench_function("document_index_build", |b| {
-        b.iter(|| {
-            let idx = fhp_selector::DocumentIndex::build(&doc);
-            std::hint::black_box(&idx);
-        });
+        b.iter_batched(
+            || (),
+            |_| fhp_selector::DocumentIndex::build(&doc),
+            BatchSize::LargeInput,
+        );
     });
 
     group.finish();
@@ -84,59 +97,54 @@ fn bench_chaining(c: &mut Criterion) {
     let medium = load_testdata("medium_100kb.html");
     let doc = parse(&medium).unwrap();
 
-    c.bench_function("chaining", |b| {
-        b.iter(|| {
-            let sel = doc.select("div").unwrap();
-            let inner = sel.select("p").unwrap();
-            std::hint::black_box(inner.len());
-        });
+    let div = CompiledSelector::new("div").unwrap();
+    let p = CompiledSelector::new("p").unwrap();
+
+    let mut group = c.benchmark_group("regression/fhp-selector/selector_bench/chaining");
+    group.bench_function("compiled", |b| {
+        b.iter_batched(
+            || (),
+            |_| {
+                let selection = doc.select_compiled(&div).unwrap();
+                selection.select_compiled(&p).unwrap()
+            },
+            BatchSize::LargeInput,
+        );
     });
+    group.finish();
 }
 
-fn bench_compiled_selector(c: &mut Criterion) {
+fn bench_string_convenience(c: &mut Criterion) {
     let medium = load_testdata("medium_100kb.html");
     let doc = parse(&medium).unwrap();
 
-    let mut group = c.benchmark_group("compiled");
+    let mut group = c.benchmark_group("diagnostic/fhp-selector/selector_bench/string_convenience");
 
-    // Measure string-based select (includes cache lookup / parse).
+    // The selector cache is deliberately warm here. Compile cost has its own
+    // benchmark and evaluation uses CompiledSelector directly.
+    doc.select(".highlight").unwrap();
     group.bench_function("string_class", |b| {
-        b.iter(|| {
-            let sel = doc.select(".highlight").unwrap();
-            std::hint::black_box(sel.len());
-        });
+        b.iter_batched(
+            || (),
+            |_| doc.select(".highlight").unwrap(),
+            BatchSize::LargeInput,
+        );
     });
 
-    // Measure pre-compiled select (zero parse overhead).
-    let compiled = fhp_selector::CompiledSelector::new(".highlight").unwrap();
-    group.bench_function("compiled_class", |b| {
-        b.iter(|| {
-            let sel = doc.select_compiled(&compiled).unwrap();
-            std::hint::black_box(sel.len());
-        });
-    });
-
-    // Compound selector comparison.
+    doc.select("div > ul li a").unwrap();
     group.bench_function("string_compound", |b| {
-        b.iter(|| {
-            let sel = doc.select("div > ul li a").unwrap();
-            std::hint::black_box(sel.len());
-        });
-    });
-
-    let compiled_compound = fhp_selector::CompiledSelector::new("div > ul li a").unwrap();
-    group.bench_function("compiled_compound", |b| {
-        b.iter(|| {
-            let sel = doc.select_compiled(&compiled_compound).unwrap();
-            std::hint::black_box(sel.len());
-        });
+        b.iter_batched(
+            || (),
+            |_| doc.select("div > ul li a").unwrap(),
+            BatchSize::LargeInput,
+        );
     });
 
     group.finish();
 }
 
 fn bench_selector_parse(c: &mut Criterion) {
-    let mut group = c.benchmark_group("parse_selector");
+    let mut group = c.benchmark_group("regression/fhp-selector/selector_bench/compile");
 
     let selectors = [
         ("tag", "p"),
@@ -151,10 +159,11 @@ fn bench_selector_parse(c: &mut Criterion) {
 
     for (name, css) in &selectors {
         group.bench_with_input(BenchmarkId::from_parameter(name), *css, |b, css| {
-            b.iter(|| {
-                let list = fhp_selector::parser::parse_selector(css).unwrap();
-                std::hint::black_box(&list);
-            });
+            b.iter_batched(
+                || css,
+                |css| CompiledSelector::new(css).unwrap(),
+                BatchSize::LargeInput,
+            );
         });
     }
 
@@ -166,7 +175,7 @@ criterion_group!(
     bench_select,
     bench_find_convenience,
     bench_chaining,
-    bench_compiled_selector,
+    bench_string_convenience,
     bench_selector_parse
 );
 criterion_main!(benches);

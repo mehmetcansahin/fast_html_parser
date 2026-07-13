@@ -1,6 +1,6 @@
-//! Benchmarks for fhp-tree: parse throughput, node count, memory.
+//! Benchmarks for fhp-tree parse throughput and traversal operations.
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 fn load_testdata(name: &str) -> String {
     let path = format!(
@@ -21,14 +21,26 @@ fn bench_parse(c: &mut Criterion) {
         ("large_5mb", &large),
     ];
 
-    let mut group = c.benchmark_group("parse");
+    let mut group = c.benchmark_group("regression/fhp-tree/tree_bench/parse");
     for (name, input) in &inputs {
         group.throughput(Throughput::Bytes(input.len() as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(name), *input, |b, html| {
-            b.iter(|| {
-                let doc = fhp_tree::parse(html).unwrap();
-                std::hint::black_box(doc.node_count());
-            });
+        group.bench_with_input(BenchmarkId::new("build", name), *input, |b, html| {
+            b.iter_batched(
+                || html.as_str(),
+                |html| fhp_tree::parse(html).unwrap(),
+                BatchSize::LargeInput,
+            );
+        });
+        group.bench_with_input(BenchmarkId::new("lifecycle", name), *input, |b, html| {
+            b.iter_batched(
+                || html.as_str(),
+                |html| {
+                    let doc = fhp_tree::parse(html).unwrap();
+                    std::hint::black_box(doc.node_count());
+                    drop(doc);
+                },
+                BatchSize::LargeInput,
+            );
         });
     }
     group.finish();
@@ -38,7 +50,7 @@ fn bench_traversal(c: &mut Criterion) {
     let medium = load_testdata("medium_100kb.html");
     let doc = fhp_tree::parse(&medium).unwrap();
 
-    let mut group = c.benchmark_group("traversal");
+    let mut group = c.benchmark_group("regression/fhp-tree/tree_bench/traversal");
 
     group.bench_function("depth_first", |b| {
         b.iter(|| {
@@ -55,10 +67,7 @@ fn bench_traversal(c: &mut Criterion) {
     });
 
     group.bench_function("text_content", |b| {
-        b.iter(|| {
-            let text = doc.root().text_content();
-            std::hint::black_box(text.len());
-        });
+        b.iter_batched(|| (), |_| doc.root().text_content(), BatchSize::LargeInput);
     });
 
     group.finish();
