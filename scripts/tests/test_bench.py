@@ -493,13 +493,16 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn("Criterion settings", report)
         self.assertEqual(report.count("Single-run rows show"), 1)
 
-    def test_readme_summary_selects_only_fhp_semantic_build_and_selector_evaluation(self):
+    def test_readme_summary_uses_compact_dom_and_equal_work_tables(self):
         metadata = sample_metadata()
         selected_dom = self.published(
-            "comparison/1kb/parse/semantic_reference/dom/build/fast_html_parser", 100
+            "comparison/fast-html-parser/comparison_bench/synthetic/1kb/parse/"
+            "semantic_reference/dom/build/fast_html_parser",
+            100,
         )
-        selected_selector = self.published(
-            "realworld/wikipedia/selector/tag/semantic_reference/"
+        excluded_selector = self.published(
+            "comparison/fast-html-parser/realworld_bench/realworld/wikipedia_590kb/"
+            "selector/link_with_href/semantic_reference/"
             "evaluate_materialized/fast_html_parser",
             200,
         )
@@ -515,9 +518,23 @@ class MarkdownTests(unittest.TestCase):
             ),
         ]
         ratios = [
-            bench.ContractRatio("comparison/x/dom/build", "scraper", 2.0, 1.9, 2.1, 3),
             bench.ContractRatio(
-                "comparison/x/evaluate_materialized", "tl", 1.5, 1.4, 1.6, 3
+                "comparison/fast-html-parser/comparison_bench/synthetic/1kb/parse/"
+                "contract_equal/fhp_scraper_dom/dom/build",
+                "scraper",
+                2.0,
+                1.9,
+                2.1,
+                3,
+            ),
+            bench.ContractRatio(
+                "comparison/fast-html-parser/comparison_bench/synthetic/100kb/selector/"
+                "class_card/contract_equal/fhp_tl/evaluate_materialized",
+                "tl",
+                1.5,
+                1.4,
+                1.6,
+                3,
             ),
             bench.ContractRatio(
                 "comparison/x/dom/lifecycle", "scraper", 3.0, 2.9, 3.1, 3
@@ -526,16 +543,20 @@ class MarkdownTests(unittest.TestCase):
         ]
         summary = bench.generate_readme_summary(
             metadata,
-            [selected_dom, selected_selector, *excluded],
+            [selected_dom, excluded_selector, *excluded],
             ratios,
             Path("benchmarks/results/report.md"),
         )
-        self.assertIn(selected_dom.benchmark, summary)
-        self.assertIn(selected_selector.benchmark, summary)
+        self.assertIn("| Workload | FHP time | Range | Throughput |", summary)
+        self.assertIn("Synthetic 1 KB — DOM build", summary)
+        self.assertIn("| Equal workload | vs | Median | Range |", summary)
+        self.assertIn("Synthetic 100 KB — `.card` selector", summary)
+        self.assertNotIn(selected_dom.benchmark, summary)
+        self.assertNotIn(excluded_selector.benchmark, summary)
         for estimate in excluded:
             self.assertNotIn(estimate.benchmark, summary)
-        self.assertIn("comparison/x/dom/build", summary)
-        self.assertIn("comparison/x/evaluate_materialized", summary)
+        self.assertIn("`scraper`", summary)
+        self.assertIn("`tl`", summary)
         self.assertNotIn("comparison/x/dom/lifecycle", summary)
         self.assertNotIn("comparison/x/compile", summary)
 

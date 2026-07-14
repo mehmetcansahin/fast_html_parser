@@ -158,33 +158,27 @@ Full report: [2026-07-13-fd2d1b6e846f-aarch64-apple-darwin.md](benchmarks/result
 
 Environment: `aarch64-apple-darwin`, `rustc 1.93.0`, source `fd2d1b6e846f`.
 
-This compact table shows FHP semantic-reference DOM-build and materialized selector-evaluation rows. Owned, zero-copy, streaming, and all other absolute estimates remain in the full report; none is converted into a ratio unless its ID contains `contract_equal`.
+Representative FHP DOM-build results. Each range is the minimum and maximum run mean across three parser-order rotations. Owned, zero-copy, streaming, selector, and all other absolute estimates remain in the full report.
 
-| Benchmark | Category | Correctness status | Estimate | 95% CI / run range | Throughput | Runs |
-|---|---|---|---:|---:|---:|---:|
-| `comparison/fast-html-parser/comparison_bench/synthetic/100kb/parse/semantic_reference/dom/build/fast_html_parser` | `comparison` | semantic-reference (absolute) | 298.94 µs | run range: 292.55 µs–316.22 µs | 367.78 MiB/s | 3 |
-| `comparison/fast-html-parser/comparison_bench/synthetic/100kb/selector/class_card/semantic_reference/evaluate_materialized/fast_html_parser` | `comparison` | semantic-reference (absolute) | 12.97 µs | run range: 12.74 µs–16.30 µs | — | 3 |
-| `comparison/fast-html-parser/comparison_bench/synthetic/100kb/selector/descendant_div_p/semantic_reference/evaluate_materialized/fast_html_parser` | `comparison` | semantic-reference (absolute) | 86.37 µs | run range: 79.63 µs–89.83 µs | — | 3 |
-| `comparison/fast-html-parser/comparison_bench/synthetic/100kb/selector/tag_p/semantic_reference/evaluate_materialized/fast_html_parser` | `comparison` | semantic-reference (absolute) | 10.83 µs | run range: 10.20 µs–10.95 µs | — | 3 |
-| `comparison/fast-html-parser/comparison_bench/synthetic/1kb/parse/semantic_reference/dom/build/fast_html_parser` | `comparison` | semantic-reference (absolute) | 4.05 µs | run range: 3.98 µs–4.28 µs | 348.44 MiB/s | 3 |
-| `comparison/fast-html-parser/comparison_bench/synthetic/5mb/parse/semantic_reference/dom/build/fast_html_parser` | `comparison` | semantic-reference (absolute) | 13.88 ms | run range: 12.85 ms–15.42 ms | 370.70 MiB/s | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/github_301kb/parse/semantic_reference/dom/build/fast_html_parser` | `comparison` | semantic-reference (absolute) | 506.15 µs | run range: 485.71 µs–524.25 µs | 567.31 MiB/s | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/hackernews_34kb/parse/semantic_reference/dom/build/fast_html_parser` | `comparison` | semantic-reference (absolute) | 114.33 µs | run range: 112.90 µs–125.26 µs | 285.98 MiB/s | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/stackoverflow_415kb/parse/semantic_reference/dom/build/fast_html_parser` | `comparison` | semantic-reference (absolute) | 928.81 µs | run range: 926.67 µs–986.47 µs | 426.21 MiB/s | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/wikipedia_590kb/parse/semantic_reference/dom/build/fast_html_parser` | `comparison` | semantic-reference (absolute) | 1.80 ms | run range: 1.79 ms–2.04 ms | 312.19 MiB/s | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/wikipedia_590kb/selector/class_mw_body/semantic_reference/evaluate_materialized/fast_html_parser` | `comparison` | semantic-reference (absolute) | 84.90 µs | run range: 82.49 µs–92.80 µs | — | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/wikipedia_590kb/selector/descendant_table_td/semantic_reference/evaluate_materialized/fast_html_parser` | `comparison` | semantic-reference (absolute) | 546.25 µs | run range: 518.77 µs–810.98 µs | — | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/wikipedia_590kb/selector/link_with_href/semantic_reference/evaluate_materialized/fast_html_parser` | `comparison` | semantic-reference (absolute) | 168.39 µs | run range: 167.79 µs–173.42 µs | — | 3 |
+| Workload | FHP time | Range | Throughput |
+|---|---:|---:|---:|
+| Synthetic 100 KB — DOM build | 298.94 µs | 292.55 µs–316.22 µs | 367.78 MiB/s |
+| Synthetic 1 KB — DOM build | 4.05 µs | 3.98 µs–4.28 µs | 348.44 MiB/s |
+| Synthetic 5 MB — DOM build | 13.88 ms | 12.85 ms–15.42 ms | 370.70 MiB/s |
+| GitHub 301 KB — DOM build | 506.15 µs | 485.71 µs–524.25 µs | 567.31 MiB/s |
+| Hacker News 34 KB — DOM build | 114.33 µs | 112.90 µs–125.26 µs | 285.98 MiB/s |
+| Stack Overflow 415 KB — DOM build | 928.81 µs | 926.67 µs–986.47 µs | 426.21 MiB/s |
+| Wikipedia 590 KB — DOM build | 1.80 ms | 1.79 ms–2.04 ms | 312.19 MiB/s |
 
-Contract-equal ratios:
+Validated equal-work comparisons. Values above 1× mean the competitor took longer than FHP for the same checked result:
 
-| Contract-equal group | Competitor | Median competitor/FHP | Run range | Runs |
-|---|---|---:|---:|---:|
-| `comparison/fast-html-parser/comparison_bench/synthetic/100kb/selector/class_card/contract_equal/fhp_tl/evaluate_materialized` | `tl` | 2.078× | 2.024×–2.223× | 3 |
-| `comparison/fast-html-parser/comparison_bench/synthetic/100kb/selector/tag_p/contract_equal/fhp_tl/evaluate_materialized` | `tl` | 1.185× | 1.096×–1.310× | 3 |
-| `comparison/fast-html-parser/comparison_bench/synthetic/1kb/parse/contract_equal/fhp_scraper_dom/dom/build` | `scraper` | 7.352× | 7.225×–7.555× | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/github_301kb/parse/contract_equal/fhp_scraper_dom/dom/build` | `scraper` | 5.669× | 5.596×–5.826× | 3 |
-| `comparison/fast-html-parser/realworld_bench/realworld/hackernews_34kb/parse/contract_equal/fhp_scraper_dom/dom/build` | `scraper` | 5.444× | 5.318×–5.649× | 3 |
+| Equal workload | vs | Median | Range |
+|---|---|---:|---:|
+| Synthetic 100 KB — `.card` selector | `tl` | 2.078× | 2.024×–2.223× |
+| Synthetic 100 KB — `p` selector | `tl` | 1.185× | 1.096×–1.310× |
+| Synthetic 1 KB — DOM build | `scraper` | 7.352× | 7.225×–7.555× |
+| GitHub 301 KB — DOM build | `scraper` | 5.669× | 5.596×–5.826× |
+| Hacker News 34 KB — DOM build | `scraper` | 5.444× | 5.318×–5.649× |
 <!-- benchmark-summary:end -->
 
 The published table uses three independent parser-order rotations. Local

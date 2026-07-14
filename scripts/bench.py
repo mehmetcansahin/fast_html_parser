@@ -1553,6 +1553,79 @@ def _ratio_table(ratios: Sequence[ContractRatio]) -> str:
     return "\n".join(lines)
 
 
+_README_FIXTURE_LABELS = (
+    ("/synthetic/1kb/", "Synthetic 1 KB"),
+    ("/synthetic/100kb/", "Synthetic 100 KB"),
+    ("/synthetic/5mb/", "Synthetic 5 MB"),
+    ("/realworld/hackernews_34kb/", "Hacker News 34 KB"),
+    ("/realworld/github_301kb/", "GitHub 301 KB"),
+    ("/realworld/stackoverflow_415kb/", "Stack Overflow 415 KB"),
+    ("/realworld/wikipedia_590kb/", "Wikipedia 590 KB"),
+)
+
+_README_SELECTOR_LABELS = (
+    ("/selector/class_card/", "`.card` selector"),
+    ("/selector/tag_p/", "`p` selector"),
+    ("/selector/descendant_div_p/", "`div p` selector"),
+    ("/selector/class_mw_body/", "`.mw-body` selector"),
+    ("/selector/descendant_table_td/", "`table td` selector"),
+    ("/selector/link_with_href/", "`a[href]` selector"),
+)
+
+
+def _readme_workload_label(benchmark: str) -> str:
+    fixture = next(
+        (label for marker, label in _README_FIXTURE_LABELS if marker in benchmark),
+        "Benchmark",
+    )
+    if "/dom/build" in benchmark:
+        operation = "DOM build"
+    else:
+        operation = next(
+            (
+                label
+                for marker, label in _README_SELECTOR_LABELS
+                if marker in benchmark
+            ),
+            "selector evaluation",
+        )
+    return f"{fixture} — {operation}"
+
+
+def _readme_result_table(estimates: Sequence[PublishedEstimate]) -> str:
+    lines = [
+        "| Workload | FHP time | Range | Throughput |",
+        "|---|---:|---:|---:|",
+    ]
+    for estimate in estimates:
+        lines.append(
+            "| {} | {} | {}–{} | {} |".format(
+                _readme_workload_label(estimate.benchmark),
+                _format_duration(estimate.mean_ns),
+                _format_duration(estimate.lower_ns),
+                _format_duration(estimate.upper_ns),
+                _format_throughput(estimate),
+            )
+        )
+    return "\n".join(lines)
+
+
+def _readme_ratio_table(ratios: Sequence[ContractRatio]) -> str:
+    if not ratios:
+        return "No explicit `contract_equal` ratio was available in this run."
+    lines = [
+        "| Equal workload | vs | Median | Range |",
+        "|---|---|---:|---:|",
+    ]
+    for ratio in ratios:
+        lines.append(
+            f"| {_readme_workload_label(ratio.group)} "
+            f"| `{_escape_markdown(ratio.competitor)}` | {ratio.ratio:.3f}× "
+            f"| {ratio.lower:.3f}×–{ratio.upper:.3f}× |"
+        )
+    return "\n".join(lines)
+
+
 def generate_report_markdown(
     metadata: Mapping[str, Any],
     estimates: Sequence[PublishedEstimate],
@@ -1677,9 +1750,7 @@ def generate_readme_summary(
         for estimate in estimates
         if estimate.benchmark.startswith(("comparison/", "realworld/"))
         and "/semantic_reference/" in estimate.benchmark
-        and estimate.benchmark.endswith(
-            ("/dom/build/fast_html_parser", "/evaluate_materialized/fast_html_parser")
-        )
+        and estimate.benchmark.endswith("/dom/build/fast_html_parser")
     ]
     compact_ratios = [
         ratio
@@ -1695,16 +1766,17 @@ def generate_readme_summary(
         f"`rustc {environment['rustc']['release']}`, "
         f"source `{str(metadata['source_digest'])[:12]}`.",
         "",
-        "This compact table shows FHP semantic-reference DOM-build and "
-        "materialized selector-evaluation rows. Owned, zero-copy, streaming, "
-        "and all other absolute estimates remain in the full report; none is "
-        "converted into a ratio unless its ID contains `contract_equal`.",
+        "Representative FHP DOM-build results. Each range is the minimum and "
+        "maximum run mean across three parser-order rotations. Owned, "
+        "zero-copy, streaming, selector, and all other absolute estimates "
+        "remain in the full report.",
         "",
-        _result_table(absolute),
+        _readme_result_table(absolute),
         "",
-        "Contract-equal ratios:",
+        "Validated equal-work comparisons. Values above 1× mean the competitor "
+        "took longer than FHP for the same checked result:",
         "",
-        _ratio_table(compact_ratios),
+        _readme_ratio_table(compact_ratios),
     ]
     return "\n".join(lines)
 
