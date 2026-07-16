@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-16
+
 ### Added
 
 - `StreamParser::with_max_input_size` and `parse_stream_with_limit`, with raw
@@ -14,8 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Explicit `stop_on_create` and `stop_after_element` early-stop modes, plus
   owned `EarlyStopMatch`, `EarlyStopOutcome`, `EarlyStopProgress`, and
   `MatchCompleteness` results.
-- A vendored, checksum-pinned WHATWG named-character-reference source and a
-  generated compact trie covering multi-codepoint and legacy forms.
+- A vendored, checksum-pinned WHATWG named-character-reference source and
+  generated exact PHF and compact legacy-trie tables covering multi-codepoint
+  and legacy forms.
 - A curated canonical-DOM conformance corpus and fuzz targets for tokenizer
   chunking, one-shot/streaming tree equivalence, entities, and selectors.
 - Selector complexity limits and memoized matching with dense and sparse state
@@ -75,6 +78,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   views consistent.
 - Decode the complete named entity set with distinct text and attribute
   legacy-semicolon rules.
+
+### Performance
+
+- Cache insertion modes and element-kind counts in `TreeBuilder`, keeping
+  well-formed append and close operations on constant-time hot paths.
+- Decode named entities with an exact PHF plus a compact legacy trie in a
+  single input scan.
+- Track duplicate attributes inline for the first eight names and switch to a
+  case-insensitive `HashSet` fallback for larger attribute sets.
 
 ## [0.1.2] - 2026-06-08
 
