@@ -7,18 +7,31 @@
 #![allow(dead_code)]
 
 use std::fmt;
+use std::sync::OnceLock;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FhpBenchOrder {
-    First,
-    Middle,
-    Last,
+    FhpScraperTl,
+    FhpTlScraper,
+    ScraperFhpTl,
+    ScraperTlFhp,
+    TlFhpScraper,
+    TlScraperFhp,
 }
+
+pub const FHP_BENCH_ORDERS: &[(&str, FhpBenchOrder)] = &[
+    ("fhp-scraper-tl", FhpBenchOrder::FhpScraperTl),
+    ("fhp-tl-scraper", FhpBenchOrder::FhpTlScraper),
+    ("scraper-fhp-tl", FhpBenchOrder::ScraperFhpTl),
+    ("scraper-tl-fhp", FhpBenchOrder::ScraperTlFhp),
+    ("tl-fhp-scraper", FhpBenchOrder::TlFhpScraper),
+    ("tl-scraper-fhp", FhpBenchOrder::TlScraperFhp),
+];
 
 /// Resolve the benchmark registration order used to expose order/thermal bias.
 ///
-/// Local runs default to the middle position.  Automation can run all three
-/// accepted values and compare their distributions.
+/// Local runs use the historical FHP/scraper/tl order. Publication runs all
+/// six accepted permutations and compare their distributions.
 pub fn fhp_bench_order() -> FhpBenchOrder {
     match std::env::var("FHP_BENCH_ORDER") {
         Ok(value) => parse_fhp_bench_order(Some(&value)),
@@ -29,43 +42,55 @@ pub fn fhp_bench_order() -> FhpBenchOrder {
 
 pub fn parse_fhp_bench_order(value: Option<&str>) -> FhpBenchOrder {
     match value {
-        Some("fhp-first") => FhpBenchOrder::First,
-        Some("fhp-middle") | None => FhpBenchOrder::Middle,
-        Some("fhp-last") => FhpBenchOrder::Last,
+        Some("fhp-scraper-tl") | None => FhpBenchOrder::FhpScraperTl,
+        Some("fhp-tl-scraper") => FhpBenchOrder::FhpTlScraper,
+        Some("scraper-fhp-tl") => FhpBenchOrder::ScraperFhpTl,
+        Some("scraper-tl-fhp") => FhpBenchOrder::ScraperTlFhp,
+        Some("tl-fhp-scraper") => FhpBenchOrder::TlFhpScraper,
+        Some("tl-scraper-fhp") => FhpBenchOrder::TlScraperFhp,
         Some(value) => panic!(
-            "invalid FHP_BENCH_ORDER={value:?}; expected one of: fhp-first, fhp-middle, fhp-last"
+            "invalid FHP_BENCH_ORDER={value:?}; expected one of: {}",
+            FHP_BENCH_ORDERS
+                .iter()
+                .map(|(name, _)| *name)
+                .collect::<Vec<_>>()
+                .join(", ")
         ),
     }
 }
 
-/// Insert the fast-html-parser implementation block among other implementation
-/// blocks, then flatten without splitting any block.
-///
-/// `Middle` uses the lower-middle insertion point. With only one other
-/// implementation there is no distinct middle position, so it intentionally
-/// produces the same order as `First`.
-pub fn order_fhp_blocks<T>(fhp: Vec<T>, mut others: Vec<Vec<T>>, order: FhpBenchOrder) -> Vec<T> {
-    if fhp.is_empty() {
-        return others.into_iter().flatten().collect();
-    }
-
-    let insertion = match order {
-        FhpBenchOrder::First => 0,
-        FhpBenchOrder::Middle => others.len() / 2,
-        FhpBenchOrder::Last => others.len(),
+/// Apply one of all six DOM parser permutations without splitting an
+/// implementation block. Empty blocks are filtered after ordering, so every
+/// two-parser comparison observes each binary order three times.
+pub fn order_dom_parser_blocks<T>(
+    fhp: Vec<T>,
+    scraper: Vec<T>,
+    tl: Vec<T>,
+    order: FhpBenchOrder,
+) -> Vec<T> {
+    let blocks = match order {
+        FhpBenchOrder::FhpScraperTl => [fhp, scraper, tl],
+        FhpBenchOrder::FhpTlScraper => [fhp, tl, scraper],
+        FhpBenchOrder::ScraperFhpTl => [scraper, fhp, tl],
+        FhpBenchOrder::ScraperTlFhp => [scraper, tl, fhp],
+        FhpBenchOrder::TlFhpScraper => [tl, fhp, scraper],
+        FhpBenchOrder::TlScraperFhp => [tl, scraper, fhp],
     };
-    others.insert(insertion, fhp);
-    others.into_iter().flatten().collect()
+    blocks.into_iter().flatten().collect()
 }
 
-/// Small, portable observables shared by the DOM implementations.
+/// Deterministic digest of the canonical DOM contract stream.
+///
+/// The stream includes element names, sorted attribute name/value pairs,
+/// decoded text nodes, and explicit child boundaries. Comments and doctypes
+/// are deliberately outside the benchmark contract. `canonical_bytes` and
+/// `node_count` make accidental changes easier to diagnose, while equality is
+/// still defined over the complete digest value.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ObservableSignature {
-    pub paragraph_count: usize,
-    pub link_with_href_count: usize,
-    pub div_count: usize,
-    pub normalized_text_len: usize,
-    pub normalized_text_fnv1a: u64,
+pub struct CanonicalDomDigest {
+    pub node_count: u64,
+    pub canonical_bytes: u64,
+    pub fnv1a_128: u128,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,7 +111,7 @@ impl DomImplementation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SignatureParity {
+pub struct DigestParity {
     pub fast_html_parser_scraper: bool,
     pub fast_html_parser_tl: bool,
     pub scraper_tl: bool,
@@ -142,14 +167,14 @@ impl SelectorWorkloadContract {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FixtureContract {
     pub id: &'static str,
-    pub fast_html_parser: ObservableSignature,
-    pub scraper: ObservableSignature,
-    pub tl: ObservableSignature,
-    pub parity: SignatureParity,
+    pub fast_html_parser: CanonicalDomDigest,
+    pub scraper: CanonicalDomDigest,
+    pub tl: CanonicalDomDigest,
+    pub parity: DigestParity,
 }
 
 impl FixtureContract {
-    pub const fn expected(self, implementation: DomImplementation) -> ObservableSignature {
+    pub const fn expected(self, implementation: DomImplementation) -> CanonicalDomDigest {
         match implementation {
             DomImplementation::FastHtmlParser => self.fast_html_parser,
             DomImplementation::Scraper => self.scraper,
@@ -158,197 +183,160 @@ impl FixtureContract {
     }
 }
 
-const fn signature(
-    paragraph_count: usize,
-    link_with_href_count: usize,
-    div_count: usize,
-    normalized_text_len: usize,
-    normalized_text_fnv1a: u64,
-) -> ObservableSignature {
-    ObservableSignature {
-        paragraph_count,
-        link_with_href_count,
-        div_count,
-        normalized_text_len,
-        normalized_text_fnv1a,
+const CONTRACTS_JSON: &str = include_str!("../../../benchmarks/contracts.json");
+
+struct BenchmarkContracts {
+    fixtures: Vec<FixtureContract>,
+    selectors: Vec<SelectorWorkloadContract>,
+}
+
+static BENCHMARK_CONTRACTS: OnceLock<BenchmarkContracts> = OnceLock::new();
+
+fn required_object<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> &'a serde_json::Map<String, serde_json::Value> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_object)
+        .unwrap_or_else(|| panic!("benchmark contract field {key:?} must be an object"))
+}
+
+fn required_array<'a>(
+    object: &'a serde_json::Map<String, serde_json::Value>,
+    key: &str,
+) -> &'a Vec<serde_json::Value> {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .unwrap_or_else(|| panic!("benchmark contract field {key:?} must be an array"))
+}
+
+fn required_str(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> &'static str {
+    let value = object
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("benchmark contract field {key:?} must be a string"));
+    Box::leak(value.to_owned().into_boxed_str())
+}
+
+fn required_u64(object: &serde_json::Map<String, serde_json::Value>, key: &str) -> u64 {
+    object
+        .get(key)
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or_else(|| panic!("benchmark contract field {key:?} must be an unsigned integer"))
+}
+
+fn parse_digest(
+    digests: &serde_json::Map<String, serde_json::Value>,
+    implementation: &str,
+) -> CanonicalDomDigest {
+    let value = required_object(digests, implementation);
+    let fnv = value
+        .get("fnv1a_128")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_else(|| panic!("{implementation} fnv1a_128 must be a decimal string"))
+        .parse::<u128>()
+        .unwrap_or_else(|error| panic!("invalid {implementation} fnv1a_128: {error}"));
+    CanonicalDomDigest {
+        node_count: required_u64(value, "node_count"),
+        canonical_bytes: required_u64(value, "canonical_bytes"),
+        fnv1a_128: fnv,
     }
 }
 
-/// Checked-in observable contracts for every fixture used in published
-/// synthetic or real-world comparisons.
-pub const FIXTURE_CONTRACTS: &[FixtureContract] = &[
-    FixtureContract {
-        id: "synthetic_1kb",
-        fast_html_parser: signature(1, 2, 3, 297, 0x6068_0eac_279d_ed2a),
-        scraper: signature(1, 2, 3, 297, 0x6068_0eac_279d_ed2a),
-        tl: signature(1, 2, 3, 297, 0x6068_0eac_279d_ed2a),
-        parity: SignatureParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: true,
-            scraper_tl: true,
-        },
-    },
-    FixtureContract {
-        id: "synthetic_100kb",
-        fast_html_parser: signature(21, 171, 87, 25_181, 0x4bdc_7b80_0bcc_b4d5),
-        scraper: signature(21, 171, 87, 24_341, 0x3ccd_e5fe_fa53_af9b),
-        tl: signature(21, 171, 87, 25_181, 0x4bdc_7b80_0bcc_b4d5),
-        parity: SignatureParity {
-            fast_html_parser_scraper: false,
-            fast_html_parser_tl: true,
-            scraper_tl: false,
-        },
-    },
-    FixtureContract {
-        id: "synthetic_5mb",
-        fast_html_parser: signature(1_035, 4_228, 4_372, 1_217_079, 0x3911_df29_c108_0a8c),
-        scraper: signature(1_035, 4_228, 4_372, 1_138_859, 0xe884_1412_2f0c_5922),
-        tl: signature(1_035, 4_228, 4_372, 1_217_079, 0x3911_df29_c108_0a8c),
-        parity: SignatureParity {
-            fast_html_parser_scraper: false,
-            fast_html_parser_tl: true,
-            scraper_tl: false,
-        },
-    },
-    FixtureContract {
-        id: "realworld_hackernews_34kb",
-        fast_html_parser: signature(0, 226, 29, 3_716, 0x7584_70fc_a596_3323),
-        scraper: signature(0, 226, 29, 3_716, 0x7584_70fc_a596_3323),
-        tl: signature(0, 226, 29, 3_716, 0x7584_70fc_a596_3323),
-        parity: SignatureParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: true,
-            scraper_tl: true,
-        },
-    },
-    FixtureContract {
-        id: "realworld_github_301kb",
-        fast_html_parser: signature(3, 130, 141, 9_058, 0xd7cb_84b9_892e_4c49),
-        scraper: signature(3, 130, 141, 9_058, 0xd7cb_84b9_892e_4c49),
-        tl: signature(3, 130, 141, 9_268, 0xc81b_5b57_a069_7a99),
-        parity: SignatureParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: false,
-            scraper_tl: false,
-        },
-    },
-    FixtureContract {
-        id: "realworld_stackoverflow_415kb",
-        fast_html_parser: signature(9, 403, 939, 75_839, 0x047d_3a87_4eb7_c0e3),
-        scraper: signature(9, 403, 939, 75_854, 0xf011_2962_54f8_807e),
-        tl: signature(9, 402, 939, 68_612, 0xe873_4c69_73e8_487a),
-        parity: SignatureParity {
-            fast_html_parser_scraper: false,
-            fast_html_parser_tl: false,
-            scraper_tl: false,
-        },
-    },
-    FixtureContract {
-        id: "realworld_wikipedia_590kb",
-        fast_html_parser: signature(115, 1_908, 357, 106_232, 0xa79a_55f1_844a_6645),
-        scraper: signature(115, 1_908, 357, 106_420, 0x6c96_5a2e_a463_fc8f),
-        tl: signature(115, 1_905, 357, 106_232, 0xa79a_55f1_844a_6645),
-        parity: SignatureParity {
-            fast_html_parser_scraper: false,
-            fast_html_parser_tl: false,
-            scraper_tl: false,
-        },
-    },
-];
+fn benchmark_contracts() -> &'static BenchmarkContracts {
+    BENCHMARK_CONTRACTS.get_or_init(|| {
+        let document: serde_json::Value = serde_json::from_str(CONTRACTS_JSON)
+            .unwrap_or_else(|error| panic!("invalid benchmarks/contracts.json: {error}"));
+        let root = document
+            .as_object()
+            .expect("benchmarks/contracts.json root must be an object");
+        assert_eq!(
+            required_u64(root, "schema_version"),
+            1,
+            "unsupported benchmarks/contracts.json schema"
+        );
+        let canonical = required_object(root, "canonical_dom");
+        let mut fixtures = Vec::new();
+        for value in required_array(canonical, "fixtures") {
+            let object = value
+                .as_object()
+                .expect("canonical_dom fixture must be an object");
+            let id = required_str(object, "id");
+            let digests = required_object(object, "digests");
+            let fast_html_parser = parse_digest(digests, "fast_html_parser");
+            let scraper = parse_digest(digests, "scraper");
+            let tl = parse_digest(digests, "tl");
+            fixtures.push(FixtureContract {
+                id,
+                fast_html_parser,
+                scraper,
+                tl,
+                parity: DigestParity {
+                    fast_html_parser_scraper: fast_html_parser == scraper,
+                    fast_html_parser_tl: fast_html_parser == tl,
+                    scraper_tl: scraper == tl,
+                },
+            });
+        }
 
-/// Checked-in result counts for every published selector workload. These are
-/// separate from whole-document signatures because selector support can differ
-/// even when the basic fixture observables are identical.
-pub const SELECTOR_WORKLOAD_CONTRACTS: &[SelectorWorkloadContract] = &[
-    SelectorWorkloadContract {
-        fixture_id: "synthetic_100kb",
-        id: "tag_p",
-        css: "p",
-        fast_html_parser_count: 21,
-        scraper_count: 21,
-        tl_count: 21,
-        parity: SelectorParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: true,
-            scraper_tl: true,
-        },
-    },
-    SelectorWorkloadContract {
-        fixture_id: "synthetic_100kb",
-        id: "class_card",
-        css: ".card",
-        fast_html_parser_count: 20,
-        scraper_count: 20,
-        tl_count: 20,
-        parity: SelectorParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: true,
-            scraper_tl: true,
-        },
-    },
-    SelectorWorkloadContract {
-        fixture_id: "synthetic_100kb",
-        id: "descendant_div_p",
-        css: "div p",
-        fast_html_parser_count: 21,
-        scraper_count: 21,
-        tl_count: 0,
-        parity: SelectorParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: false,
-            scraper_tl: false,
-        },
-    },
-    SelectorWorkloadContract {
-        fixture_id: "realworld_wikipedia_590kb",
-        id: "link_with_href",
-        css: "a[href]",
-        fast_html_parser_count: 1_908,
-        scraper_count: 1_908,
-        tl_count: 1_905,
-        parity: SelectorParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: false,
-            scraper_tl: false,
-        },
-    },
-    SelectorWorkloadContract {
-        fixture_id: "realworld_wikipedia_590kb",
-        id: "class_mw_body",
-        css: "main.mw-body",
-        fast_html_parser_count: 1,
-        scraper_count: 1,
-        tl_count: 1,
-        parity: SelectorParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: true,
-            scraper_tl: true,
-        },
-    },
-    SelectorWorkloadContract {
-        fixture_id: "realworld_wikipedia_590kb",
-        id: "descendant_table_td",
-        css: "table td",
-        fast_html_parser_count: 60,
-        scraper_count: 60,
-        tl_count: 0,
-        parity: SelectorParity {
-            fast_html_parser_scraper: true,
-            fast_html_parser_tl: false,
-            scraper_tl: false,
-        },
-    },
-];
+        let mut selectors = Vec::new();
+        for value in required_array(root, "selectors") {
+            let object = value
+                .as_object()
+                .expect("selector contract must be an object");
+            let counts = required_object(object, "counts");
+            let fast_html_parser_count = required_u64(counts, "fast_html_parser") as usize;
+            let scraper_count = required_u64(counts, "scraper") as usize;
+            let tl_count = required_u64(counts, "tl") as usize;
+            selectors.push(SelectorWorkloadContract {
+                fixture_id: required_str(object, "fixture_id"),
+                id: required_str(object, "id"),
+                css: required_str(object, "css"),
+                fast_html_parser_count,
+                scraper_count,
+                tl_count,
+                parity: SelectorParity {
+                    fast_html_parser_scraper: fast_html_parser_count == scraper_count,
+                    fast_html_parser_tl: fast_html_parser_count == tl_count,
+                    scraper_tl: scraper_count == tl_count,
+                },
+            });
+        }
+
+        assert!(
+            !fixtures.is_empty(),
+            "benchmark fixture contracts cannot be empty"
+        );
+        assert!(
+            !selectors.is_empty(),
+            "benchmark selector contracts cannot be empty"
+        );
+        BenchmarkContracts {
+            fixtures,
+            selectors,
+        }
+    })
+}
+
+pub fn fixture_contracts() -> &'static [FixtureContract] {
+    &benchmark_contracts().fixtures
+}
+
+pub fn selector_workload_contracts() -> &'static [SelectorWorkloadContract] {
+    &benchmark_contracts().selectors
+}
 
 pub fn fixture_contract(id: &str) -> &'static FixtureContract {
-    FIXTURE_CONTRACTS
+    fixture_contracts()
         .iter()
         .find(|contract| contract.id == id)
         .unwrap_or_else(|| panic!("missing checked-in benchmark contract for fixture {id:?}"))
 }
 
 pub fn selector_workload_contract(fixture_id: &str, id: &str) -> &'static SelectorWorkloadContract {
-    SELECTOR_WORKLOAD_CONTRACTS
+    selector_workload_contracts()
         .iter()
         .find(|contract| contract.fixture_id == fixture_id && contract.id == id)
         .unwrap_or_else(|| {
@@ -357,154 +345,287 @@ pub fn selector_workload_contract(fixture_id: &str, id: &str) -> &'static Select
             )
         })
 }
-
-impl fmt::Display for ObservableSignature {
+impl fmt::Display for CanonicalDomDigest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "p={}, a[href]={}, div={}, text_len={}, text_fnv1a={:#018x}",
-            self.paragraph_count,
-            self.link_with_href_count,
-            self.div_count,
-            self.normalized_text_len,
-            self.normalized_text_fnv1a
+            "nodes={}, canonical_bytes={}, fnv1a_128={:#034x}",
+            self.node_count, self.canonical_bytes, self.fnv1a_128
         )
     }
 }
 
-/// FNV-1a offset basis for the 64-bit contract hash.
-const FNV1A_64_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-/// FNV-1a prime for the 64-bit contract hash.
-const FNV1A_64_PRIME: u64 = 0x0000_0100_0000_01b3;
+/// FNV-1a offset basis for the 128-bit contract digest.
+const FNV1A_128_OFFSET: u128 = 0x6c62_272e_07bb_0142_62b8_2175_6295_c58d;
+/// FNV-1a prime for the 128-bit contract digest.
+const FNV1A_128_PRIME: u128 = 0x0000_0000_0100_0000_0000_0000_0000_013b;
 
-pub fn fnv1a_64(bytes: &[u8]) -> u64 {
-    bytes.iter().fold(FNV1A_64_OFFSET, |hash, byte| {
-        (hash ^ u64::from(*byte)).wrapping_mul(FNV1A_64_PRIME)
-    })
+struct CanonicalDomEncoder {
+    hash: u128,
+    canonical_bytes: u64,
+    node_count: u64,
 }
 
-/// Normalize parser text without erasing word order.
-///
-/// Unicode whitespace runs are collapsed to a single ASCII space. Entity
-/// decoding is intentionally not done here: FHP and scraper already expose
-/// decoded text, while the `tl` adapter decodes its source text exactly once.
-pub fn normalized_text_signature(text: &str) -> (usize, u64) {
-    let mut normalized = String::with_capacity(text.len());
-    let mut pending_space = false;
-
-    for ch in text.chars() {
-        if ch.is_whitespace() {
-            pending_space = !normalized.is_empty();
-        } else {
-            if pending_space {
-                normalized.push(' ');
-                pending_space = false;
-            }
-            normalized.push(ch);
+impl CanonicalDomEncoder {
+    fn new() -> Self {
+        Self {
+            hash: FNV1A_128_OFFSET,
+            canonical_bytes: 0,
+            node_count: 0,
         }
     }
 
-    (normalized.len(), fnv1a_64(normalized.as_bytes()))
+    fn write(&mut self, bytes: &[u8]) {
+        for byte in bytes {
+            self.hash = (self.hash ^ u128::from(*byte)).wrapping_mul(FNV1A_128_PRIME);
+        }
+        self.canonical_bytes += bytes.len() as u64;
+    }
+
+    /// Write an unambiguous typed field. Length-prefixing ensures that values
+    /// containing delimiters cannot collide with adjacent fields.
+    fn field(&mut self, kind: u8, value: &[u8]) {
+        self.write(&[kind]);
+        self.write(&(value.len() as u64).to_le_bytes());
+        self.write(value);
+    }
+
+    fn begin_document(&mut self) {
+        self.node_count += 1;
+        self.field(b'D', &[]);
+    }
+
+    fn end_document(&mut self) {
+        self.field(b'd', &[]);
+    }
+
+    fn begin_element(&mut self, tag: &str, attrs: &mut Vec<(String, String)>) {
+        self.node_count += 1;
+        let tag = tag.to_ascii_lowercase();
+        self.field(b'E', tag.as_bytes());
+
+        for (name, _) in attrs.iter_mut() {
+            name.make_ascii_lowercase();
+        }
+        attrs.sort_unstable_by(|left, right| left.0.cmp(&right.0).then(left.1.cmp(&right.1)));
+        self.field(b'#', &(attrs.len() as u64).to_le_bytes());
+        for (name, value) in attrs {
+            self.field(b'A', name.as_bytes());
+            self.field(b'V', value.as_bytes());
+        }
+    }
+
+    fn end_element(&mut self) {
+        self.field(b'e', &[]);
+    }
+
+    fn text(&mut self, text: &str) {
+        self.node_count += 1;
+        self.field(b'T', text.as_bytes());
+    }
+
+    fn finish(self) -> CanonicalDomDigest {
+        CanonicalDomDigest {
+            node_count: self.node_count,
+            canonical_bytes: self.canonical_bytes,
+            fnv1a_128: self.hash,
+        }
+    }
 }
 
 #[cfg(feature = "css-selector")]
-pub fn fast_html_parser_signature(html: &str) -> ObservableSignature {
+pub fn fast_html_parser_digest(html: &str) -> CanonicalDomDigest {
     let doc = fast_html_parser::HtmlParser::parse(html)
         .unwrap_or_else(|error| panic!("fast-html-parser failed contract parse: {error}"));
-    fast_html_parser_document_signature(&doc)
+    fast_html_parser_document_digest(&doc)
 }
 
 #[cfg(feature = "css-selector")]
-pub fn fast_html_parser_owned_signature(html: &str) -> ObservableSignature {
+pub fn fast_html_parser_owned_digest(html: &str) -> CanonicalDomDigest {
     let doc = fast_html_parser::HtmlParser::parse_owned(html.to_owned())
         .unwrap_or_else(|error| panic!("fast-html-parser failed owned contract parse: {error}"));
-    fast_html_parser_document_signature(&doc)
+    fast_html_parser_document_digest(&doc)
 }
 
 #[cfg(feature = "css-selector")]
-fn fast_html_parser_document_signature(doc: &fast_html_parser::Document) -> ObservableSignature {
-    use fast_html_parser::Selectable;
+fn fast_html_parser_document_digest(doc: &fast_html_parser::Document) -> CanonicalDomDigest {
+    fn encode_node(
+        doc: &fast_html_parser::Document,
+        node_id: fast_html_parser::NodeId,
+        encoder: &mut CanonicalDomEncoder,
+    ) {
+        let node = doc.get(node_id);
+        if node.is_text() {
+            encoder.text(node.text());
+            return;
+        }
+        if node.is_comment() || node.is_doctype() {
+            return;
+        }
 
-    let text = doc.root().text_content();
-    let (normalized_text_len, normalized_text_fnv1a) = normalized_text_signature(&text);
-
-    ObservableSignature {
-        paragraph_count: doc.select("p").expect("valid contract selector").len(),
-        link_with_href_count: doc
-            .select("a[href]")
-            .expect("valid contract selector")
-            .len(),
-        div_count: doc.select("div").expect("valid contract selector").len(),
-        normalized_text_len,
-        normalized_text_fnv1a,
+        let arena = doc.arena();
+        let tag = node
+            .tag()
+            .as_str()
+            .or_else(|| arena.unknown_tag_name(node.id()))
+            .expect("non-root benchmark element must have a tag name");
+        let mut attrs = node
+            .attrs()
+            .iter()
+            .map(|attr| {
+                (
+                    arena.attr_name(attr).to_owned(),
+                    arena.attr_value(attr).unwrap_or("").to_owned(),
+                )
+            })
+            .collect::<Vec<_>>();
+        encoder.begin_element(tag, &mut attrs);
+        for child in node.children() {
+            encode_node(doc, child, encoder);
+        }
+        encoder.end_element();
     }
+
+    let mut encoder = CanonicalDomEncoder::new();
+    encoder.begin_document();
+    for child in doc.root().children() {
+        encode_node(doc, child, &mut encoder);
+    }
+    encoder.end_document();
+    encoder.finish()
 }
 
-pub fn scraper_signature(html: &str) -> ObservableSignature {
+pub fn scraper_digest(html: &str) -> CanonicalDomDigest {
     let doc = scraper::Html::parse_document(html);
-    let paragraph = scraper::Selector::parse("p").expect("valid contract selector");
-    let link_with_href = scraper::Selector::parse("a[href]").expect("valid contract selector");
-    let div = scraper::Selector::parse("div").expect("valid contract selector");
-    let text = doc.root_element().text().collect::<String>();
-    let (normalized_text_len, normalized_text_fnv1a) = normalized_text_signature(&text);
+    let mut encoder = CanonicalDomEncoder::new();
+    encoder.begin_document();
 
-    ObservableSignature {
-        paragraph_count: doc.select(&paragraph).count(),
-        link_with_href_count: doc.select(&link_with_href).count(),
-        div_count: doc.select(&div).count(),
-        normalized_text_len,
-        normalized_text_fnv1a,
+    // `scraper` does not re-export ego-tree's traversal edge type. Traverse in
+    // document order and keep the open element ids inferred from NodeRef::id.
+    let mut open = Vec::new();
+    for node in doc.tree.root().descendants().skip(1) {
+        let mut ancestors = node
+            .ancestors()
+            .filter(|ancestor| ancestor.value().is_element())
+            .map(|ancestor| ancestor.id())
+            .collect::<Vec<_>>();
+        ancestors.reverse();
+
+        let shared = open
+            .iter()
+            .zip(&ancestors)
+            .take_while(|(left, right)| left == right)
+            .count();
+        for _ in shared..open.len() {
+            encoder.end_element();
+        }
+        open.truncate(shared);
+
+        match node.value() {
+            scraper::Node::Element(element) => {
+                let mut attrs = element
+                    .attrs
+                    .iter()
+                    .map(|(name, value)| {
+                        let name = name.prefix.as_ref().map_or_else(
+                            || name.local.to_string(),
+                            |prefix| format!("{prefix}:{}", name.local),
+                        );
+                        (name, value.to_string())
+                    })
+                    .collect::<Vec<_>>();
+                encoder.begin_element(element.name(), &mut attrs);
+                open.push(node.id());
+            }
+            scraper::Node::Text(text) => encoder.text(text),
+            _ => {}
+        }
     }
+    for _ in 0..open.len() {
+        encoder.end_element();
+    }
+    encoder.end_document();
+    encoder.finish()
 }
 
-pub fn tl_signature(html: &str) -> ObservableSignature {
+pub fn tl_digest(html: &str) -> CanonicalDomDigest {
     let dom = tl::parse(html, tl::ParserOptions::default())
         .unwrap_or_else(|error| panic!("tl failed contract parse: {error}"));
-    tl_dom_signature(&dom)
+    tl_dom_digest(&dom)
 }
 
-pub fn tl_owned_signature(html: &str) -> ObservableSignature {
+pub fn tl_owned_digest(html: &str) -> CanonicalDomDigest {
     // SAFETY: `VDomGuard` owns the input allocation and is kept alive while
     // its borrowed DOM is observed.
     let guard = unsafe { tl::parse_owned(html.to_owned(), tl::ParserOptions::default()) }
         .unwrap_or_else(|error| panic!("tl failed owned contract parse: {error}"));
-    tl_dom_signature(guard.get_ref())
+    tl_dom_digest(guard.get_ref())
 }
 
-fn tl_dom_signature(dom: &tl::VDom<'_>) -> ObservableSignature {
-    let parser = dom.parser();
-    let mut text = String::new();
-    for handle in dom.children() {
-        if let Some(node) = handle.get(parser) {
-            text.push_str(&node.inner_text(parser));
+fn tl_dom_digest(dom: &tl::VDom<'_>) -> CanonicalDomDigest {
+    fn encode_node(
+        node: &tl::Node<'_>,
+        parser: &tl::Parser<'_>,
+        decode_text_entities: bool,
+        encoder: &mut CanonicalDomEncoder,
+    ) {
+        match node {
+            tl::Node::Tag(tag) => {
+                let name = tag.name().as_utf8_str();
+                let mut attrs = tag
+                    .attributes()
+                    .iter()
+                    .map(|(name, value)| {
+                        let value = value.unwrap_or_default();
+                        (
+                            name.into_owned(),
+                            fhp_tokenizer::entity::decode_attribute_entities(&value).into_owned(),
+                        )
+                    })
+                    .collect::<Vec<_>>();
+                encoder.begin_element(&name, &mut attrs);
+
+                let child_decode = !matches!(
+                    name.as_ref(),
+                    "script" | "style" | "iframe" | "xmp" | "noembed" | "noframes" | "plaintext"
+                );
+                for child in tag.children().top().iter() {
+                    if let Some(child) = child.get(parser) {
+                        encode_node(child, parser, child_decode, encoder);
+                    }
+                }
+                encoder.end_element();
+            }
+            tl::Node::Raw(text) => {
+                let text = text.as_utf8_str();
+                if decode_text_entities {
+                    let decoded = fhp_tokenizer::entity::decode_entities(&text);
+                    encoder.text(&decoded);
+                } else {
+                    encoder.text(&text);
+                }
+            }
+            tl::Node::Comment(_) => {}
         }
     }
-    let decoded = fhp_tokenizer::entity::decode_entities(&text);
-    let (normalized_text_len, normalized_text_fnv1a) = normalized_text_signature(&decoded);
 
-    ObservableSignature {
-        paragraph_count: dom
-            .query_selector("p")
-            .expect("valid contract selector")
-            .count(),
-        link_with_href_count: dom
-            .query_selector("a[href]")
-            .expect("valid contract selector")
-            .count(),
-        div_count: dom
-            .query_selector("div")
-            .expect("valid contract selector")
-            .count(),
-        normalized_text_len,
-        normalized_text_fnv1a,
+    let parser = dom.parser();
+    let mut encoder = CanonicalDomEncoder::new();
+    encoder.begin_document();
+    for handle in dom.children() {
+        if let Some(node) = handle.get(parser) {
+            encode_node(node, parser, true, &mut encoder);
+        }
     }
+    encoder.end_document();
+    encoder.finish()
 }
 
-pub fn assert_signature(
+pub fn assert_digest(
     fixture: &str,
     implementation: &str,
-    actual: ObservableSignature,
-    expected: ObservableSignature,
+    actual: CanonicalDomDigest,
+    expected: CanonicalDomDigest,
 ) {
     assert_eq!(
         actual, expected,
@@ -628,12 +749,12 @@ pub fn validate_fixture_contract(contract: &FixtureContract, html: &str) {
     for (implementation, actual) in [
         (
             DomImplementation::FastHtmlParser,
-            fast_html_parser_signature(html),
+            fast_html_parser_digest(html),
         ),
-        (DomImplementation::Scraper, scraper_signature(html)),
-        (DomImplementation::Tl, tl_signature(html)),
+        (DomImplementation::Scraper, scraper_digest(html)),
+        (DomImplementation::Tl, tl_digest(html)),
     ] {
-        assert_signature(
+        assert_digest(
             contract.id,
             implementation.as_str(),
             actual,
@@ -641,18 +762,13 @@ pub fn validate_fixture_contract(contract: &FixtureContract, html: &str) {
         );
     }
 
-    assert_signature(
+    assert_digest(
         contract.id,
         "fast_html_parser_owned",
-        fast_html_parser_owned_signature(html),
+        fast_html_parser_owned_digest(html),
         contract.fast_html_parser,
     );
-    assert_signature(
-        contract.id,
-        "tl_owned",
-        tl_owned_signature(html),
-        contract.tl,
-    );
+    assert_digest(contract.id, "tl_owned", tl_owned_digest(html), contract.tl);
 }
 
 /// Validate the streaming comparison's contract: a no-op rewrite must invoke

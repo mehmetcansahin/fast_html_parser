@@ -4,9 +4,10 @@
 mod contract_support;
 
 use contract_support::{
-    FIXTURE_CONTRACTS, FhpBenchOrder, SELECTOR_WORKLOAD_CONTRACTS, assert_selector_workload_counts,
-    fixture_contract, order_fhp_blocks, parse_fhp_bench_order, selector_workload_counts,
-    validate_fixture_contract, validate_lol_html_passthrough,
+    FHP_BENCH_ORDERS, FhpBenchOrder, assert_selector_workload_counts, fast_html_parser_digest,
+    fast_html_parser_owned_digest, fixture_contract, fixture_contracts, order_dom_parser_blocks,
+    parse_fhp_bench_order, scraper_digest, selector_workload_contracts, selector_workload_counts,
+    tl_digest, tl_owned_digest, validate_fixture_contract, validate_lol_html_passthrough,
 };
 
 const SMALL_HTML: &str = include_str!("../../../testdata/small_1kb.html");
@@ -28,7 +29,7 @@ const FIXTURES: &[(&str, &str)] = &[
 ];
 
 #[test]
-fn fixture_observables_match_checked_in_contracts() {
+fn fixture_canonical_digests_match_checked_in_contracts() {
     for &(id, html) in FIXTURES {
         let contract = fixture_contract(id);
         validate_fixture_contract(contract, html);
@@ -37,8 +38,8 @@ fn fixture_observables_match_checked_in_contracts() {
 }
 
 #[test]
-fn parity_classification_matches_checked_in_signatures() {
-    for contract in FIXTURE_CONTRACTS {
+fn parity_classification_matches_checked_in_digests() {
+    for contract in fixture_contracts() {
         assert_eq!(
             contract.parity.fast_html_parser_scraper,
             contract.fast_html_parser == contract.scraper,
@@ -62,58 +63,128 @@ fn parity_classification_matches_checked_in_signatures() {
 
 #[test]
 fn benchmark_registration_order_contract_is_explicit() {
-    assert_eq!(parse_fhp_bench_order(None), FhpBenchOrder::Middle);
-    assert_eq!(
-        parse_fhp_bench_order(Some("fhp-first")),
-        FhpBenchOrder::First
-    );
-    assert_eq!(
-        parse_fhp_bench_order(Some("fhp-middle")),
-        FhpBenchOrder::Middle
-    );
-    assert_eq!(parse_fhp_bench_order(Some("fhp-last")), FhpBenchOrder::Last);
-
-    let fhp = vec![0, 1];
-    let others = vec![vec![10, 11], vec![20, 21], vec![30]];
-    assert_eq!(
-        order_fhp_blocks(fhp.clone(), others.clone(), FhpBenchOrder::First),
-        vec![0, 1, 10, 11, 20, 21, 30]
-    );
-    assert_eq!(
-        order_fhp_blocks(fhp.clone(), others.clone(), FhpBenchOrder::Middle),
-        vec![10, 11, 0, 1, 20, 21, 30]
-    );
-    assert_eq!(
-        order_fhp_blocks(fhp.clone(), others.clone(), FhpBenchOrder::Last),
-        vec![10, 11, 20, 21, 30, 0, 1]
-    );
-
-    let only_other = vec![vec![10, 11]];
-    assert_eq!(
-        order_fhp_blocks(fhp.clone(), only_other.clone(), FhpBenchOrder::First),
-        vec![0, 1, 10, 11]
-    );
-    assert_eq!(
-        order_fhp_blocks(fhp.clone(), only_other.clone(), FhpBenchOrder::Middle),
-        vec![0, 1, 10, 11],
-        "two implementations have no unique middle; middle intentionally matches first"
-    );
-    assert_eq!(
-        order_fhp_blocks(fhp, only_other, FhpBenchOrder::Last),
-        vec![10, 11, 0, 1]
-    );
+    assert_eq!(parse_fhp_bench_order(None), FhpBenchOrder::FhpScraperTl);
+    for &(name, order) in FHP_BENCH_ORDERS {
+        assert_eq!(parse_fhp_bench_order(Some(name)), order);
+    }
 
     let invalid = std::panic::catch_unwind(|| parse_fhp_bench_order(Some("random")));
     let message = invalid
         .expect_err("unknown benchmark order must panic")
         .downcast::<String>()
         .expect("panic should include a clear owned message");
-    assert!(message.contains("fhp-first, fhp-middle, fhp-last"));
+    assert!(message.contains("fhp-scraper-tl"));
+    assert!(message.contains("tl-scraper-fhp"));
+
+    let fhp = vec!["fhp-build", "fhp-drop"];
+    let scraper = vec!["scraper-build", "scraper-drop"];
+    let tl = vec!["tl-build", "tl-drop"];
+    assert_eq!(
+        order_dom_parser_blocks(
+            fhp.clone(),
+            scraper.clone(),
+            tl.clone(),
+            FhpBenchOrder::FhpScraperTl,
+        ),
+        [fhp.clone(), scraper.clone(), tl.clone()].concat()
+    );
+    assert_eq!(
+        order_dom_parser_blocks(
+            fhp.clone(),
+            scraper.clone(),
+            tl.clone(),
+            FhpBenchOrder::FhpTlScraper,
+        ),
+        [fhp.clone(), tl.clone(), scraper.clone()].concat()
+    );
+    assert_eq!(
+        order_dom_parser_blocks(
+            fhp.clone(),
+            scraper.clone(),
+            tl.clone(),
+            FhpBenchOrder::TlScraperFhp,
+        ),
+        [tl, scraper, fhp].concat()
+    );
+
+    let pair_orders = FHP_BENCH_ORDERS
+        .iter()
+        .map(|(_, order)| order_dom_parser_blocks(vec!["fhp"], Vec::new(), vec!["tl"], *order))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        pair_orders.iter().filter(|order| order[0] == "fhp").count(),
+        3
+    );
+    assert_eq!(
+        pair_orders.iter().filter(|order| order[0] == "tl").count(),
+        3
+    );
+}
+
+#[test]
+fn canonical_digest_covers_tag_attributes_text_and_child_order() {
+    let baseline = fast_html_parser_digest("<main a='1' b='2'><i>x</i><b>y</b></main>");
+    assert_eq!(
+        baseline,
+        fast_html_parser_digest("<main b='2' a='1'><i>x</i><b>y</b></main>"),
+        "source attribute order must not affect the canonical DOM"
+    );
+    assert_ne!(
+        baseline,
+        fast_html_parser_digest("<section a='1' b='2'><i>x</i><b>y</b></section>"),
+        "tag names must affect the canonical DOM"
+    );
+    assert_ne!(
+        baseline,
+        fast_html_parser_digest("<main a='changed' b='2'><i>x</i><b>y</b></main>"),
+        "attribute values must affect the canonical DOM"
+    );
+    assert_ne!(
+        baseline,
+        fast_html_parser_digest("<main a='1' b='2'><i>z</i><b>y</b></main>"),
+        "text must affect the canonical DOM"
+    );
+    assert_ne!(
+        baseline,
+        fast_html_parser_digest("<main a='1' b='2'><b>y</b><i>x</i></main>"),
+        "child order must affect the canonical DOM"
+    );
+
+    assert_eq!(
+        baseline,
+        tl_digest("<main b='2' a='1'><i>x</i><b>y</b></main>"),
+        "equivalent adapter DOMs must produce the same canonical digest"
+    );
+    assert_ne!(
+        baseline,
+        scraper_digest("<main a='1' b='2'><i>x</i><b>y</b></main>"),
+        "scraper's synthetic html/head/body wrappers are part of its DOM contract"
+    );
+}
+
+#[test]
+#[ignore = "maintenance helper: emits values used to refresh benchmarks/contracts.json"]
+fn dump_canonical_fixture_contracts() {
+    for &(id, html) in FIXTURES {
+        println!("{id}");
+        for (implementation, digest) in [
+            ("fast_html_parser", fast_html_parser_digest(html)),
+            (
+                "fast_html_parser_owned",
+                fast_html_parser_owned_digest(html),
+            ),
+            ("scraper", scraper_digest(html)),
+            ("tl", tl_digest(html)),
+            ("tl_owned", tl_owned_digest(html)),
+        ] {
+            println!("  {implementation}: {digest:?}");
+        }
+    }
 }
 
 #[test]
 fn selector_workloads_match_checked_in_counts_and_parity() {
-    for contract in SELECTOR_WORKLOAD_CONTRACTS {
+    for contract in selector_workload_contracts() {
         let html = match contract.fixture_id {
             "synthetic_100kb" => MEDIUM_HTML,
             "realworld_wikipedia_590kb" => WIKIPEDIA_HTML,

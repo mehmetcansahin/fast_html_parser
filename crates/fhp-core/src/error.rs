@@ -1,5 +1,6 @@
 /// Errors that can occur during HTML parsing.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ParseError {
     /// Encountered an unexpected byte during tokenization.
     #[error("unexpected byte 0x{byte:02X} at offset {offset}")]
@@ -31,6 +32,7 @@ pub enum ParseError {
 
 /// Errors that can occur during CSS selector parsing.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum SelectorError {
     /// Invalid selector syntax.
     #[error("invalid selector: {reason}")]
@@ -42,6 +44,7 @@ pub enum SelectorError {
 
 /// Errors that can occur during XPath expression parsing or evaluation.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum XPathError {
     /// Invalid XPath syntax.
     #[error("invalid xpath: {reason}")]
@@ -52,7 +55,8 @@ pub enum XPathError {
 }
 
 /// Errors that can occur during encoding detection or conversion.
-#[derive(Debug, thiserror::Error)]
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum EncodingError {
     /// The decoder encountered bytes that could not be mapped to Unicode.
     #[error("decode error: malformed {encoding} input at byte offset {offset}")]

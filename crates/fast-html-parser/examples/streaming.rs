@@ -6,7 +6,9 @@
 //! Run: `cargo run --example streaming`
 
 use fast_html_parser::Tag;
-use fast_html_parser::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
+use fast_html_parser::streaming::{
+    EarlyStopOutcome, EarlyStopParser, EarlyStopProgress, StreamParser, parse_stream,
+};
 
 fn main() {
     // --- parse_stream convenience ---
@@ -18,24 +20,31 @@ fn main() {
     // --- StreamParser step-by-step ---
     println!("\n=== StreamParser ===");
     let mut parser = StreamParser::new();
-    parser.feed(b"<html><body>");
-    parser.feed(b"<h1>Title</h1>");
-    parser.feed(b"<p>Paragraph</p>");
-    parser.feed(b"</body></html>");
+    parser.feed(b"<html><body>").unwrap();
+    parser.feed(b"<h1>Title</h1>").unwrap();
+    parser.feed(b"<p>Paragraph</p>").unwrap();
+    parser.feed(b"</body></html>").unwrap();
     let doc = parser.finish().unwrap();
     println!("Node count: {}", doc.node_count());
     println!("Text: {}", doc.root().text_content());
 
     // --- EarlyStopParser ---
     println!("\n=== EarlyStopParser ===");
-    let mut early = EarlyStopParser::stop_when(|node| node.tag == Tag::A);
+    let mut early = EarlyStopParser::stop_on_create(|node| node.tag() == Tag::A);
 
-    let status = early.feed(b"<div><p>text</p><ul><li>item</li></ul>");
+    let status = early
+        .feed(b"<div><p>text</p><ul><li>item</li></ul>")
+        .unwrap();
     println!("After first chunk: {status:?}");
 
-    let status = early.feed(b"<a href=\"/page\">link</a></div>");
+    let status = early.feed(b"<a href=\"/page\">link</a></div>").unwrap();
     match status {
-        ParseStatus::Found(id) => println!("Found <a> tag at node {id:?}"),
+        EarlyStopProgress::Matched => match early.finish().unwrap() {
+            EarlyStopOutcome::Matched(found) => {
+                println!("Found <a> tag at node {:?}", found.node_id())
+            }
+            EarlyStopOutcome::Done(_) => unreachable!(),
+        },
         other => println!("Unexpected: {other:?}"),
     }
 }

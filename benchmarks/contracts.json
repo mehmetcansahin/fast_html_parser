@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "canonical_dom": {
+    "algorithm": "fnv1a-128-length-prefixed-v1",
+    "comments_and_doctypes": "excluded",
+    "fixtures": [
+      {
+        "id": "synthetic_1kb",
+        "digests": {
+          "fast_html_parser": { "node_count": 75, "canonical_bytes": 2833, "fnv1a_128": "256719705549852061969340765338949976178" },
+          "scraper": { "node_count": 71, "canonical_bytes": 2795, "fnv1a_128": "192257964303955521028950754271002780410" },
+          "tl": { "node_count": 75, "canonical_bytes": 2833, "fnv1a_128": "256719705549852061969340765338949976178" }
+        }
+      },
+      {
+        "id": "synthetic_100kb",
+        "digests": {
+          "fast_html_parser": { "node_count": 3721, "canonical_bytes": 200253, "fnv1a_128": "207567704165639040210623904348029382914" },
+          "scraper": { "node_count": 3717, "canonical_bytes": 200215, "fnv1a_128": "96543623300387034404253087043402289674" },
+          "tl": { "node_count": 3721, "canonical_bytes": 200250, "fnv1a_128": "254784107512298789365353538691005241685" }
+        }
+      },
+      {
+        "id": "synthetic_5mb",
+        "digests": {
+          "fast_html_parser": { "node_count": 155273, "canonical_bytes": 9010921, "fnv1a_128": "220416476286089519689255749678831131406" },
+          "scraper": { "node_count": 155269, "canonical_bytes": 9010883, "fnv1a_128": "253197445266249826914808013445016043702" },
+          "tl": { "node_count": 155273, "canonical_bytes": 9010921, "fnv1a_128": "220416476286089519689255749678831131406" }
+        }
+      },
+      {
+        "id": "realworld_hackernews_34kb",
+        "digests": {
+          "fast_html_parser": { "node_count": 1289, "canonical_bytes": 75430, "fnv1a_128": "9955211543300887589655688940214611408" },
+          "scraper": { "node_count": 1289, "canonical_bytes": 75430, "fnv1a_128": "244357744600868735941228058500391843836" },
+          "tl": { "node_count": 1285, "canonical_bytes": 75270, "fnv1a_128": "220639095287892578106976742664492179438" }
+        }
+      },
+      {
+        "id": "realworld_github_301kb",
+        "digests": {
+          "fast_html_parser": { "node_count": 2352, "canonical_bytes": 370565, "fnv1a_128": "17520221429628825726382852179596865253" },
+          "scraper": { "node_count": 2347, "canonical_bytes": 370513, "fnv1a_128": "159436390105134441791436786501668789190" },
+          "tl": { "node_count": 2351, "canonical_bytes": 370055, "fnv1a_128": "217884927610587388416198048311005742500" }
+        }
+      },
+      {
+        "id": "realworld_stackoverflow_415kb",
+        "digests": {
+          "fast_html_parser": { "node_count": 7231, "canonical_bytes": 604348, "fnv1a_128": "180635918893669023802003114049669147285" },
+          "scraper": { "node_count": 7226, "canonical_bytes": 604269, "fnv1a_128": "225135587216815320935407431798352380934" },
+          "tl": { "node_count": 7243, "canonical_bytes": 604030, "fnv1a_128": "84179740130344130830349705493048782512" }
+        }
+      },
+      {
+        "id": "realworld_wikipedia_590kb",
+        "digests": {
+          "fast_html_parser": { "node_count": 17812, "canonical_bytes": 1048172, "fnv1a_128": "52261862017493749154144022089709564670" },
+          "scraper": { "node_count": 17809, "canonical_bytes": 1048057, "fnv1a_128": "336155157043076725353651655842976091570" },
+          "tl": { "node_count": 17812, "canonical_bytes": 1049483, "fnv1a_128": "125834724340722811197684998018893479893" }
+        }
+      }
+    ]
+  },
+  "selectors": [
+    { "fixture_id": "synthetic_100kb", "id": "tag_p", "css": "p", "counts": { "fast_html_parser": 21, "scraper": 21, "tl": 21 } },
+    { "fixture_id": "synthetic_100kb", "id": "class_card", "css": ".card", "counts": { "fast_html_parser": 20, "scraper": 20, "tl": 20 } },
+    { "fixture_id": "synthetic_100kb", "id": "descendant_div_p", "css": "div p", "counts": { "fast_html_parser": 21, "scraper": 21, "tl": 0 } },
+    { "fixture_id": "realworld_wikipedia_590kb", "id": "link_with_href", "css": "a[href]", "counts": { "fast_html_parser": 1908, "scraper": 1908, "tl": 1905 } },
+    { "fixture_id": "realworld_wikipedia_590kb", "id": "class_mw_body", "css": "main.mw-body", "counts": { "fast_html_parser": 1, "scraper": 1, "tl": 1 } },
+    { "fixture_id": "realworld_wikipedia_590kb", "id": "descendant_table_td", "css": "table td", "counts": { "fast_html_parser": 56, "scraper": 60, "tl": 0 } }
+  ]
+}

@@ -223,7 +223,11 @@ fn children_count() {
     let doc = parse("<table><tr><td>1</td><td>2</td><td>3</td></tr></table>").unwrap();
     let root = doc.root();
     let table = root.first_child().unwrap();
-    let tr = table.first_child().unwrap();
+    assert_eq!(table.tag(), Tag::Table);
+    let tbody = table.first_child().unwrap();
+    assert_eq!(tbody.tag(), Tag::Tbody);
+    let tr = tbody.first_child().unwrap();
+    assert_eq!(tr.tag(), Tag::Tr);
     assert_eq!(tr.children().count(), 3);
 }
 

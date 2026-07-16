@@ -23,6 +23,30 @@ use crate::ast::{
     AttrOp, AttrSelector, Combinator, CompoundSelector, Selector, SelectorList, SimpleSelector,
 };
 
+/// Maximum accepted selector source length, in UTF-8 bytes.
+pub const MAX_SELECTOR_INPUT_LEN: usize = 16 * 1024;
+/// Maximum number of comma-separated selector branches.
+pub const MAX_SELECTOR_BRANCHES: usize = 64;
+/// Maximum number of combinators in one selector branch.
+pub const MAX_COMBINATORS_PER_BRANCH: usize = 64;
+/// Maximum number of simple-selector AST nodes across the full selector list.
+pub const MAX_SIMPLE_PARTS: usize = 256;
+/// Maximum supported nesting depth for `:not(...)`.
+pub const MAX_NOT_DEPTH: usize = 16;
+
+fn check_input_len(input: &str) -> Result<(), SelectorError> {
+    if input.len() > MAX_SELECTOR_INPUT_LEN {
+        return Err(limit_error(format!(
+            "selector input exceeds {MAX_SELECTOR_INPUT_LEN} bytes"
+        )));
+    }
+    Ok(())
+}
+
+fn limit_error(reason: String) -> SelectorError {
+    SelectorError::Invalid { reason }
+}
+
 /// Parse a CSS selector string into a [`SelectorList`].
 ///
 /// Supports comma-separated selector lists.
@@ -31,6 +55,7 @@ use crate::ast::{
 ///
 /// Returns [`SelectorError::Invalid`] if the input is not a valid CSS selector.
 pub fn parse_selector(input: &str) -> Result<SelectorList, SelectorError> {
+    check_input_len(input)?;
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(SelectorError::Invalid {
@@ -54,6 +79,7 @@ pub fn parse_selector(input: &str) -> Result<SelectorList, SelectorError> {
 
 /// Parse a single CSS selector (no commas).
 pub fn parse_single_selector(input: &str) -> Result<Selector, SelectorError> {
+    check_input_len(input)?;
     let trimmed = input.trim();
     if trimmed.is_empty() {
         return Err(SelectorError::Invalid {
@@ -79,6 +105,8 @@ pub fn parse_single_selector(input: &str) -> Result<Selector, SelectorError> {
 struct Parser<'a> {
     input: &'a [u8],
     pos: usize,
+    simple_parts: usize,
+    not_depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -86,7 +114,37 @@ impl<'a> Parser<'a> {
         Self {
             input: input.as_bytes(),
             pos: 0,
+            simple_parts: 0,
+            not_depth: 0,
         }
+    }
+
+    fn push_simple_part(
+        &mut self,
+        parts: &mut Vec<SimpleSelector>,
+        part: SimpleSelector,
+    ) -> Result<(), SelectorError> {
+        if self.simple_parts >= MAX_SIMPLE_PARTS {
+            return Err(limit_error(format!(
+                "selector contains more than {MAX_SIMPLE_PARTS} simple parts"
+            )));
+        }
+        self.simple_parts += 1;
+        parts.push(part);
+        Ok(())
+    }
+
+    fn push_combinator(
+        combinators: &mut Vec<Combinator>,
+        combinator: Combinator,
+    ) -> Result<(), SelectorError> {
+        if combinators.len() >= MAX_COMBINATORS_PER_BRANCH {
+            return Err(limit_error(format!(
+                "selector branch contains more than {MAX_COMBINATORS_PER_BRANCH} combinators"
+            )));
+        }
+        combinators.push(combinator);
+        Ok(())
     }
 
     fn is_eof(&self) -> bool {
@@ -204,6 +262,11 @@ impl<'a> Parser<'a> {
         loop {
             self.skip_whitespace();
             if self.peek() == Some(b',') {
+                if selectors.len() >= MAX_SELECTOR_BRANCHES {
+                    return Err(limit_error(format!(
+                        "selector list contains more than {MAX_SELECTOR_BRANCHES} branches"
+                    )));
+                }
                 self.advance();
                 self.skip_whitespace();
                 selectors.push(self.parse_complex_selector()?);
@@ -233,24 +296,24 @@ impl<'a> Parser<'a> {
                 Some(b'>') => {
                     self.advance();
                     self.skip_whitespace();
-                    combinators.push(Combinator::Child);
+                    Self::push_combinator(&mut combinators, Combinator::Child)?;
                     compounds.push(self.parse_compound_selector()?);
                 }
                 Some(b'+') => {
                     self.advance();
                     self.skip_whitespace();
-                    combinators.push(Combinator::AdjacentSibling);
+                    Self::push_combinator(&mut combinators, Combinator::AdjacentSibling)?;
                     compounds.push(self.parse_compound_selector()?);
                 }
                 Some(b'~') => {
                     self.advance();
                     self.skip_whitespace();
-                    combinators.push(Combinator::GeneralSibling);
+                    Self::push_combinator(&mut combinators, Combinator::GeneralSibling)?;
                     compounds.push(self.parse_compound_selector()?);
                 }
                 Some(b',') | Some(b')') => break,
                 _ if had_whitespace && self.is_compound_start() => {
-                    combinators.push(Combinator::Descendant);
+                    Self::push_combinator(&mut combinators, Combinator::Descendant)?;
                     compounds.push(self.parse_compound_selector()?);
                 }
                 _ => break,
@@ -294,19 +357,21 @@ impl<'a> Parser<'a> {
                     self.advance();
                     let id = self.read_ident()?;
                     let hash = selector_hash(id.as_bytes());
-                    parts.push(SimpleSelector::Id(id, hash));
+                    self.push_simple_part(&mut parts, SimpleSelector::Id(id, hash))?;
                 }
                 Some(b'.') => {
                     self.advance();
                     let class = self.read_ident()?;
                     let bloom = class_bloom_bit(class.as_bytes());
-                    parts.push(SimpleSelector::Class(class, bloom));
+                    self.push_simple_part(&mut parts, SimpleSelector::Class(class, bloom))?;
                 }
                 Some(b'[') => {
-                    parts.push(self.parse_attr_selector()?);
+                    let part = self.parse_attr_selector()?;
+                    self.push_simple_part(&mut parts, part)?;
                 }
                 Some(b':') => {
-                    parts.push(self.parse_pseudo()?);
+                    let part = self.parse_pseudo()?;
+                    self.push_simple_part(&mut parts, part)?;
                 }
                 Some(b'*') => {
                     if !parts.is_empty() {
@@ -318,7 +383,7 @@ impl<'a> Parser<'a> {
                         });
                     }
                     self.advance();
-                    parts.push(SimpleSelector::Universal);
+                    self.push_simple_part(&mut parts, SimpleSelector::Universal)?;
                 }
                 Some(b) if b.is_ascii_alphabetic() || b == b'_' => {
                     if !parts.is_empty() {
@@ -332,9 +397,9 @@ impl<'a> Parser<'a> {
                     let name = self.read_ident()?;
                     let tag = Tag::from_bytes(name.as_bytes());
                     if tag == Tag::Unknown {
-                        parts.push(SimpleSelector::UnknownTag(name));
+                        self.push_simple_part(&mut parts, SimpleSelector::UnknownTag(name))?;
                     } else {
-                        parts.push(SimpleSelector::Tag(tag));
+                        self.push_simple_part(&mut parts, SimpleSelector::Tag(tag))?;
                     }
                 }
                 _ => break,
@@ -425,9 +490,17 @@ impl<'a> Parser<'a> {
                 Ok(SimpleSelector::PseudoNthChild { a, b })
             }
             "not" => {
+                if self.not_depth >= MAX_NOT_DEPTH {
+                    return Err(limit_error(format!(
+                        ":not() nesting exceeds {MAX_NOT_DEPTH} levels"
+                    )));
+                }
                 self.expect(b'(')?;
                 self.skip_whitespace();
-                let inner = self.parse_compound_selector()?;
+                self.not_depth += 1;
+                let inner = self.parse_compound_selector();
+                self.not_depth -= 1;
+                let inner = inner?;
                 self.skip_whitespace();
                 self.expect(b')')?;
                 Ok(SimpleSelector::PseudoNot(Box::new(inner)))
@@ -839,5 +912,80 @@ mod tests {
             }
             _ => panic!("expected attr selector"),
         }
+    }
+
+    #[test]
+    fn rejects_selector_input_over_limit() {
+        let input = " ".repeat(MAX_SELECTOR_INPUT_LEN + 1);
+        let err = parse_selector(&input).unwrap_err();
+        assert!(err.to_string().contains("exceeds 16384 bytes"));
+
+        let err = parse_single_selector(&input).unwrap_err();
+        assert!(err.to_string().contains("exceeds 16384 bytes"));
+    }
+
+    #[test]
+    fn selector_branch_limit_is_inclusive() {
+        let at_limit = std::iter::repeat_n("div", MAX_SELECTOR_BRANCHES)
+            .collect::<Vec<_>>()
+            .join(",");
+        assert_eq!(
+            parse_selector(&at_limit).unwrap().selectors.len(),
+            MAX_SELECTOR_BRANCHES
+        );
+
+        let over_limit = format!("{at_limit},div");
+        let err = parse_selector(&over_limit).unwrap_err();
+        assert!(err.to_string().contains("more than 64 branches"));
+    }
+
+    #[test]
+    fn combinator_limit_is_inclusive() {
+        let at_limit = std::iter::repeat_n("div", MAX_COMBINATORS_PER_BRANCH + 1)
+            .collect::<Vec<_>>()
+            .join(" > ");
+        assert_eq!(
+            parse_single_selector(&at_limit).unwrap().chain.len(),
+            MAX_COMBINATORS_PER_BRANCH
+        );
+
+        let over_limit = format!("{at_limit} > div");
+        let err = parse_single_selector(&over_limit).unwrap_err();
+        assert!(err.to_string().contains("more than 64 combinators"));
+    }
+
+    #[test]
+    fn simple_part_limit_is_inclusive() {
+        let at_limit = ".a".repeat(MAX_SIMPLE_PARTS);
+        assert_eq!(
+            parse_single_selector(&at_limit)
+                .unwrap()
+                .subject
+                .parts
+                .len(),
+            MAX_SIMPLE_PARTS
+        );
+
+        let over_limit = format!("{at_limit}.a");
+        let err = parse_single_selector(&over_limit).unwrap_err();
+        assert!(err.to_string().contains("more than 256 simple parts"));
+    }
+
+    #[test]
+    fn not_nesting_limit_is_inclusive() {
+        let at_limit = format!(
+            "{}div{}",
+            ":not(".repeat(MAX_NOT_DEPTH),
+            ")".repeat(MAX_NOT_DEPTH)
+        );
+        assert!(parse_single_selector(&at_limit).is_ok());
+
+        let over_limit = format!(
+            "{}div{}",
+            ":not(".repeat(MAX_NOT_DEPTH + 1),
+            ")".repeat(MAX_NOT_DEPTH + 1)
+        );
+        let err = parse_single_selector(&over_limit).unwrap_err();
+        assert!(err.to_string().contains("exceeds 16 levels"));
     }
 }

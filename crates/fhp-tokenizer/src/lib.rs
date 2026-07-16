@@ -47,6 +47,9 @@ pub trait TreeSink {
     ///
     /// `attr_raw` is the raw attribute region between the tag name and `>`.
     /// The implementor is responsible for parsing attributes from this slice.
+    /// `self_closing` records only whether the source start tag contained a
+    /// trailing slash. It does not make a non-void HTML element void; sinks
+    /// must use [`Tag::is_void`] for tree-construction semantics.
     fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool);
 
     /// A closing tag was encountered.

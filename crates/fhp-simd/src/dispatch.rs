@@ -27,7 +27,7 @@ pub enum SimdLevel {
 /// On x86_64 this queries CPUID; on aarch64 NEON is always present.
 /// All other architectures fall back to `Scalar`.
 pub fn detect() -> SimdLevel {
-    #[cfg(target_arch = "x86_64")]
+    #[cfg(all(feature = "simd", target_arch = "x86_64"))]
     {
         if is_x86_feature_detected!("avx2") {
             return SimdLevel::Avx2;
@@ -37,7 +37,7 @@ pub fn detect() -> SimdLevel {
         }
     }
 
-    #[cfg(target_arch = "aarch64")]
+    #[cfg(all(feature = "simd", target_arch = "aarch64"))]
     {
         return SimdLevel::Neon;
     }
@@ -85,7 +85,7 @@ pub fn ops() -> &'static SimdOps {
     SIMD_OPS.get_or_init(|| {
         let level = detect();
         match level {
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             SimdLevel::Avx2 => SimdOps {
                 find_delimiters: crate::avx2::find_delimiters,
                 classify_bytes: crate::avx2::classify_bytes,
@@ -94,7 +94,7 @@ pub fn ops() -> &'static SimdOps {
                 compute_all_masks: crate::avx2::compute_all_masks,
                 level,
             },
-            #[cfg(target_arch = "x86_64")]
+            #[cfg(all(feature = "simd", target_arch = "x86_64"))]
             SimdLevel::Sse42 => SimdOps {
                 find_delimiters: crate::sse42::find_delimiters,
                 classify_bytes: crate::sse42::classify_bytes,
@@ -103,7 +103,7 @@ pub fn ops() -> &'static SimdOps {
                 compute_all_masks: crate::sse42::compute_all_masks,
                 level,
             },
-            #[cfg(target_arch = "aarch64")]
+            #[cfg(all(feature = "simd", target_arch = "aarch64"))]
             SimdLevel::Neon => SimdOps {
                 find_delimiters: crate::neon::find_delimiters,
                 classify_bytes: crate::neon::classify_bytes,
@@ -134,6 +134,13 @@ mod tests {
         let level = detect();
         // On this platform at least scalar should be available.
         assert!(level >= SimdLevel::Scalar);
+    }
+
+    #[cfg(not(feature = "simd"))]
+    #[test]
+    fn disabled_simd_forces_scalar_dispatch() {
+        assert_eq!(detect(), SimdLevel::Scalar);
+        assert_eq!(ops().level, SimdLevel::Scalar);
     }
 
     #[test]

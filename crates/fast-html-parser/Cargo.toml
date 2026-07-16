@@ -1,6 +1,6 @@
 [package]
 name = "fast-html-parser"
-version = "0.1.2"
+version = "0.2.0"
 autobenches = false
 edition.workspace = true
 rust-version.workspace = true
@@ -15,21 +15,21 @@ categories = ["parser-implementations", "web-programming"]
 exclude = ["benches/", "tests/"]
 
 [features]
-default = ["css-selector", "entity-decode", "encoding"]
+default = ["css-selector", "entity-decode", "encoding", "simd"]
 css-selector = ["dep:fhp-selector"]
 xpath = ["dep:fhp-selector", "css-selector"]
 encoding = ["dep:fhp-encoding", "fhp-tree/encoding"]
 async-tokio = ["fhp-tree/async-tokio", "encoding"]
 async-async-std = ["fhp-tree/async-async-std", "encoding"]
 entity-decode = ["fhp-tree/entity-decode", "fhp-tokenizer/entity-decode"]
-simd = []  # SIMD acceleration marker (NEON/SSE4.2/AVX2 runtime dispatch)
+simd = ["fhp-tokenizer/simd", "fhp-tree/simd"]
 
 [dependencies]
-fhp-core = { version = "0.1.2", path = "../fhp-core" }
-fhp-tokenizer = { version = "0.1.2", path = "../fhp-tokenizer", default-features = false }
-fhp-tree = { version = "0.1.2", path = "../fhp-tree", default-features = false }
-fhp-selector = { version = "0.1.2", path = "../fhp-selector", optional = true }
-fhp-encoding = { version = "0.1.2", path = "../fhp-encoding", optional = true }
+fhp-core = { version = "0.2.0", path = "../fhp-core" }
+fhp-tokenizer = { version = "0.2.0", path = "../fhp-tokenizer", default-features = false }
+fhp-tree = { version = "0.2.0", path = "../fhp-tree", default-features = false }
+fhp-selector = { version = "0.2.0", path = "../fhp-selector", optional = true }
+fhp-encoding = { version = "0.2.0", path = "../fhp-encoding", optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -37,6 +37,7 @@ tokio = { workspace = true, features = ["macros", "rt", "io-util"] }
 tl = "0.7"
 scraper = "0.22"
 lol_html = "2"
+serde_json = "1"
 
 [[bench]]
 name = "e2e_bench"

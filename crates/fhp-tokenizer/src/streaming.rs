@@ -79,6 +79,20 @@ struct SplitScan {
     text_close: Option<(usize, Tag)>,
 }
 
+/// Text-tokenization context retained across chunk boundaries.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TextContext {
+    Element(Tag),
+    Plaintext,
+}
+
+impl TextContext {
+    #[inline]
+    fn decodes_entities(self) -> bool {
+        matches!(self, Self::Element(tag) if tag.is_rcdata())
+    }
+}
+
 impl StreamTokenizer {
     /// Create a new streaming tokenizer.
     pub fn new() -> Self {
@@ -126,7 +140,10 @@ impl StreamTokenizer {
                 self.syntax_overflow = false;
             } else if let Some((close_start, tag)) = scan.text_close {
                 if close_start > 0 {
-                    tokens.push(owned_text_token(&buffered[..close_start], Some(tag)));
+                    tokens.push(owned_text_token(
+                        &buffered[..close_start],
+                        Some(TextContext::Element(tag)),
+                    ));
                 }
                 tokens.extend(self.process_chunk(&buffered[close_start..split]));
             } else {
@@ -171,7 +188,11 @@ impl StreamTokenizer {
                 self.syntax_overflow = false;
             } else if let Some((close_start, tag)) = scan.text_close {
                 if close_start > 0 {
-                    emit_text_token_with(&buffered[..close_start], Some(tag), &mut on_token);
+                    emit_text_token_with(
+                        &buffered[..close_start],
+                        Some(TextContext::Element(tag)),
+                        &mut on_token,
+                    );
                 }
                 self.process_chunk_with(&buffered[close_start..split], &mut on_token);
             } else {
@@ -195,8 +216,8 @@ impl StreamTokenizer {
         let remaining = std::mem::take(&mut self.residual);
         let tokens = if self.syntax_overflow {
             vec![owned_text_token(&remaining, None)]
-        } else if let Some(tag) = self.scanner.text_element() {
-            vec![owned_text_token(&remaining, Some(tag))]
+        } else if let Some(context) = self.scanner.text_context() {
+            vec![owned_text_token(&remaining, Some(context))]
         } else {
             self.process_chunk(&remaining)
         };
@@ -214,8 +235,8 @@ impl StreamTokenizer {
         let remaining = std::mem::take(&mut self.residual);
         if self.syntax_overflow {
             emit_text_token_with(&remaining, None, &mut on_token);
-        } else if let Some(tag) = self.scanner.text_element() {
-            emit_text_token_with(&remaining, Some(tag), &mut on_token);
+        } else if let Some(context) = self.scanner.text_context() {
+            emit_text_token_with(&remaining, Some(context), &mut on_token);
         } else {
             self.process_chunk_with(&remaining, &mut on_token);
         }
@@ -267,8 +288,8 @@ impl StreamTokenizer {
     /// Emit bounded text while retaining enough suffix bytes to recognize a
     /// split character reference or closing raw-text tag.
     fn flush_bounded_text(&mut self, tokens: &mut Vec<Token<'static>>) {
-        let tag = self.scanner.text_element();
-        let limit = if tag.is_some() {
+        let context = self.scanner.text_context();
+        let limit = if context.is_some() {
             MAX_RAW_TEXT_RESIDUAL
         } else if self.scanner.is_plain_data() {
             MAX_RESIDUAL
@@ -282,7 +303,10 @@ impl StreamTokenizer {
 
         if let Some((open, close_tag)) = self.scanner.text_close_candidate() {
             if open > 0 {
-                tokens.push(owned_text_token(&self.residual[..open], Some(close_tag)));
+                tokens.push(owned_text_token(
+                    &self.residual[..open],
+                    Some(TextContext::Element(close_tag)),
+                ));
                 discard_prefix(&mut self.residual, open);
                 self.scanner.discard_prefix(open);
             }
@@ -304,7 +328,7 @@ impl StreamTokenizer {
             return;
         }
 
-        tokens.push(owned_text_token(&self.residual[..prefix_len], tag));
+        tokens.push(owned_text_token(&self.residual[..prefix_len], context));
         discard_prefix(&mut self.residual, prefix_len);
         self.scanner.discard_prefix(prefix_len);
     }
@@ -312,8 +336,8 @@ impl StreamTokenizer {
     /// Callback counterpart of [`Self::flush_bounded_text`] that keeps valid
     /// UTF-8 content borrowed instead of allocating owned token strings.
     fn flush_bounded_text_with(&mut self, on_token: &mut impl FnMut(&Token<'_>)) {
-        let tag = self.scanner.text_element();
-        let limit = if tag.is_some() {
+        let context = self.scanner.text_context();
+        let limit = if context.is_some() {
             MAX_RAW_TEXT_RESIDUAL
         } else if self.scanner.is_plain_data() {
             MAX_RESIDUAL
@@ -327,7 +351,11 @@ impl StreamTokenizer {
 
         if let Some((open, close_tag)) = self.scanner.text_close_candidate() {
             if open > 0 {
-                emit_text_token_with(&self.residual[..open], Some(close_tag), on_token);
+                emit_text_token_with(
+                    &self.residual[..open],
+                    Some(TextContext::Element(close_tag)),
+                    on_token,
+                );
                 discard_prefix(&mut self.residual, open);
                 self.scanner.discard_prefix(open);
             }
@@ -349,7 +377,7 @@ impl StreamTokenizer {
             return;
         }
 
-        emit_text_token_with(&self.residual[..prefix_len], tag, on_token);
+        emit_text_token_with(&self.residual[..prefix_len], context, on_token);
         discard_prefix(&mut self.residual, prefix_len);
         self.scanner.discard_prefix(prefix_len);
     }
@@ -429,7 +457,7 @@ enum ScanMode {
 #[derive(Debug)]
 struct SplitScanner {
     mode: ScanMode,
-    text_element: Option<Tag>,
+    text_context: Option<TextContext>,
     scanned: usize,
     last_safe: usize,
     text_close: Option<(usize, Tag)>,
@@ -439,7 +467,7 @@ impl Default for SplitScanner {
     fn default() -> Self {
         Self {
             mode: ScanMode::Data,
-            text_element: None,
+            text_context: None,
             scanned: 0,
             last_safe: 0,
             text_close: None,
@@ -455,16 +483,18 @@ impl SplitScanner {
         while i < data.len() {
             match self.mode {
                 ScanMode::Data => {
-                    if let Some(tag) = self.text_element {
-                        if data[i] == b'<' {
-                            if is_raw_text_close(data, i, tag) {
-                                self.mode = ScanMode::Tag {
-                                    quote: None,
-                                    open: i,
-                                    text_close: Some(tag),
-                                };
-                            } else if is_incomplete_raw_text_close(data, i, tag) {
-                                break;
+                    if let Some(context) = self.text_context {
+                        if let TextContext::Element(tag) = context {
+                            if data[i] == b'<' {
+                                if is_raw_text_close(data, i, tag) {
+                                    self.mode = ScanMode::Tag {
+                                        quote: None,
+                                        open: i,
+                                        text_close: Some(tag),
+                                    };
+                                } else if is_incomplete_raw_text_close(data, i, tag) {
+                                    break;
+                                }
                             }
                         }
                         i += 1;
@@ -540,12 +570,12 @@ impl SplitScanner {
                             i += 1;
                             self.last_safe = i;
                             if let Some(tag) = text_close {
-                                self.text_element = None;
+                                self.text_context = None;
                                 self.text_close = Some((open, tag));
                                 break;
                             }
-                            if let Some(tag) = raw_text_open_tag(&data[open + 1..i - 1]) {
-                                self.text_element = Some(tag);
+                            if let Some(context) = text_open_context(&data[open + 1..i - 1]) {
+                                self.text_context = Some(context);
                                 // Process the opening tag before buffering its
                                 // potentially very large text body.
                                 break;
@@ -653,7 +683,7 @@ impl SplitScanner {
     }
 
     fn in_text_context(&self) -> bool {
-        self.text_element.is_some()
+        self.text_context.is_some()
             || matches!(
                 self.mode,
                 ScanMode::Tag {
@@ -663,12 +693,12 @@ impl SplitScanner {
             )
     }
 
-    fn text_element(&self) -> Option<Tag> {
-        self.text_element.or(match self.mode {
+    fn text_context(&self) -> Option<TextContext> {
+        self.text_context.or(match self.mode {
             ScanMode::Tag {
                 text_close: Some(tag),
                 ..
-            } => Some(tag),
+            } => Some(TextContext::Element(tag)),
             _ => None,
         })
     }
@@ -685,7 +715,7 @@ impl SplitScanner {
     }
 
     fn is_plain_data(&self) -> bool {
-        self.text_element.is_none() && matches!(self.mode, ScanMode::Data)
+        self.text_context.is_none() && matches!(self.mode, ScanMode::Data)
     }
 
     fn reset(&mut self) {
@@ -712,12 +742,12 @@ fn utf8_prefix_boundary(data: &[u8], desired: usize) -> usize {
     boundary
 }
 
-fn owned_text_token(data: &[u8], context: Option<Tag>) -> Token<'static> {
+fn owned_text_token(data: &[u8], context: Option<TextContext>) -> Token<'static> {
     let text = String::from_utf8_lossy(data);
-    let content = if context.is_some_and(Tag::is_raw_text) {
-        text.into_owned()
-    } else {
+    let content = if context.is_none_or(TextContext::decodes_entities) {
         decode_stream_entities(&text).into_owned()
+    } else {
+        text.into_owned()
     };
     Token::Text {
         content: std::borrow::Cow::Owned(content),
@@ -738,22 +768,26 @@ fn emit_close_tag_with(tag: Tag, on_token: &mut impl FnMut(&Token<'_>)) {
     });
 }
 
-fn emit_text_token_with(data: &[u8], context: Option<Tag>, on_token: &mut impl FnMut(&Token<'_>)) {
+fn emit_text_token_with(
+    data: &[u8],
+    context: Option<TextContext>,
+    on_token: &mut impl FnMut(&Token<'_>),
+) {
     match std::str::from_utf8(data) {
         Ok(text) => {
-            let content = if context.is_some_and(Tag::is_raw_text) {
-                std::borrow::Cow::Borrowed(text)
-            } else {
+            let content = if context.is_none_or(TextContext::decodes_entities) {
                 decode_stream_entities(text)
+            } else {
+                std::borrow::Cow::Borrowed(text)
             };
             on_token(&Token::Text { content });
         }
         Err(_) => {
             let text = String::from_utf8_lossy(data).into_owned();
-            let content = if context.is_some_and(Tag::is_raw_text) {
-                std::borrow::Cow::Borrowed(text.as_str())
-            } else {
+            let content = if context.is_none_or(TextContext::decodes_entities) {
                 decode_stream_entities(&text)
+            } else {
+                std::borrow::Cow::Borrowed(text.as_str())
             };
             on_token(&Token::Text { content });
         }
@@ -801,15 +835,8 @@ fn is_incomplete_raw_text_close(data: &[u8], pos: usize, tag: Tag) -> bool {
     remaining.len() <= target_len
 }
 
-fn raw_text_open_tag(tag_body: &[u8]) -> Option<Tag> {
+fn text_open_context(tag_body: &[u8]) -> Option<TextContext> {
     if tag_body.is_empty() || tag_body[0] == b'/' {
-        return None;
-    }
-
-    // Match the extractor's self-closing rule exactly: only a slash directly
-    // before `>` closes the start tag. A spaced form such as `<script / >`
-    // remains a raw-text element in the one-shot parser and must do so here.
-    if tag_body.last() == Some(&b'/') {
         return None;
     }
 
@@ -824,8 +851,12 @@ fn raw_text_open_tag(tag_body: &[u8]) -> Option<Tag> {
         return None;
     }
 
-    let tag = Tag::from_bytes(&tag_body[..name_end]);
-    (tag.is_raw_text() || tag.is_rcdata()).then_some(tag)
+    let name = &tag_body[..name_end];
+    if name.eq_ignore_ascii_case(b"plaintext") {
+        return Some(TextContext::Plaintext);
+    }
+    let tag = Tag::from_bytes(name);
+    (tag.is_raw_text() || tag.is_rcdata()).then_some(TextContext::Element(tag))
 }
 
 fn is_raw_text_close(data: &[u8], pos: usize, tag: Tag) -> bool {

@@ -1,4 +1,5 @@
 /target
+**/target/
 
 # Python benchmark tooling
 __pycache__/

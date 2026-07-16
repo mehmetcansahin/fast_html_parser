@@ -561,7 +561,7 @@ fn raw_text_and_rcdata_end_tags_accept_a_trailing_solidus() {
 }
 
 #[test]
-fn self_closing_text_elements_do_not_capture_following_markup() {
+fn trailing_slash_on_non_void_text_elements_is_ignored() {
     for tag in ["script", "title", "textarea"] {
         let html = format!("<{tag}/>a<b>y</b><p>z</p>");
         let one_shot = tokenize(&html);
@@ -569,10 +569,33 @@ fn self_closing_text_elements_do_not_capture_following_markup() {
 
         for result in [&one_shot[..], &streamed[..]] {
             let opens = open_tag_names(result);
-            assert!(opens.contains(&"b"), "tag={tag}, tokens={result:?}");
-            assert!(opens.contains(&"p"), "tag={tag}, tokens={result:?}");
-            assert_eq!(text_content(result), "ayz");
+            assert_eq!(opens, [tag], "tag={tag}, tokens={result:?}");
+            assert_eq!(text_content(result), "a<b>y</b><p>z</p>");
+            assert!(matches!(
+                result.first(),
+                Some(Token::OpenTag {
+                    self_closing: true,
+                    ..
+                })
+            ));
         }
+    }
+}
+
+#[test]
+fn plaintext_is_literal_across_streaming_chunk_boundaries() {
+    let html = b"<plaintext><b>x&amp;</plaintext>";
+    let one_shot = tokenize(std::str::from_utf8(html).unwrap());
+    let streamed = collect_streaming(html, 1);
+
+    for result in [&one_shot[..], &streamed[..]] {
+        assert_eq!(open_tag_names(result), ["plaintext"]);
+        assert_eq!(text_content(result), "<b>x&amp;</plaintext>");
+        assert!(
+            !result
+                .iter()
+                .any(|token| matches!(token, Token::CloseTag { .. }))
+        );
     }
 }
 
@@ -745,7 +768,7 @@ fn entity_only() {
 }
 
 #[test]
-fn void_elements_without_slash() {
+fn self_closing_flag_records_source_slash_only() {
     let tokens = tokenize("<br><hr><img src=\"x.png\">");
     let tags: Vec<(Tag, bool)> = tokens
         .iter()
@@ -758,10 +781,7 @@ fn void_elements_without_slash() {
         .collect();
 
     assert_eq!(tags.len(), 3);
-    assert!(
-        tags.iter().all(|(_, sc)| *sc),
-        "void elements should be self-closing"
-    );
+    assert!(tags.iter().all(|(_, source_slash)| !*source_slash));
 }
 
 #[test]

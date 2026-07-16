@@ -3,15 +3,15 @@ pub mod dispatch;
 /// Portable scalar fallback — works on every platform.
 pub mod scalar;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 /// SSE4.2 accelerated operations (128-bit, x86_64).
 pub mod sse42;
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(feature = "simd", target_arch = "x86_64"))]
 /// AVX2 accelerated operations (256-bit, x86_64).
 pub mod avx2;
 
-#[cfg(target_arch = "aarch64")]
+#[cfg(all(feature = "simd", target_arch = "aarch64"))]
 /// ARM NEON accelerated operations (128-bit, aarch64).
 pub mod neon;
 

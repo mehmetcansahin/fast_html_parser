@@ -8,7 +8,7 @@
 use tokio::io::{AsyncRead, AsyncReadExt};
 
 use crate::streaming::StreamParser;
-use crate::{Document, HtmlError};
+use crate::{Document, HtmlError, MAX_INPUT_SIZE};
 
 /// Default read buffer size (64 KB, page-aligned).
 const BUF_SIZE: usize = 64 * 1024;
@@ -31,6 +31,7 @@ const BUF_SIZE: usize = 64 * 1024;
 pub struct AsyncParser<R> {
     reader: R,
     buf_size: usize,
+    max_input_size: usize,
 }
 
 impl<R: AsyncRead + Unpin> AsyncParser<R> {
@@ -39,6 +40,7 @@ impl<R: AsyncRead + Unpin> AsyncParser<R> {
         Self {
             reader,
             buf_size: BUF_SIZE,
+            max_input_size: MAX_INPUT_SIZE,
         }
     }
 
@@ -48,9 +50,15 @@ impl<R: AsyncRead + Unpin> AsyncParser<R> {
         self
     }
 
+    /// Set the maximum raw and decoded input size.
+    pub fn with_max_input_size(mut self, max_input_size: usize) -> Self {
+        self.max_input_size = max_input_size;
+        self
+    }
+
     /// Parse the input asynchronously and return the completed document.
     pub async fn parse(mut self) -> Result<Document, HtmlError> {
-        let mut parser = StreamParser::new();
+        let mut parser = StreamParser::with_max_input_size(self.max_input_size);
         let mut buf = vec![0u8; self.buf_size];
 
         loop {
@@ -58,7 +66,8 @@ impl<R: AsyncRead + Unpin> AsyncParser<R> {
             if n == 0 {
                 break;
             }
-            parser.feed(&buf[..n]);
+            // A terminal parser error stops reads from the source immediately.
+            parser.feed(&buf[..n])?;
         }
 
         parser.finish()

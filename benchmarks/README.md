@@ -4,27 +4,36 @@ Criterion's raw samples and HTML reports are machine-local and remain under
 `target/criterion/`. This directory stores only compact, reviewable summaries
 created by the repository benchmark runner.
 
+Official reports use metadata schema 3, explicit production SIMD features, a
+hashed semantic contract from `contracts.json`, all six FHP/scraper/tl
+permutations, and a tracked JSON provenance sidecar. Older schema-2 reports,
+including the dirty 2026-07-15 snapshot, remain historical and provisional;
+they are never eligible for the latest link, baseline compatibility, or a
+release gate.
+
 ```bash
 python3 scripts/bench.py verify
 python3 scripts/bench.py quick
-python3 scripts/bench.py save main
+python3 scripts/bench.py save main       # clean worktree required
 python3 scripts/bench.py compare main
 python3 scripts/bench.py publish
 ```
 
 ## Latest results
 
-- [Full performance report](results/2026-07-13-fd2d1b6e846f-aarch64-apple-darwin.md)
-  contains absolute estimates, three-run ranges, and contract-equal ratios for
-  source digest `fd2d1b6e846f` on Apple M1.
-- [Local baseline repeatability report](results/2026-07-13-local-baseline-repeatability.md)
-  records a same-source `save`/`compare` experiment and targeted reruns. It
-  documents measurement stability; it is not a cross-parser speed report.
+<!-- latest-benchmark:start -->
+No official schema-3 v0.2 result is available. Publishing requires a clean,
+user-approved commit and updates this block together with the root README.
+<!-- latest-benchmark:end -->
 
-The generated table in the repository [README](../README.md#performance) is a
-compact view of the full performance report. Stack Overflow and Wikipedia DOM
-results remain absolute-only because their observable signatures did not match
-the competing parser; no speed ratio is inferred for those fixtures.
+Historical reports remain available for diagnosis:
+
+- The [dirty 2026-07-15 snapshot](results/2026-07-15-b4fcf640b253-aarch64-apple-darwin.md)
+  is explicitly provisional and excluded from latest/official comparisons.
+- The [2026-07-13 pre-schema-3 report](results/2026-07-13-fd2d1b6e846f-aarch64-apple-darwin.md)
+  predates the current semantic-contract and six-permutation requirements.
+- The [local baseline repeatability report](results/2026-07-13-local-baseline-repeatability.md)
+  documents same-source measurement stability rather than cross-parser speed.
 
 To smoke-test baseline persistence and report parsing without a full run:
 
@@ -56,5 +65,6 @@ reruns and consult the repeatability report before making a performance claim.
 
 Published summaries live in `results/`. They contain the source digest,
 fixture digests, commands, machine/toolchain metadata, absolute estimates, and
-only those cross-parser ratios whose observable-result contract passed. Raw
-Criterion data is deliberately not committed.
+only those cross-parser ratios whose observable-result contract and stability
+checks passed. Each official Markdown report has a same-stem JSON provenance
+sidecar. Raw Criterion data is deliberately not committed.

@@ -59,12 +59,27 @@ def write_fixture_repository(root, files):
     return fixture_dir / "README.md"
 
 
+def write_semantic_contract(root):
+    path = root / "benchmarks" / "contracts.json"
+    write_json(
+        path,
+        {
+            "schema_version": 1,
+            "canonical_dom": {"fixtures": [{"id": "fixture"}]},
+            "selectors": [{"fixture_id": "fixture", "id": "selector"}],
+        },
+    )
+    return path
+
+
 def sample_metadata():
     return {
-        "schema_version": 2,
+        "schema_version": 3,
+        "official": True,
         "captured_at_utc": "2026-07-11T10:00:00+00:00",
         "mode": "publish",
         "source_digest": "a" * 64,
+        "semantic_contract_sha256": "e" * 64,
         "lockfile_sha256": "b" * 64,
         "fixture_manifest_sha256": "d" * 64,
         "git": {"commit": "c" * 40, "branch": "main", "dirty": False},
@@ -173,6 +188,99 @@ class ThresholdPolicyTests(unittest.TestCase):
         self.assertEqual(decision.level, "info")
 
 
+class StabilityAndCalibrationTests(unittest.TestCase):
+    def estimate(
+        self,
+        benchmark,
+        median,
+        *,
+        rotation=None,
+        p50=None,
+        p95=None,
+        far=0.0,
+    ):
+        return bench.Estimate(
+            benchmark=benchmark,
+            mean_ns=median,
+            lower_ns=median * 0.9,
+            upper_ns=median * 1.1,
+            throughput_kind=None,
+            throughput_value=None,
+            harness="harness",
+            rotation=rotation,
+            criterion_median_ns=median,
+            normalized_p50_ns=p50 or median,
+            normalized_p95_ns=p95 or median,
+            far_outlier_ratio=far,
+        )
+
+    def test_stability_thresholds_and_majority(self):
+        benchmark = "comparison/x/contract_equal/all/dom/build/fast_html_parser"
+        stable = [
+            self.estimate(benchmark, 100 + index, rotation=rotation, p50=100, p95=150)
+            for index, rotation in enumerate(bench.ORDER_ROTATIONS)
+        ]
+        decision = bench.assess_stability(stable)[0]
+        self.assertTrue(decision.stable)
+
+        noisy = list(stable)
+        noisy[0] = self.estimate(
+            benchmark,
+            100,
+            rotation=bench.ORDER_ROTATIONS[0],
+            p50=100,
+            p95=201,
+            far=0.06,
+        )
+        unstable = bench.assess_stability(noisy)[0]
+        self.assertFalse(unstable.stable)
+        majority = bench.majority_stability([[unstable], [decision], [decision]])[0]
+        self.assertTrue(majority.stable)
+
+    def test_calibration_detects_environment_drift(self):
+        baseline = [self.estimate(benchmark, 100) for benchmark in bench.CALIBRATION_IDS]
+        current = [self.estimate(benchmark, 100) for benchmark in bench.CALIBRATION_IDS]
+        self.assertEqual(bench.assess_calibration(baseline, current).status, "pass")
+        drifted = [self.estimate(benchmark, 80) for benchmark in bench.CALIBRATION_IDS]
+        decision = bench.assess_calibration(baseline, drifted)
+        self.assertEqual(decision.status, "inconclusive")
+        self.assertAlmostEqual(decision.median_baseline_current_ratio, 1.25)
+
+    def test_three_attempt_gate_uses_median_severity(self):
+        change = "regression/parser/build"
+        decisions = [
+            [bench.GateDecision(change, "pass", "pass", 0.0, -0.01, 0.01)],
+            [bench.GateDecision(change, "warn", "warn", 0.03, 0.01, 0.05)],
+            [bench.GateDecision(change, "fail", "fail", 0.08, 0.06, 0.10)],
+        ]
+        self.assertEqual(bench.majority_gate_decisions(decisions)[0].level, "warn")
+
+    def test_warn_fail_or_instability_repeats_the_full_attempt(self):
+        change = "regression/parser/build"
+        passing_gate = bench.GateDecision(change, "pass", "pass", 0.0, -0.01, 0.01)
+        warning_gate = bench.GateDecision(change, "warn", "warn", 0.03, 0.01, 0.05)
+        stable = bench.StabilityDecision(
+            benchmark="comparison/x/contract_equal/all/dom/build/fast_html_parser",
+            stable=True,
+            p95_p50=1.1,
+            far_outlier_ratio=0.0,
+            rotation_spread=1.0,
+            reasons=(),
+        )
+        unstable = bench.StabilityDecision(
+            benchmark=stable.benchmark,
+            stable=False,
+            p95_p50=stable.p95_p50,
+            far_outlier_ratio=stable.far_outlier_ratio,
+            rotation_spread=stable.rotation_spread,
+            reasons=("noisy",),
+        )
+
+        self.assertFalse(bench.attempt_requires_rerun([passing_gate], [stable]))
+        self.assertTrue(bench.attempt_requires_rerun([warning_gate], [stable]))
+        self.assertTrue(bench.attempt_requires_rerun([passing_gate], [unstable]))
+
+
 class CriterionJsonTests(unittest.TestCase):
     def test_parse_change_estimate_from_sample_tree(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -204,12 +312,14 @@ class CriterionJsonTests(unittest.TestCase):
             with self.assertRaisesRegex(bench.BenchError, "unexpected Criterion confidence"):
                 bench._mean_values(document, path)
 
-    def test_parse_and_aggregate_three_order_rotations(self):
+    def test_parse_and_aggregate_six_order_permutations(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
             harness = bench.Harness("comparison", "test", "bench", order_sensitive=True)
             parsed = []
-            for rotation, mean in zip(bench.ORDER_ROTATIONS, (90.0, 100.0, 130.0)):
+            for rotation, mean in zip(
+                bench.ORDER_ROTATIONS, (90.0, 100.0, 110.0, 120.0, 130.0, 140.0)
+            ):
                 home = root / rotation
                 benchmark_root = home / "group" / "case"
                 write_json(
@@ -227,11 +337,32 @@ class CriterionJsonTests(unittest.TestCase):
 
             aggregated = bench.aggregate_estimates(parsed)
             self.assertEqual(len(aggregated), 1)
-            self.assertEqual(aggregated[0].mean_ns, 100.0)
+            self.assertEqual(aggregated[0].mean_ns, 115.0)
             self.assertEqual(aggregated[0].lower_ns, 90.0)
-            self.assertEqual(aggregated[0].upper_ns, 130.0)
-            self.assertEqual(aggregated[0].run_count, 3)
+            self.assertEqual(aggregated[0].upper_ns, 140.0)
+            self.assertEqual(aggregated[0].run_count, 6)
             self.assertEqual(aggregated[0].rotations, bench.ORDER_ROTATIONS)
+
+    def test_normalized_percentiles_and_far_outliers_are_recorded(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            result = home / "case" / "new"
+            document = estimate_document(20.0, 18.0, 22.0)
+            document["median"] = estimate_document(10.0, 9.0, 11.0)["mean"]
+            write_json(result / "estimates.json", document)
+            write_json(result / "benchmark.json", {"full_id": "regression/case"})
+            write_json(
+                result / "sample.json",
+                {"sampling_mode": "Linear", "iters": [1, 2, 4, 8], "times": [10, 22, 48, 400]},
+            )
+            write_json(result / "tukey.json", [0, 5, 20, 40])
+            estimate = bench.parse_new_estimates(
+                home, bench.Harness("harness", "package", "bench")
+            )[0]
+            self.assertEqual(estimate.criterion_median_ns, 10.0)
+            self.assertAlmostEqual(estimate.normalized_p50_ns, 11.5)
+            self.assertGreater(estimate.normalized_p95_ns, 40.0)
+            self.assertEqual(estimate.far_outlier_ratio, 0.25)
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -298,6 +429,19 @@ version = "0.5.1"
         errors = bench.compatibility_errors(baseline, current)
         self.assertTrue(any("build_contract.scope" in error for error in errors))
 
+    def test_schema_two_and_semantic_contract_drift_are_rejected(self):
+        baseline = sample_metadata()
+        baseline["schema_version"] = 2
+        current = sample_metadata()
+        errors = bench.compatibility_errors(baseline, current)
+        self.assertTrue(any("schema_version" in error for error in errors))
+
+        baseline = sample_metadata()
+        current = copy.deepcopy(baseline)
+        current["semantic_contract_sha256"] = "f" * 64
+        errors = bench.compatibility_errors(baseline, current)
+        self.assertTrue(any("semantic_contract_sha256" in error for error in errors))
+
 
 class FixtureManifestTests(unittest.TestCase):
     def make_repository(self, root, files):
@@ -349,6 +493,7 @@ class RunDriftTests(unittest.TestCase):
         (root / "Cargo.toml").write_text("[workspace]\n", encoding="utf-8")
         (root / "Cargo.lock").write_text("version = 4\n", encoding="utf-8")
         write_fixture_repository(root, {"fixture.html": b"abc"})
+        write_semantic_contract(root)
 
     def test_unchanged_inputs_pass_end_of_run_check(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -366,6 +511,18 @@ class RunDriftTests(unittest.TestCase):
                 "fixture_manifest_sha256",
                 lambda root: (root / "testdata" / "README.md").write_text(
                     (root / "testdata" / "README.md").read_text() + "\nprose drift\n"
+                ),
+            ),
+            (
+                "semantic_contract_sha256",
+                lambda root: (root / "benchmarks" / "contracts.json").write_text(
+                    json.dumps(
+                        {
+                            "schema_version": 1,
+                            "canonical_dom": {"fixtures": [{"id": "changed"}]},
+                            "selectors": [{"fixture_id": "changed", "id": "selector"}],
+                        }
+                    )
                 ),
             ),
         )
@@ -392,7 +549,7 @@ class MarkdownTests(unittest.TestCase):
             rotations=(),
         )
 
-    def raw(self, benchmark, mean, rotation="fhp-first", harness="comparison"):
+    def raw(self, benchmark, mean, rotation=bench.DEFAULT_ORDER, harness="comparison"):
         return bench.Estimate(
             benchmark=benchmark,
             mean_ns=mean,
@@ -430,33 +587,33 @@ class MarkdownTests(unittest.TestCase):
         # of paired ratios is median(2, 3, 1.5) = 2.
         for rotation, fhp, competitor in zip(
             bench.ORDER_ROTATIONS,
-            (1.0, 10.0, 100.0),
-            (2.0, 30.0, 150.0),
+            (1.0, 10.0, 100.0, 20.0, 5.0, 50.0),
+            (2.0, 30.0, 150.0, 50.0, 20.0, 50.0),
         ):
             estimates.append(self.raw(group + "/fast_html_parser", fhp, rotation))
             estimates.append(self.raw(group + "/scraper", competitor, rotation))
-            # A second competitor makes the middle registration order distinct,
-            # so all three paired ratios participate for this all-DOM group.
+            # A second competitor makes every registration permutation distinct,
+            # so all six paired ratios participate for this all-DOM group.
             estimates.append(self.raw(group + "/tl", fhp * 4.0, rotation))
         ratios = bench.contract_equal_ratios(estimates)
         by_competitor = {ratio.competitor: ratio for ratio in ratios}
         scraper = by_competitor["scraper"]
-        self.assertEqual(scraper.ratio, 2.0)
-        self.assertEqual(scraper.lower, 1.5)
-        self.assertEqual(scraper.upper, 3.0)
-        self.assertEqual(scraper.run_count, 3)
+        self.assertEqual(scraper.ratio, 2.25)
+        self.assertEqual(scraper.lower, 1.0)
+        self.assertEqual(scraper.upper, 4.0)
+        self.assertEqual(scraper.run_count, 6)
 
-    def test_two_party_ratio_uses_all_three_independent_runs(self):
+    def test_two_party_ratio_uses_all_six_runs_and_three_per_binary_order(self):
         group = "comparison/1kb/parse/contract_equal/fhp_scraper/dom/build"
         estimates = []
-        for rotation, ratio in zip(bench.ORDER_ROTATIONS, (2.0, 3.0, 4.0)):
+        for rotation, ratio in zip(bench.ORDER_ROTATIONS, (2.0, 3.0, 4.0, 5.0, 6.0, 7.0)):
             estimates.append(self.raw(group + "/fast_html_parser", 10.0, rotation))
             estimates.append(self.raw(group + "/scraper", 10.0 * ratio, rotation))
         result = bench.contract_equal_ratios(estimates)[0]
-        self.assertEqual(result.ratio, 3.0)
+        self.assertEqual(result.ratio, 4.5)
         self.assertEqual(result.lower, 2.0)
-        self.assertEqual(result.upper, 4.0)
-        self.assertEqual(result.run_count, 3)
+        self.assertEqual(result.upper, 7.0)
+        self.assertEqual(result.run_count, 6)
 
     def test_report_keeps_absolute_rows_and_marks_ratios(self):
         metadata = sample_metadata()
@@ -541,16 +698,24 @@ class MarkdownTests(unittest.TestCase):
             ),
             bench.ContractRatio("comparison/x/compile", "tl", 4.0, 3.9, 4.1, 3),
         ]
+        equal_estimates = [
+            self.published(ratios[0].group + "/fast_html_parser", 100),
+            self.published(ratios[0].group + "/scraper", 200),
+            self.published(ratios[1].group + "/fast_html_parser", 200),
+            self.published(ratios[1].group + "/tl", 300),
+        ]
         summary = bench.generate_readme_summary(
             metadata,
-            [selected_dom, excluded_selector, *excluded],
+            [selected_dom, excluded_selector, *excluded, *equal_estimates],
             ratios,
             Path("benchmarks/results/report.md"),
         )
         self.assertIn("| Workload | FHP time | Range | Throughput |", summary)
         self.assertIn("Synthetic 1 KB — DOM build", summary)
-        self.assertIn("| Equal workload | vs | Median | Range |", summary)
+        self.assertIn("| Equal workload | FHP | Competitor | Ratio |", summary)
         self.assertIn("Synthetic 100 KB — `.card` selector", summary)
+        self.assertIn("| Synthetic 1 KB — DOM build | 100.00 ns | `scraper` 200.00 ns | 2.000× |", summary)
+        self.assertIn("| Synthetic 100 KB — `.card` selector | 200.00 ns | `tl` 300.00 ns | 1.500× |", summary)
         self.assertNotIn(selected_dom.benchmark, summary)
         self.assertNotIn(excluded_selector.benchmark, summary)
         for estimate in excluded:
@@ -575,6 +740,42 @@ class MarkdownTests(unittest.TestCase):
         with self.assertRaisesRegex(bench.BenchError, "marker pair"):
             bench.replace_marked_section("no markers", "summary")
 
+    def test_benchmark_index_summary_uses_generated_report(self):
+        summary = bench.generate_benchmark_index_summary(
+            sample_metadata(),
+            Path("benchmarks/results/2026-07-15-example.md"),
+        )
+        self.assertIn("results/2026-07-15-example.md", summary)
+        self.assertIn("source digest `aaaaaaaaaaaa`", summary)
+        self.assertIn("Example CPU", summary)
+
+        document = (
+            "before\n"
+            + bench.BENCH_INDEX_START
+            + "\nold\n"
+            + bench.BENCH_INDEX_END
+            + "\nafter\n"
+        )
+        replaced = bench.replace_marked_section(
+            document,
+            summary,
+            bench.BENCH_INDEX_START,
+            bench.BENCH_INDEX_END,
+        )
+        self.assertIn(summary, replaced)
+        self.assertNotIn("\nold\n", replaced)
+
+    def test_publish_requires_clean_worktree(self):
+        with mock.patch.object(bench, "_capture", return_value=""):
+            bench.ensure_clean_publish_worktree(Path("."))
+        with mock.patch.object(
+            bench,
+            "_capture",
+            return_value=" M README.md\n?? benchmarks/results/report.md",
+        ):
+            with self.assertRaisesRegex(bench.BenchError, "clean Git worktree"):
+                bench.ensure_clean_publish_worktree(Path("."))
+
     def test_readme_update_uses_latest_on_disk_text(self):
         with tempfile.TemporaryDirectory() as temporary:
             readme = Path(temporary) / "README.md"
@@ -595,6 +796,43 @@ class MarkdownTests(unittest.TestCase):
 
 
 class MatrixAndCommandTests(unittest.TestCase):
+    def test_production_matrix_enables_simd_explicitly(self):
+        by_id = {harness.id: harness for harness in bench.FULL_MATRIX}
+        self.assertEqual(by_id["fhp-simd/simd"].features, ("simd",))
+        self.assertEqual(
+            by_id["fhp-tokenizer/tokenizer"].features,
+            ("entity-decode", "simd"),
+        )
+        self.assertEqual(
+            by_id["fhp-tree/tree"].features,
+            ("encoding", "entity-decode", "simd"),
+        )
+        for harness in bench.FULL_MATRIX:
+            if harness.package == "fast-html-parser":
+                self.assertIn("simd", harness.features)
+
+    def test_full_save_requires_clean_tree_but_quick_metadata_is_unofficial(self):
+        with mock.patch.object(
+            bench,
+            "ensure_clean_publish_worktree",
+            side_effect=bench.BenchError("clean tree required"),
+        ) as clean:
+            with self.assertRaisesRegex(bench.BenchError, "clean tree"):
+                bench.command_save(Path("."), "candidate")
+            clean.assert_called_once()
+
+        with (
+            mock.patch.object(bench, "capture_run_inputs", return_value={}),
+            mock.patch.object(bench, "capture_environment", return_value={}),
+            mock.patch.object(
+                bench,
+                "_git_metadata",
+                return_value={"commit": "c", "branch": "main", "dirty": True},
+            ),
+        ):
+            metadata = bench.capture_metadata(Path("."), "save", (), (), "quick")
+        self.assertFalse(metadata["official"])
+
     def test_harness_homes_are_unique_and_cargo_is_locked(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -740,7 +978,7 @@ class MatrixAndCommandTests(unittest.TestCase):
                 with self.assertRaises(bench.BenchError):
                     bench.validate_baseline_name(name)
 
-    def test_publish_cardinality_requires_three_rotations_or_one_plain_run(self):
+    def test_publish_cardinality_requires_six_permutations_or_one_plain_run(self):
         ordered = bench.Harness(
             "ordered", "package", "bench", order_sensitive=True
         )

@@ -9,22 +9,72 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `StreamParser::with_max_input_size` and `parse_stream_with_limit`, with raw
+  and decoded-byte enforcement capped at `u32::MAX`.
+- Explicit `stop_on_create` and `stop_after_element` early-stop modes, plus
+  owned `EarlyStopMatch`, `EarlyStopOutcome`, `EarlyStopProgress`, and
+  `MatchCompleteness` results.
+- A vendored, checksum-pinned WHATWG named-character-reference source and a
+  generated compact trie covering multi-codepoint and legacy forms.
+- A curated canonical-DOM conformance corpus and fuzz targets for tokenizer
+  chunking, one-shot/streaming tree equivalence, entities, and selectors.
+- Selector complexity limits and memoized matching with dense and sparse state
+  storage; XPath literal name tests now retain custom element names.
+- `scripts/release.py check` and `release --version`, which provide the required
+  local development and release gates without installing prerequisites.
+- Per-crate MIT and Apache-2.0 license copies, validated against the root files
+  and all seven packaged crate archives.
+- [Compatibility](COMPATIBILITY.md) and [0.2 migration](MIGRATION-0.2.md)
+  contracts.
 - Reproducible local benchmark verification, baseline comparison, regression
   policy, environment metadata, and publishable result summaries.
-- Cross-parser observable-result contracts and fixture provenance metadata for
+- Cross-parser canonical DOM contracts and fixture provenance metadata for
   benchmark comparisons.
 - A full Apple M1 benchmark report and a same-source local-baseline
   repeatability report documenting when regression candidates require reruns.
 
 ### Changed
 
+- **Breaking:** `StreamParser::feed` now returns `Result<(), HtmlError>` and a
+  terminal parser rejects later operations.
+- **Breaking:** `EarlyStopParser::stop_when`/`ParseStatus` are replaced by the
+  two explicit early-stop modes and owned results.
+- **Breaking:** remove `fragment_mode`; successful parses continue to expose a
+  synthetic document root without browser wrapper synthesis.
+- **Breaking:** `TreeBuilder::process` and `finish` are fallible, and
+  `HtmlError::Parse` carries tree-construction failures. Error enums are
+  non-exhaustive.
+- `self_closing` in the tokenizer/tree sink boundary now records only a source
+  slash; `Tag::is_void()` determines HTML void elements.
+- Make `simd` a real default feature with runtime dispatch; no-default-feature
+  builds force the scalar backend.
+- Process large streaming chunks in 64 KiB blocks after a bounded 1 KiB
+  encoding prescan, and stop iterator/async sources on the first error or
+  early match.
+- Limit source nesting to 512 elements, excluding the synthetic root; the
+  513th returns `ParseError::NestingTooDeep` without a partial document.
 - Namespace Criterion benchmarks by regression, comparison, and diagnostic
   purpose; separate parse construction from lifecycle teardown and split
   selector/XPath compilation from evaluation.
 - Replace untraceable README speed claims with summaries generated from
   categorized, contract-checked benchmark runs.
+- Require a clean worktree for benchmark publication, update both benchmark
+  indexes together, and counterbalance comparison order with complete cyclic
+  rotations. The dirty 2026-07-15 report remains provisional and is not an
+  official v0.2 result.
 - Clarify in the benchmark and contribution guides that a single local
   threshold failure must be confirmed before it is described as a regression.
+
+### Fixed
+
+- Ignore a source `/>` marker on non-void elements and add bounded repair for
+  optional end tags, tables/foster parenting, formatting elements, `select`,
+  and `plaintext`.
+- Apply ASCII-case-insensitive, first-wins duplicate-attribute handling before
+  decoding later duplicate values, keeping DOM, serialization, and selector
+  views consistent.
+- Decode the complete named entity set with distinct text and attribute
+  legacy-semicolon rules.
 
 ## [0.1.2] - 2026-06-08
 
@@ -70,7 +120,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Security policy (SECURITY.md)
 - Code of conduct (CODE_OF_CONDUCT.md)
 - Contributing guide (CONTRIBUTING.md)
-- GitHub CI workflow with matrix testing
+- Local validation tooling for workspace, feature-matrix, formatting, and
+  lint checks
 - Dependabot configuration
 - cargo-deny license and advisory auditing
 - GitHub issue and PR templates

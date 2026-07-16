@@ -3,6 +3,8 @@
 //! Measures: SIMD indexing, tokenization, tree building, source copy, entity overhead.
 
 use criterion::{BatchSize, Criterion, Throughput, criterion_group, criterion_main};
+use fhp_core::tag::Tag;
+use fhp_tree::arena::Arena;
 
 const MEDIUM_HTML: &str = include_str!("../../../testdata/medium_100kb.html");
 
@@ -57,21 +59,27 @@ fn bench_cost_breakdown(c: &mut Criterion) {
             |_| {
                 let mut builder = fhp_tree::builder::TreeBuilder::with_capacity_hint(html.len());
                 for token in &pretokenized {
-                    builder.process(token);
+                    builder.process(token).unwrap();
                 }
-                builder.finish()
+                builder.finish().unwrap()
             },
             BatchSize::LargeInput,
         );
     });
 
-    // 6) Source copy cost (isolated memcpy)
-    group.bench_function("06_memcpy_100kb", |b| {
+    group.finish();
+}
+
+fn bench_calibration(c: &mut Criterion) {
+    let html = MEDIUM_HTML;
+    let html_bytes = html.as_bytes();
+    let mut group = c.benchmark_group("diagnostic/calibration");
+    group.throughput(Throughput::Bytes(html.len() as u64));
+
+    group.bench_function("memcpy_100kb", |b| {
         b.iter_batched(|| html_bytes, <[u8]>::to_vec, BatchSize::LargeInput);
     });
-
-    // 7) tl for reference
-    group.bench_function("07_tl_parse", |b| {
+    group.bench_function("tl_parse_100kb", |b| {
         b.iter_batched(
             || html,
             |input| tl::parse(input, tl::ParserOptions::default()).unwrap(),
@@ -122,5 +130,76 @@ fn bench_entity_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_cost_breakdown, bench_entity_decode);
+fn unique_attributes(count: usize) -> (String, String) {
+    let mut raw = String::new();
+    for index in 0..count {
+        raw.push_str(&format!(" data-{index}={index}"));
+    }
+    let html = format!("<div{raw}></div>");
+    (html, raw)
+}
+
+fn duplicate_attributes(count: usize) -> (String, String) {
+    let mut raw = String::new();
+    for index in 0..count {
+        let name = if index % 2 == 0 {
+            "data-value"
+        } else {
+            "DATA-VALUE"
+        };
+        raw.push_str(&format!(" {name}={index}"));
+    }
+    let html = format!("<div{raw}></div>");
+    (html, raw)
+}
+
+fn bench_attribute_dedup(c: &mut Criterion) {
+    let unique = [
+        ("unique_1", unique_attributes(1)),
+        ("unique_3", unique_attributes(3)),
+        ("unique_16", unique_attributes(16)),
+        ("unique_64", unique_attributes(64)),
+        ("duplicate_64", duplicate_attributes(64)),
+    ];
+
+    let mut tokenizer =
+        c.benchmark_group("regression/fast-html-parser/profile_bench/attributes/tokenizer");
+    for (name, (html, _)) in &unique {
+        tokenizer.throughput(Throughput::Bytes(html.len() as u64));
+        tokenizer.bench_function(*name, |b| {
+            b.iter_batched(
+                || html.as_str(),
+                fhp_tokenizer::tokenize,
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    tokenizer.finish();
+
+    let mut arena =
+        c.benchmark_group("regression/fast-html-parser/profile_bench/attributes/arena_raw");
+    for (name, (_, raw)) in &unique {
+        arena.throughput(Throughput::Bytes(raw.len() as u64));
+        arena.bench_function(*name, |b| {
+            b.iter_batched(
+                Arena::new,
+                |mut arena| {
+                    let node = arena.new_element(Tag::Div, 0);
+                    arena.set_attrs_from_raw(node, raw);
+                    std::hint::black_box(arena);
+                },
+                BatchSize::LargeInput,
+            );
+        });
+    }
+    arena.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_cost_breakdown,
+    bench_calibration,
+    bench_entity_decode,
+    bench_attribute_dedup
+);
 criterion_main!(benches);

@@ -2,15 +2,80 @@
 
 #![cfg(feature = "encoding")]
 
+use std::fmt::Write as _;
+
 use fhp_core::tag::Tag;
-use fhp_tree::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
+use fhp_tree::arena::Arena;
+use fhp_tree::builder::TreeBuilder;
+use fhp_tree::node::{NodeFlags, NodeId};
+use fhp_tree::streaming::{
+    EarlyStopOutcome, EarlyStopParser, EarlyStopProgress, StreamParser, parse_stream,
+    parse_stream_with_limit,
+};
 use fhp_tree::{parse, parse_bytes};
+
+fn canonical_arena(arena: &Arena, root: NodeId) -> String {
+    fn push_field(output: &mut String, kind: char, value: &str) {
+        write!(output, "{kind}{}:{value}", value.len()).unwrap();
+    }
+
+    fn walk(arena: &Arena, id: NodeId, output: &mut String) {
+        let node = arena.get(id);
+        if node.flags.has(NodeFlags::IS_TEXT) {
+            push_field(output, 'T', arena.text(id));
+            return;
+        }
+        if node.flags.has(NodeFlags::IS_COMMENT) {
+            push_field(output, 'C', arena.text(id));
+            return;
+        }
+        if node.flags.has(NodeFlags::IS_DOCTYPE) {
+            push_field(output, 'D', arena.text(id));
+            return;
+        }
+
+        let name = node
+            .tag
+            .as_str()
+            .or_else(|| arena.unknown_tag_name(id))
+            .unwrap_or("#root");
+        push_field(output, 'E', name);
+        let mut attributes: Vec<_> = arena
+            .attrs(id)
+            .iter()
+            .map(|attribute| {
+                (
+                    arena.attr_name(attribute).to_ascii_lowercase(),
+                    arena.attr_value(attribute).unwrap_or(""),
+                    arena.attr_value(attribute).is_some(),
+                )
+            })
+            .collect();
+        attributes.sort_unstable();
+        for (name, value, has_value) in attributes {
+            push_field(output, 'A', &name);
+            output.push(if has_value { '=' } else { '?' });
+            push_field(output, 'V', value);
+        }
+        output.push('[');
+        let mut child = node.first_child;
+        while !child.is_null() {
+            walk(arena, child, output);
+            child = arena.get(child).next_sibling;
+        }
+        output.push(']');
+    }
+
+    let mut output = String::new();
+    walk(arena, root, &mut output);
+    output
+}
 
 // ---------------------------------------------------------------------------
 // Streaming vs one-shot equivalence
 // ---------------------------------------------------------------------------
 
-/// Helper: parse HTML both one-shot and streaming, assert same text content.
+/// Parse HTML through every synchronous entry point and require the same DOM.
 fn assert_stream_equiv(html: &[u8], chunk_size: usize) {
     let one_shot = parse_bytes(html).unwrap();
     let streamed = parse_stream(html.chunks(chunk_size)).unwrap();
@@ -23,9 +88,9 @@ fn assert_stream_equiv(html: &[u8], chunk_size: usize) {
     );
 
     assert_eq!(
-        one_shot.node_count(),
-        streamed.node_count(),
-        "chunk_size={chunk_size}: node count mismatch"
+        one_shot.to_html(),
+        streamed.to_html(),
+        "chunk_size={chunk_size}: canonical DOM mismatch"
     );
 }
 
@@ -64,9 +129,9 @@ fn stream_equiv_chunk_65536() {
 #[test]
 fn stream_parser_basic() {
     let mut parser = StreamParser::new();
-    parser.feed(b"<div>");
-    parser.feed(b"<p>Hello</p>");
-    parser.feed(b"</div>");
+    parser.feed(b"<div>").unwrap();
+    parser.feed(b"<p>Hello</p>").unwrap();
+    parser.feed(b"</div>").unwrap();
     let doc = parser.finish().unwrap();
     assert_eq!(doc.root().text_content(), "Hello");
 }
@@ -100,6 +165,110 @@ fn stream_parser_attributes_preserved() {
 }
 
 #[test]
+fn one_shot_owned_sink_and_streaming_build_the_same_dom() {
+    let html = "<table><tr><td>A</td></tr>outside</table><p id='first' ID='later'>x<p>y";
+    let one_shot = parse(html).unwrap();
+    let owned = fhp_tree::parse_owned(html.to_owned()).unwrap();
+    let streamed = parse_stream(html.as_bytes().chunks(3)).unwrap();
+
+    let mut builder = TreeBuilder::new();
+    builder.set_source(html);
+    fhp_tokenizer::tokenize_into(html, &mut builder);
+    let (sink_arena, sink_root) = builder.finish().unwrap();
+
+    let expected = canonical_arena(one_shot.arena(), one_shot.root().id());
+    assert_eq!(canonical_arena(owned.arena(), owned.root().id()), expected);
+    assert_eq!(
+        canonical_arena(streamed.arena(), streamed.root().id()),
+        expected
+    );
+    assert_eq!(canonical_arena(&sink_arena, sink_root), expected);
+}
+
+#[test]
+fn depth_error_is_identical_for_one_shot_owned_sink_and_streaming() {
+    let html = format!("{}x", "<div>".repeat(513));
+    let is_depth_error = |result: Result<fhp_tree::Document, fhp_tree::HtmlError>| {
+        matches!(
+            result,
+            Err(fhp_tree::HtmlError::Parse(
+                fhp_core::error::ParseError::NestingTooDeep {
+                    depth: 513,
+                    limit: 512
+                }
+            ))
+        )
+    };
+
+    assert!(is_depth_error(parse(&html)));
+    assert!(is_depth_error(fhp_tree::parse_owned(html.clone())));
+    assert!(is_depth_error(parse_stream(html.as_bytes().chunks(17))));
+
+    let mut builder = TreeBuilder::new();
+    builder.set_source(&html);
+    fhp_tokenizer::tokenize_into(&html, &mut builder);
+    assert!(matches!(
+        builder.finish(),
+        Err(fhp_core::error::ParseError::NestingTooDeep {
+            depth: 513,
+            limit: 512
+        })
+    ));
+}
+
+#[test]
+fn early_stop_does_not_tokenize_later_internal_blocks() {
+    let mut html = b"<a href='/match'>match</a>".to_vec();
+    html.resize(64 * 1024, b'x');
+    html.extend_from_slice("<div>".repeat(513).as_bytes());
+
+    let mut parser = EarlyStopParser::stop_on_create(|node| node.tag() == Tag::A);
+    assert_eq!(parser.feed(&html).unwrap(), EarlyStopProgress::Matched);
+    let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+        panic!("expected early match")
+    };
+    assert_eq!(found.node().attr("href"), Some("/match"));
+}
+
+#[test]
+fn iterator_stops_reading_after_first_terminal_error() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+
+    struct CountingChunks<'a> {
+        chunks: std::vec::IntoIter<&'a [u8]>,
+        reads: Rc<Cell<usize>>,
+    }
+
+    impl<'a> Iterator for CountingChunks<'a> {
+        type Item = &'a [u8];
+
+        fn next(&mut self) -> Option<Self::Item> {
+            let next = self.chunks.next();
+            if next.is_some() {
+                self.reads.set(self.reads.get() + 1);
+            }
+            next
+        }
+    }
+
+    let reads = Rc::new(Cell::new(0));
+    let chunks: Vec<&[u8]> = vec![b"1234", b"5678", b"unread"];
+    let result = parse_stream_with_limit(
+        CountingChunks {
+            chunks: chunks.into_iter(),
+            reads: Rc::clone(&reads),
+        },
+        4,
+    );
+    assert!(matches!(
+        result,
+        Err(fhp_tree::HtmlError::InputTooLarge { size: 8, max: 4 })
+    ));
+    assert_eq!(reads.get(), 2);
+}
+
+#[test]
 fn stream_parser_preserves_raw_text_across_chunk_boundaries() {
     let prefix = vec![b'x'; 1024];
     let suffix = b"<script>if(a<b){x()}</script><p>ok</p>";
@@ -110,10 +279,10 @@ fn stream_parser_preserves_raw_text_across_chunk_boundaries() {
     let one_shot = parse_bytes(&html).unwrap();
 
     let mut parser = StreamParser::new();
-    parser.feed(&prefix);
-    parser.feed(b"<script>");
-    parser.feed(b"if(a<b){x()}");
-    parser.feed(b"</script><p>ok</p>");
+    parser.feed(&prefix).unwrap();
+    parser.feed(b"<script>").unwrap();
+    parser.feed(b"if(a<b){x()}").unwrap();
+    parser.feed(b"</script><p>ok</p>").unwrap();
     let streamed = parser.finish().unwrap();
 
     assert_eq!(
@@ -214,35 +383,36 @@ fn stream_parser_preserves_lt_edge_cases_across_chunk_boundaries() {
 #[test]
 fn early_stop_finds_first_a_tag() {
     let html = b"<div><p>paragraph</p><a href=\"/page\">link</a><span>after</span></div>";
-    let mut parser = EarlyStopParser::stop_when(|node| node.tag == Tag::A);
-    match parser.feed(html) {
-        ParseStatus::Found(_id) => {
-            // Successfully found the <a> tag.
-        }
-        other => panic!("expected Found, got {other:?}"),
-    }
+    let mut parser = EarlyStopParser::stop_on_create(|node| node.tag() == Tag::A);
+    assert_eq!(parser.feed(html).unwrap(), EarlyStopProgress::Matched);
+    let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+        panic!("expected a match")
+    };
+    assert_eq!(found.node().tag(), Tag::A);
 }
 
 #[test]
 fn early_stop_multi_chunk() {
-    let mut parser = EarlyStopParser::stop_when(|node| node.tag == Tag::A);
+    let mut parser = EarlyStopParser::stop_on_create(|node| node.tag() == Tag::A);
 
     // First chunk has no <a>.
-    let status = parser.feed(b"<div><p>text</p><ul><li>item</li></ul>");
-    assert!(matches!(status, ParseStatus::NeedMore));
+    let status = parser
+        .feed(b"<div><p>text</p><ul><li>item</li></ul>")
+        .unwrap();
+    assert_eq!(status, EarlyStopProgress::NeedMore);
 
     // Second chunk introduces <a>.
-    let status = parser.feed(b"<a href=\"#\">link</a></div>");
-    assert!(matches!(status, ParseStatus::Found(_)));
+    let status = parser.feed(b"<a href=\"#\">link</a></div>").unwrap();
+    assert_eq!(status, EarlyStopProgress::Matched);
 }
 
 #[test]
 fn early_stop_no_match_returns_done() {
-    let mut parser = EarlyStopParser::stop_when(|node| node.tag == Tag::A);
+    let mut parser = EarlyStopParser::stop_on_create(|node| node.tag() == Tag::A);
     let html = b"<div><p>no links</p><span>at all</span></div>";
-    parser.feed(html);
-    match parser.finish() {
-        ParseStatus::Done(doc) => {
+    parser.feed(html).unwrap();
+    match parser.finish().unwrap() {
+        EarlyStopOutcome::Done(doc) => {
             let text = doc.root().text_content();
             assert!(text.contains("no links"), "text: {text}");
         }
@@ -252,22 +422,21 @@ fn early_stop_no_match_returns_done() {
 
 #[test]
 fn early_stop_subsequent_feed_after_found() {
-    let mut parser = EarlyStopParser::stop_when(|node| node.tag == Tag::A);
+    let mut parser = EarlyStopParser::stop_on_create(|node| node.tag() == Tag::A);
     let html = b"<a>link</a>";
-    assert!(matches!(parser.feed(html), ParseStatus::Found(_)));
+    assert_eq!(parser.feed(html).unwrap(), EarlyStopProgress::Matched);
     // Feeding more data after Found should still return Found.
-    assert!(matches!(parser.feed(b"<p>more</p>"), ParseStatus::Found(_)));
+    assert_eq!(
+        parser.feed(b"<p>more</p>").unwrap(),
+        EarlyStopProgress::Matched
+    );
 }
 
 #[test]
 fn early_stop_by_text_flag() {
-    use fhp_tree::node::NodeFlags;
-    let mut parser = EarlyStopParser::stop_when(|node| node.flags.has(NodeFlags::IS_TEXT));
+    let mut parser = EarlyStopParser::stop_on_create(|node| node.is_text());
     let html = b"<div>some text</div>";
-    match parser.feed(html) {
-        ParseStatus::Found(_) => {}
-        other => panic!("expected Found for text node, got {other:?}"),
-    }
+    assert_eq!(parser.feed(html).unwrap(), EarlyStopProgress::Matched);
 }
 
 // ---------------------------------------------------------------------------
@@ -347,7 +516,35 @@ fn parse_stream_vs_parse() {
 
 #[cfg(feature = "async-tokio")]
 mod async_tests {
+    use std::collections::VecDeque;
+    use std::io;
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    use fhp_tree::HtmlError;
     use fhp_tree::async_parser::{AsyncParser, parse_async};
+    use tokio::io::{AsyncRead, ReadBuf};
+
+    struct CountingReader {
+        chunks: VecDeque<&'static [u8]>,
+        reads: Arc<AtomicUsize>,
+    }
+
+    impl AsyncRead for CountingReader {
+        fn poll_read(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+            buf: &mut ReadBuf<'_>,
+        ) -> Poll<io::Result<()>> {
+            self.reads.fetch_add(1, Ordering::SeqCst);
+            if let Some(chunk) = self.chunks.pop_front() {
+                buf.put_slice(chunk);
+            }
+            Poll::Ready(Ok(()))
+        }
+    }
 
     #[tokio::test]
     async fn async_parse_basic() {
@@ -359,11 +556,13 @@ mod async_tests {
     #[tokio::test]
     async fn async_parse_complex() {
         let html = b"<html><head><title>Async</title></head><body><p>World</p></body></html>";
+        let expected = fhp_tree::parse_bytes(html).unwrap().to_html();
         let doc = AsyncParser::new(&html[..])
             .with_buf_size(8)
             .parse()
             .await
             .unwrap();
+        assert_eq!(doc.to_html(), expected);
         let text = doc.root().text_content();
         assert!(text.contains("Async"), "text: {text}");
         assert!(text.contains("World"), "text: {text}");
@@ -400,5 +599,105 @@ mod async_tests {
             .unwrap();
         let text = doc.root().text_content();
         assert!(text.contains("Async16"), "text: {text}");
+    }
+
+    #[tokio::test]
+    async fn async_parser_stops_reading_after_size_error() {
+        let reads = Arc::new(AtomicUsize::new(0));
+        let reader = CountingReader {
+            chunks: VecDeque::from([&b"1234"[..], &b"5678"[..], &b"ignored"[..]]),
+            reads: Arc::clone(&reads),
+        };
+
+        let result = AsyncParser::new(reader)
+            .with_buf_size(8)
+            .with_max_input_size(4)
+            .parse()
+            .await;
+        assert!(matches!(
+            result,
+            Err(HtmlError::InputTooLarge { size: 8, max: 4 })
+        ));
+        assert_eq!(reads.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn async_parser_returns_the_same_typed_depth_error() {
+        let html = format!("{}x", "<div>".repeat(513));
+        let result = AsyncParser::new(html.as_bytes())
+            .with_buf_size(19)
+            .parse()
+            .await;
+        assert!(matches!(
+            result,
+            Err(HtmlError::Parse(
+                fhp_core::error::ParseError::NestingTooDeep {
+                    depth: 513,
+                    limit: 512
+                }
+            ))
+        ));
+    }
+}
+
+#[cfg(feature = "async-async-std")]
+mod async_std_tests {
+    use std::future::Future;
+    use std::sync::Arc;
+    use std::task::{Context, Poll, Wake, Waker};
+
+    use fhp_tree::HtmlError;
+    use fhp_tree::async_std_parser::AsyncStdParser;
+
+    struct NoopWake;
+
+    impl Wake for NoopWake {
+        fn wake(self: Arc<Self>) {}
+    }
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        let mut future = std::pin::pin!(future);
+        loop {
+            match future.as_mut().poll(&mut context) {
+                Poll::Ready(output) => return output,
+                Poll::Pending => std::thread::yield_now(),
+            }
+        }
+    }
+
+    #[test]
+    fn async_std_matches_one_shot_dom() {
+        block_on(async {
+            let html = b"<table><tr><td>A</td><td>B</table><p>x<p>y";
+            let expected = fhp_tree::parse_bytes(html).unwrap().to_html();
+            let actual = AsyncStdParser::new(&html[..])
+                .with_buf_size(5)
+                .parse()
+                .await
+                .unwrap();
+            assert_eq!(actual.to_html(), expected);
+        });
+    }
+
+    #[test]
+    fn async_std_returns_the_same_typed_depth_error() {
+        block_on(async {
+            let html = format!("{}x", "<div>".repeat(513));
+            let result = AsyncStdParser::new(html.as_bytes())
+                .with_buf_size(23)
+                .parse()
+                .await;
+            assert!(matches!(
+                result,
+                Err(HtmlError::Parse(
+                    fhp_core::error::ParseError::NestingTooDeep {
+                        depth: 513,
+                        limit: 512
+                    }
+                ))
+            ));
+        });
     }
 }

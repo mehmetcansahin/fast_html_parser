@@ -6,6 +6,9 @@
 //! SIMD-accelerated delimiter finding with scalar content parsing.
 
 use std::borrow::Cow;
+use std::collections::HashSet;
+use std::hash::{BuildHasherDefault, Hash, Hasher};
+use std::mem::MaybeUninit;
 
 use fhp_core::tag::Tag;
 
@@ -13,15 +16,200 @@ use crate::TreeSink;
 use crate::structural::StructuralIndex;
 use crate::token::{Attribute, Token};
 
+const INLINE_SEEN_ATTRIBUTES: usize = 8;
+const ASCII_CI_FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+
+#[derive(Clone, Copy)]
+struct SeenAttribute<'a> {
+    fingerprint: u64,
+    name: &'a [u8],
+}
+
+impl PartialEq for SeenAttribute<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        self.fingerprint == other.fingerprint && self.name.eq_ignore_ascii_case(other.name)
+    }
+}
+
+impl Eq for SeenAttribute<'_> {}
+
+impl Hash for SeenAttribute<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.fingerprint);
+    }
+}
+
+/// A no-op hasher for the already-hashed attribute fingerprints.
+#[derive(Default)]
+struct FingerprintHasher(u64);
+
+impl Hasher for FingerprintHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.0
+    }
+
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        let mut hash = 0xcbf2_9ce4_8422_2325u64;
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+
+    #[inline]
+    fn write_u64(&mut self, value: u64) {
+        self.0 = value;
+    }
+}
+
+type SeenAttributeSet<'a> = HashSet<SeenAttribute<'a>, BuildHasherDefault<FingerprintHasher>>;
+
+struct SeenAttributes<'a> {
+    bloom: u64,
+    // `MaybeUninit` avoids zeroing 192 bytes for the overwhelmingly common
+    // one-to-three-attribute case. The initialized prefix is tracked by
+    // `inline_len` and `SeenAttribute` is `Copy`, so no drop work is needed.
+    inline: [MaybeUninit<SeenAttribute<'a>>; INLINE_SEEN_ATTRIBUTES],
+    inline_len: usize,
+    heap: Option<SeenAttributeSet<'a>>,
+}
+
+impl<'a> SeenAttributes<'a> {
+    #[inline]
+    fn new() -> Self {
+        Self {
+            bloom: 0,
+            inline: [MaybeUninit::uninit(); INLINE_SEEN_ATTRIBUTES],
+            inline_len: 0,
+            heap: None,
+        }
+    }
+
+    #[inline]
+    fn duplicate_or_insert(&mut self, name: &'a [u8]) -> bool {
+        if self.inline_len == 0 {
+            self.inline[0].write(SeenAttribute {
+                fingerprint: 0,
+                name,
+            });
+            self.inline_len = 1;
+            return false;
+        }
+        if self.bloom == 0 {
+            let first = self.inline_entries()[0];
+            if first.name.eq_ignore_ascii_case(name) {
+                return true;
+            }
+            let first_fingerprint = ascii_ci_fingerprint(first.name);
+            self.inline[0].write(SeenAttribute {
+                fingerprint: first_fingerprint,
+                name: first.name,
+            });
+            self.bloom = fingerprint_bloom(first_fingerprint);
+        }
+
+        let fingerprint = ascii_ci_fingerprint(name);
+        self.duplicate_or_insert_hashed(name, fingerprint)
+    }
+
+    /// Variant for callers that already visited every name byte while parsing.
+    #[inline]
+    fn duplicate_or_insert_hashed(&mut self, name: &'a [u8], fingerprint: u64) -> bool {
+        let candidate = SeenAttribute { fingerprint, name };
+
+        if let Some(heap) = &mut self.heap {
+            return !heap.insert(candidate);
+        }
+
+        let bloom = fingerprint_bloom(fingerprint);
+        if self.bloom & bloom == bloom
+            && self
+                .inline_entries()
+                .iter()
+                .any(|seen| seen.fingerprint == fingerprint && seen.name.eq_ignore_ascii_case(name))
+        {
+            return true;
+        }
+
+        self.bloom |= bloom;
+        if self.inline_len < INLINE_SEEN_ATTRIBUTES {
+            self.inline[self.inline_len].write(candidate);
+            self.inline_len += 1;
+        } else {
+            let mut heap = SeenAttributeSet::with_capacity_and_hasher(
+                INLINE_SEEN_ATTRIBUTES * 2,
+                BuildHasherDefault::default(),
+            );
+            for &seen in self.inline_entries() {
+                heap.insert(seen);
+            }
+            heap.insert(candidate);
+            self.heap = Some(heap);
+        }
+        false
+    }
+
+    #[inline]
+    fn hashes_during_parse(&self) -> bool {
+        self.bloom != 0
+    }
+
+    #[inline]
+    fn inline_entries(&self) -> &[SeenAttribute<'a>] {
+        // SAFETY: only the prefix `[..inline_len]` is exposed, and every entry
+        // in that prefix is initialized immediately before `inline_len` grows.
+        unsafe {
+            std::slice::from_raw_parts(
+                self.inline.as_ptr().cast::<SeenAttribute<'a>>(),
+                self.inline_len,
+            )
+        }
+    }
+}
+
+#[inline]
+fn ascii_ci_fingerprint(name: &[u8]) -> u64 {
+    let mut hash = ASCII_CI_FINGERPRINT_OFFSET;
+    for &byte in name {
+        hash = ascii_ci_fingerprint_step(hash, byte);
+    }
+    hash
+}
+
+#[inline(always)]
+fn ascii_ci_fingerprint_step(hash: u64, byte: u8) -> u64 {
+    (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(0x0000_0100_0000_01b3)
+}
+
+#[inline]
+fn fingerprint_bloom(fingerprint: u64) -> u64 {
+    (1u64 << (fingerprint & 63)) | (1u64 << ((fingerprint >> 32) & 63))
+}
+
 #[cfg(feature = "entity-decode")]
 #[inline]
 fn maybe_decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
     crate::entity::decode_entities(input)
 }
 
+#[cfg(feature = "entity-decode")]
+#[inline]
+fn maybe_decode_attribute_entities<'a>(input: &'a str) -> Cow<'a, str> {
+    crate::entity::decode_attribute_entities(input)
+}
+
 #[cfg(not(feature = "entity-decode"))]
 #[inline]
 fn maybe_decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
+    Cow::Borrowed(input)
+}
+
+#[cfg(not(feature = "entity-decode"))]
+#[inline]
+fn maybe_decode_attribute_entities<'a>(input: &'a str) -> Cow<'a, str> {
     Cow::Borrowed(input)
 }
 
@@ -103,6 +291,8 @@ enum Mode {
     InRawText,
     /// Inside an RCDATA element (title/textarea).
     InRcData,
+    /// After a `<plaintext>` start tag. Everything through EOF is text.
+    InPlainText,
 }
 
 /// Direct input parser driven by structural delimiter positions.
@@ -179,6 +369,7 @@ impl<'a> Parser<'a> {
             Mode::InDoctype => self.on_in_doctype_impl(pos, byte, emit),
             Mode::InCData => self.on_in_cdata_impl(pos, byte, emit),
             Mode::InRawText | Mode::InRcData => self.on_in_raw_text_impl(pos, byte, emit),
+            Mode::InPlainText => {}
         }
     }
 
@@ -233,7 +424,10 @@ impl<'a> Parser<'a> {
                 self.parse_tag_impl(self.tag_open_pos, pos, emit);
                 self.cursor = pos + 1;
                 // parse_tag may have entered a text-element mode — don't override.
-                if !matches!(self.mode, Mode::InRawText | Mode::InRcData) {
+                if !matches!(
+                    self.mode,
+                    Mode::InRawText | Mode::InRcData | Mode::InPlainText
+                ) {
                     self.mode = Mode::Data;
                 }
             }
@@ -361,18 +555,12 @@ impl<'a> Parser<'a> {
         let name = self.str_slice(name_start, pos);
         let tag = Tag::from_bytes(&self.input[name_start..pos]);
 
-        // Check for self-closing at the end.
-        let self_closing = close > 0 && self.input[close - 1] == b'/' || tag.is_void();
+        // The flag records source syntax only. HTML tree construction ignores
+        // a trailing slash on non-void HTML elements.
+        let self_closing = close > 0 && self.input[close - 1] == b'/';
 
         // Parse attributes.
-        let attrs = self.parse_attributes(
-            pos,
-            if self_closing && close > 0 && self.input[close - 1] == b'/' {
-                close - 1
-            } else {
-                close
-            },
-        );
+        let attrs = self.parse_attributes(pos, if self_closing { close - 1 } else { close });
 
         emit(Token::OpenTag {
             tag,
@@ -382,10 +570,12 @@ impl<'a> Parser<'a> {
         });
 
         // Enter the appropriate text-element mode.
-        if !self_closing && tag.is_raw_text() {
+        if name.eq_ignore_ascii_case("plaintext") {
+            self.mode = Mode::InPlainText;
+        } else if !tag.is_void() && tag.is_raw_text() {
             self.mode = Mode::InRawText;
             self.raw_text_tag = tag;
-        } else if !self_closing && tag.is_rcdata() {
+        } else if !tag.is_void() && tag.is_rcdata() {
             self.mode = Mode::InRcData;
             self.raw_text_tag = tag;
         }
@@ -394,11 +584,17 @@ impl<'a> Parser<'a> {
     /// Parse attributes from the region between tag name and `>`.
     fn parse_attributes(&self, start: usize, end: usize) -> Vec<Attribute<'a>> {
         let estimated = if end > start {
-            ((end - start) / 15).clamp(2, 16)
+            // Attribute-heavy scraping input is commonly denser than the old
+            // 15-byte estimate (for example, ` data-x=1`). Reserving from a
+            // 10-byte estimate avoids the 2 -> 4 growth for three attributes
+            // and the late reallocation around sixteen without letting a
+            // single tag reserve an unbounded amount.
+            ((end - start) / 10).clamp(2, 16)
         } else {
             2
         };
-        let mut attrs = Vec::with_capacity(estimated);
+        let mut attrs: Vec<Attribute<'a>> = Vec::with_capacity(estimated);
+        let mut seen = SeenAttributes::new();
         let mut pos = start;
 
         loop {
@@ -412,13 +608,27 @@ impl<'a> Parser<'a> {
 
             // Attribute name.
             let name_start = pos;
-            while pos < end
-                && !is_whitespace(self.input[pos])
-                && self.input[pos] != b'='
-                && self.input[pos] != b'/'
-                && self.input[pos] != b'>'
-            {
-                pos += 1;
+            let hash_during_parse = seen.hashes_during_parse();
+            let mut fingerprint = ASCII_CI_FINGERPRINT_OFFSET;
+            if hash_during_parse {
+                while pos < end
+                    && !is_whitespace(self.input[pos])
+                    && self.input[pos] != b'='
+                    && self.input[pos] != b'/'
+                    && self.input[pos] != b'>'
+                {
+                    fingerprint = ascii_ci_fingerprint_step(fingerprint, self.input[pos]);
+                    pos += 1;
+                }
+            } else {
+                while pos < end
+                    && !is_whitespace(self.input[pos])
+                    && self.input[pos] != b'='
+                    && self.input[pos] != b'/'
+                    && self.input[pos] != b'>'
+                {
+                    pos += 1;
+                }
             }
             let name_end = pos;
             if name_start == name_end {
@@ -426,6 +636,12 @@ impl<'a> Parser<'a> {
                 continue;
             }
             let attr_name = self.str_slice(name_start, name_end);
+            let attr_name_bytes = attr_name.as_bytes();
+            let duplicate = if hash_during_parse {
+                seen.duplicate_or_insert_hashed(attr_name_bytes, fingerprint)
+            } else {
+                seen.duplicate_or_insert(attr_name_bytes)
+            };
 
             // Skip whitespace.
             while pos < end && is_whitespace(self.input[pos]) {
@@ -455,11 +671,13 @@ impl<'a> Parser<'a> {
                         pos += 1; // skip closing quote
                     }
                     let raw_value = self.str_slice(val_start, val_end);
-                    let value = maybe_decode_entities(raw_value);
-                    attrs.push(Attribute {
-                        name: Cow::Borrowed(attr_name),
-                        value: Some(value),
-                    });
+                    if !duplicate {
+                        let value = maybe_decode_attribute_entities(raw_value);
+                        attrs.push(Attribute {
+                            name: Cow::Borrowed(attr_name),
+                            value: Some(value),
+                        });
+                    }
                 } else {
                     // Unquoted value.
                     let val_start = pos;
@@ -467,18 +685,22 @@ impl<'a> Parser<'a> {
                         pos += 1;
                     }
                     let raw_value = self.str_slice(val_start, pos);
-                    let value = maybe_decode_entities(raw_value);
-                    attrs.push(Attribute {
-                        name: Cow::Borrowed(attr_name),
-                        value: Some(value),
-                    });
+                    if !duplicate {
+                        let value = maybe_decode_attribute_entities(raw_value);
+                        attrs.push(Attribute {
+                            name: Cow::Borrowed(attr_name),
+                            value: Some(value),
+                        });
+                    }
                 }
             } else {
                 // Boolean attribute (no value).
-                attrs.push(Attribute {
-                    name: Cow::Borrowed(attr_name),
-                    value: None,
-                });
+                if !duplicate {
+                    attrs.push(Attribute {
+                        name: Cow::Borrowed(attr_name),
+                        value: None,
+                    });
+                }
             }
         }
 
@@ -533,6 +755,7 @@ impl<'a> Parser<'a> {
             Mode::InDoctype => self.on_in_doctype_sink(pos, byte, sink),
             Mode::InCData => self.on_in_cdata_sink(pos, byte, sink),
             Mode::InRawText | Mode::InRcData => self.on_in_raw_text_sink(pos, byte, sink),
+            Mode::InPlainText => {}
         }
     }
 
@@ -579,7 +802,10 @@ impl<'a> Parser<'a> {
             b'>' if self.attr_quote.is_none() => {
                 self.parse_tag_sink(self.tag_open_pos, pos, sink);
                 self.cursor = pos + 1;
-                if !matches!(self.mode, Mode::InRawText | Mode::InRcData) {
+                if !matches!(
+                    self.mode,
+                    Mode::InRawText | Mode::InRcData | Mode::InPlainText
+                ) {
                     self.mode = Mode::Data;
                 }
             }
@@ -688,7 +914,7 @@ impl<'a> Parser<'a> {
         let tag = Tag::from_bytes(&self.input[name_start..pos]);
 
         let has_trailing_slash = close > 0 && self.input[close - 1] == b'/';
-        let self_closing = has_trailing_slash || tag.is_void();
+        let self_closing = has_trailing_slash;
 
         // Attribute region: from after tag name to before `>` (or `/>`).
         let attr_end = if has_trailing_slash { close - 1 } else { close };
@@ -697,10 +923,12 @@ impl<'a> Parser<'a> {
         sink.open_tag(tag, name, attr_raw, self_closing);
 
         // Enter the appropriate text-element mode.
-        if !self_closing && tag.is_raw_text() {
+        if name.eq_ignore_ascii_case("plaintext") {
+            self.mode = Mode::InPlainText;
+        } else if !tag.is_void() && tag.is_raw_text() {
             self.mode = Mode::InRawText;
             self.raw_text_tag = tag;
-        } else if !self_closing && tag.is_rcdata() {
+        } else if !tag.is_void() && tag.is_rcdata() {
             self.mode = Mode::InRcData;
             self.raw_text_tag = tag;
         }
@@ -736,7 +964,7 @@ impl<'a> Parser<'a> {
         if end > self.cursor {
             let raw = self.str_slice(self.cursor, end);
             if !raw.is_empty() {
-                let content = if self.mode == Mode::InRawText {
+                let content = if matches!(self.mode, Mode::InRawText | Mode::InPlainText) {
                     Cow::Borrowed(raw)
                 } else {
                     maybe_decode_entities(raw)
@@ -1033,6 +1261,110 @@ mod tests {
             }
             other => panic!("expected OpenTag, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn duplicate_attributes_are_ascii_case_insensitive_first_wins() {
+        let tokens = tokenize("<div ID=first id='second' class=a CLASS=b>");
+        match &tokens[0] {
+            Token::OpenTag { attributes, .. } => {
+                assert_eq!(attributes.len(), 2);
+                assert_eq!(attributes[0].name.as_ref(), "ID");
+                assert_eq!(attributes[0].value.as_deref(), Some("first"));
+                assert_eq!(attributes[1].name.as_ref(), "class");
+                assert_eq!(attributes[1].value.as_deref(), Some("a"));
+            }
+            other => panic!("expected OpenTag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn duplicate_tracker_handles_inline_and_heap_boundaries() {
+        for count in [0usize, 1, 8, 9, 64, 1_000] {
+            let mut html = String::from("<div");
+            for index in 0..count {
+                html.push_str(&format!(" data-{index}={index}"));
+            }
+            html.push_str(" DATA-0=duplicate>");
+
+            let tokens = tokenize(&html);
+            let Token::OpenTag { attributes, .. } = &tokens[0] else {
+                panic!("expected OpenTag");
+            };
+            assert_eq!(attributes.len(), count.max(1));
+            if count > 0 {
+                assert_eq!(attributes[0].value.as_deref(), Some("0"));
+            } else {
+                assert_eq!(attributes[0].value.as_deref(), Some("duplicate"));
+            }
+        }
+    }
+
+    #[test]
+    fn fingerprint_collision_still_checks_full_name() {
+        let candidate = b"beta";
+        let fingerprint = ascii_ci_fingerprint(candidate);
+        let mut seen = SeenAttributes::new();
+        seen.bloom = fingerprint_bloom(fingerprint);
+        seen.inline[0].write(SeenAttribute {
+            fingerprint,
+            name: b"alpha",
+        });
+        seen.inline_len = 1;
+
+        assert!(!seen.duplicate_or_insert(candidate));
+        assert!(seen.duplicate_or_insert(b"BETA"));
+
+        let mut heap_seen = SeenAttributes::new();
+        heap_seen.bloom = fingerprint_bloom(fingerprint);
+        heap_seen.inline[0].write(SeenAttribute {
+            fingerprint,
+            name: b"alpha",
+        });
+        heap_seen.inline_len = 1;
+        for name in [
+            b"bravo".as_slice(),
+            b"charlie".as_slice(),
+            b"delta".as_slice(),
+            b"echo".as_slice(),
+            b"foxtrot".as_slice(),
+            b"golf".as_slice(),
+            b"hotel".as_slice(),
+            b"india".as_slice(),
+        ] {
+            assert!(!heap_seen.duplicate_or_insert_hashed(name, fingerprint));
+        }
+        assert!(heap_seen.heap.is_some());
+        assert!(!heap_seen.duplicate_or_insert_hashed(candidate, fingerprint));
+        assert!(heap_seen.duplicate_or_insert_hashed(b"BETA", fingerprint));
+    }
+
+    #[test]
+    fn attribute_entities_use_ambiguous_ampersand_rules() {
+        let tokens = tokenize("<div title='&copy=test' data-ok='&copy test'>");
+        match &tokens[0] {
+            Token::OpenTag { attributes, .. } => {
+                let expected_ambiguous = "&copy=test";
+                let expected_legacy = if cfg!(feature = "entity-decode") {
+                    "© test"
+                } else {
+                    "&copy test"
+                };
+                assert_eq!(attributes[0].value.as_deref(), Some(expected_ambiguous));
+                assert_eq!(attributes[1].value.as_deref(), Some(expected_legacy));
+            }
+            other => panic!("expected OpenTag, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn plaintext_treats_everything_after_start_tag_as_literal() {
+        let tokens = tokenize("<plaintext><b>x&amp;</plaintext>");
+        assert_eq!(tokens.len(), 2);
+        assert!(matches!(
+            &tokens[1],
+            Token::Text { content } if content == "<b>x&amp;</plaintext>"
+        ));
     }
 
     #[test]

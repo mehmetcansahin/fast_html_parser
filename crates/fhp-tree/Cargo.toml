@@ -1,6 +1,6 @@
 [package]
 name = "fhp-tree"
-version = "0.1.2"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -13,16 +13,17 @@ categories = ["parser-implementations"]
 exclude = ["benches/", "tests/"]
 
 [features]
-default = ["entity-decode", "encoding"]
+default = ["entity-decode", "encoding", "simd"]
 entity-decode = ["fhp-tokenizer/entity-decode"]
+simd = ["fhp-tokenizer/simd"]
 encoding = ["dep:fhp-encoding", "dep:encoding_rs"]
 async-tokio = ["dep:tokio", "encoding"]
 async-async-std = ["dep:async-std", "encoding"]
 
 [dependencies]
-fhp-core = { version = "0.1.2", path = "../fhp-core" }
-fhp-encoding = { version = "0.1.2", path = "../fhp-encoding", optional = true }
-fhp-tokenizer = { version = "0.1.2", path = "../fhp-tokenizer", default-features = false }
+fhp-core = { version = "0.2.0", path = "../fhp-core" }
+fhp-encoding = { version = "0.2.0", path = "../fhp-encoding", optional = true }
+fhp-tokenizer = { version = "0.2.0", path = "../fhp-tokenizer", default-features = false }
 thiserror = { workspace = true }
 encoding_rs = { workspace = true, optional = true }
 memchr = "2"

@@ -4,17 +4,42 @@
 
 use fhp_core::tag::Tag;
 
+/// Element-name test used by the XPath subset.
+///
+/// Common HTML names use the compact [`Tag`] representation. Standard names
+/// outside that interned set, and custom elements, retain their normalized
+/// ASCII-lowercase spelling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NameTest {
+    /// A name represented by the shared HTML tag enum.
+    Interned(Tag),
+    /// A non-interned standard or custom element name.
+    Literal(Box<str>),
+}
+
+impl NameTest {
+    pub(crate) fn from_html_name(name: &str) -> Self {
+        let normalized = name.to_ascii_lowercase();
+        let tag = Tag::from_bytes(normalized.as_bytes());
+        if tag == Tag::Unknown {
+            Self::Literal(normalized.into_boxed_str())
+        } else {
+            Self::Interned(tag)
+        }
+    }
+}
+
 /// A parsed XPath expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum XPathExpr {
     /// `//tag` — find descendants by tag name.
-    DescendantByTag(Tag),
+    DescendantByTag(NameTest),
 
     /// `//tag[@attr='value']` — find descendants by tag with an attribute
     /// predicate.
     DescendantByAttr {
         /// The tag to match.
-        tag: Tag,
+        tag: NameTest,
         /// Attribute name.
         attr: String,
         /// Attribute value.
@@ -24,7 +49,7 @@ pub enum XPathExpr {
     /// `//tag[@attr]` — descendants by tag with attribute existence predicate.
     DescendantByAttrExists {
         /// The tag to match.
-        tag: Tag,
+        tag: NameTest,
         /// Attribute name.
         attr: String,
     },
@@ -36,7 +61,7 @@ pub enum XPathExpr {
     /// contains predicate.
     ContainsPredicate {
         /// The tag to match.
-        tag: Tag,
+        tag: NameTest,
         /// Attribute name.
         attr: String,
         /// Substring to search for.
@@ -46,7 +71,7 @@ pub enum XPathExpr {
     /// `//tag[position()=N]` — find descendants by tag at a specific position.
     PositionPredicate {
         /// The tag to match.
-        tag: Tag,
+        tag: NameTest,
         /// 1-based position.
         pos: usize,
     },
@@ -79,7 +104,7 @@ pub enum XPathExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct PathStep {
     /// Tag name for this step.
-    pub tag: Tag,
+    pub tag: NameTest,
     /// Optional predicate for this step.
     pub predicate: Option<Predicate>,
 }

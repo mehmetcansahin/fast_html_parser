@@ -7,6 +7,8 @@
 //! When a selector contains descendant combinators, ancestor bloom
 //! filters are used for fast rejection.
 
+use std::collections::HashMap;
+
 use fhp_core::hash::selector_hash;
 use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
@@ -265,76 +267,209 @@ fn is_element(n: &fhp_tree::node::Node) -> bool {
 // Complex selector matching (right-to-left)
 // ---------------------------------------------------------------------------
 
-/// Match a single complex selector against a node using right-to-left matching.
-pub fn match_selector(arena: &Arena, node: NodeId, selector: &Selector) -> bool {
-    // Step 1: match the subject (rightmost compound).
-    if !match_compound(arena, node, &selector.subject) {
-        return false;
-    }
+/// Largest memo table represented as a dense tri-state byte array.
+///
+/// Larger `(node, chain-index)` spaces use a sparse map so a selector cannot
+/// force an unbounded up-front allocation on a large document.
+const DENSE_MEMO_STATE_LIMIT: usize = 8_388_608;
 
-    // Step 2: walk the chain right-to-left with backtracking.
-    match_chain(arena, node, &selector.chain)
+const MEMO_UNKNOWN: u8 = 0;
+const MEMO_FALSE: u8 = 1;
+const MEMO_TRUE: u8 = 2;
+
+enum MatchMemo {
+    Empty,
+    Dense { width: usize, states: Vec<u8> },
+    Sparse(HashMap<(NodeId, usize), bool>),
 }
 
-/// Recursively match the remaining right-to-left combinator chain against
-/// ancestors/siblings of `current`.
-///
-/// Descendant and general-sibling steps try every candidate and backtrack on
-/// failure: committing to the nearest match (as a greedy walk does) drops valid
-/// matches for selectors like `A > B C`, where the nearest `B` is not a child
-/// of `A` but an outer `B` is. Child and adjacent-sibling steps are
-/// deterministic (a single candidate) but still recurse on the chain remainder.
-fn match_chain(arena: &Arena, current: NodeId, chain: &[(Combinator, CompoundSelector)]) -> bool {
-    let Some(((combinator, compound), rest)) = chain.split_first() else {
-        return true;
-    };
+impl MatchMemo {
+    #[cfg(test)]
+    fn new(node_count: usize, chain_len: usize) -> Self {
+        Self::new_with_dense(node_count, chain_len, true)
+    }
 
-    match combinator {
-        Combinator::Descendant => {
-            let mut ancestor = arena.get(current).parent;
-            while !ancestor.is_null() {
-                if match_compound(arena, ancestor, compound) && match_chain(arena, ancestor, rest) {
-                    return true;
-                }
-                ancestor = arena.get(ancestor).parent;
-            }
-            false
+    fn new_with_dense(node_count: usize, chain_len: usize, allow_dense: bool) -> Self {
+        if chain_len == 0 {
+            return Self::Empty;
         }
 
-        Combinator::Child => {
-            let parent = arena.get(current).parent;
-            !parent.is_null()
-                && match_compound(arena, parent, compound)
-                && match_chain(arena, parent, rest)
-        }
-
-        Combinator::AdjacentSibling => match prev_element_sibling(arena, current) {
-            Some(p) => match_compound(arena, p, compound) && match_chain(arena, p, rest),
-            None => false,
-        },
-
-        Combinator::GeneralSibling => {
-            let mut prev = arena.get(current).prev_sibling;
-            while !prev.is_null() {
-                let p = arena.get(prev);
-                if is_element(p)
-                    && match_compound(arena, prev, compound)
-                    && match_chain(arena, prev, rest)
-                {
-                    return true;
+        match node_count.checked_mul(chain_len) {
+            Some(state_count) if allow_dense && state_count <= DENSE_MEMO_STATE_LIMIT => {
+                Self::Dense {
+                    width: chain_len,
+                    states: vec![MEMO_UNKNOWN; state_count],
                 }
-                prev = p.prev_sibling;
             }
-            false
+            _ => Self::Sparse(HashMap::new()),
         }
     }
+
+    #[inline]
+    fn get(&self, node: NodeId, chain_index: usize) -> Option<bool> {
+        match self {
+            Self::Empty => None,
+            Self::Dense { width, states } => {
+                let state = states[node.index() * width + chain_index];
+                match state {
+                    MEMO_FALSE => Some(false),
+                    MEMO_TRUE => Some(true),
+                    _ => None,
+                }
+            }
+            Self::Sparse(states) => states.get(&(node, chain_index)).copied(),
+        }
+    }
+
+    #[inline]
+    fn insert(&mut self, node: NodeId, chain_index: usize, matched: bool) {
+        match self {
+            Self::Empty => {}
+            Self::Dense { width, states } => {
+                states[node.index() * *width + chain_index] =
+                    if matched { MEMO_TRUE } else { MEMO_FALSE };
+            }
+            Self::Sparse(states) => {
+                states.insert((node, chain_index), matched);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn populated_len(&self) -> usize {
+        match self {
+            Self::Empty => 0,
+            Self::Dense { states, .. } => states
+                .iter()
+                .filter(|&&state| state != MEMO_UNKNOWN)
+                .count(),
+            Self::Sparse(states) => states.len(),
+        }
+    }
+}
+
+/// Selector-specific matcher whose memo table is reused across every subject
+/// candidate visited by a selection traversal.
+struct SelectorMatcher<'a> {
+    selector: &'a Selector,
+    memo: MatchMemo,
+}
+
+impl<'a> SelectorMatcher<'a> {
+    fn new(node_count: usize, selector: &'a Selector) -> Self {
+        Self::new_with_dense(node_count, selector, true)
+    }
+
+    fn new_with_dense(node_count: usize, selector: &'a Selector, allow_dense: bool) -> Self {
+        Self {
+            selector,
+            memo: MatchMemo::new_with_dense(node_count, selector.chain.len(), allow_dense),
+        }
+    }
+
+    #[inline]
+    fn matches(&mut self, arena: &Arena, node: NodeId) -> bool {
+        if !match_compound(arena, node, &self.selector.subject) {
+            return false;
+        }
+        self.match_chain(arena, node, 0)
+    }
+
+    fn match_chain(&mut self, arena: &Arena, current: NodeId, chain_index: usize) -> bool {
+        let selector = self.selector;
+        let Some((combinator, compound)) = selector.chain.get(chain_index) else {
+            return true;
+        };
+
+        if let Some(matched) = self.memo.get(current, chain_index) {
+            return matched;
+        }
+
+        let next_index = chain_index + 1;
+        let matched = match combinator {
+            Combinator::Descendant => {
+                let mut ancestor = arena.get(current).parent;
+                let mut found = false;
+                while !ancestor.is_null() {
+                    if match_compound(arena, ancestor, compound)
+                        && self.match_chain(arena, ancestor, next_index)
+                    {
+                        found = true;
+                        break;
+                    }
+                    ancestor = arena.get(ancestor).parent;
+                }
+                found
+            }
+
+            Combinator::Child => {
+                let parent = arena.get(current).parent;
+                !parent.is_null()
+                    && match_compound(arena, parent, compound)
+                    && self.match_chain(arena, parent, next_index)
+            }
+
+            Combinator::AdjacentSibling => match prev_element_sibling(arena, current) {
+                Some(previous) => {
+                    match_compound(arena, previous, compound)
+                        && self.match_chain(arena, previous, next_index)
+                }
+                None => false,
+            },
+
+            Combinator::GeneralSibling => {
+                let mut previous = arena.get(current).prev_sibling;
+                let mut found = false;
+                while !previous.is_null() {
+                    let previous_node = arena.get(previous);
+                    if is_element(previous_node)
+                        && match_compound(arena, previous, compound)
+                        && self.match_chain(arena, previous, next_index)
+                    {
+                        found = true;
+                        break;
+                    }
+                    previous = previous_node.prev_sibling;
+                }
+                found
+            }
+        };
+
+        self.memo.insert(current, chain_index, matched);
+        matched
+    }
+}
+
+/// Build all branch matchers while keeping the aggregate dense memo allocation
+/// within the same global state bound. If the selector list would exceed the
+/// bound, every branch uses sparse storage rather than allocating one maximum-
+/// sized dense table per branch.
+fn build_list_matchers<'a>(
+    node_count: usize,
+    selectors: &'a [Selector],
+) -> Vec<SelectorMatcher<'a>> {
+    let total_states = selectors.iter().try_fold(0usize, |total, selector| {
+        let branch_states = node_count.checked_mul(selector.chain.len())?;
+        total.checked_add(branch_states)
+    });
+    let allow_dense = total_states.is_some_and(|states| states <= DENSE_MEMO_STATE_LIMIT);
+
+    selectors
+        .iter()
+        .map(|selector| SelectorMatcher::new_with_dense(node_count, selector, allow_dense))
+        .collect()
+}
+
+/// Match a single complex selector against a node using right-to-left matching.
+pub fn match_selector(arena: &Arena, node: NodeId, selector: &Selector) -> bool {
+    SelectorMatcher::new_with_dense(arena.len(), selector, false).matches(arena, node)
 }
 
 /// Match a selector list: a node matches if it matches ANY selector.
 pub fn match_selector_list(arena: &Arena, node: NodeId, list: &SelectorList) -> bool {
-    list.selectors
-        .iter()
-        .any(|sel| match_selector(arena, node, sel))
+    list.selectors.iter().any(|selector| {
+        SelectorMatcher::new_with_dense(arena.len(), selector, false).matches(arena, node)
+    })
 }
 
 /// Find the immediately preceding element sibling (skipping text/comments).
@@ -381,6 +516,7 @@ fn select_all_with_blooms(
     }
 
     let has_descendant = has_descendant_combinator(selector);
+    let mut matcher = SelectorMatcher::new(arena.len(), selector);
 
     if has_descendant {
         let local_blooms;
@@ -392,11 +528,18 @@ fn select_all_with_blooms(
         };
         let bloom_hashes = compute_descendant_hashes(selector);
         let mut results = Vec::new();
-        collect_bloom(arena, root, selector, blooms, &bloom_hashes, &mut results);
+        collect_bloom(
+            arena,
+            root,
+            &mut matcher,
+            blooms,
+            &bloom_hashes,
+            &mut results,
+        );
         results
     } else {
         let mut results = Vec::new();
-        collect_simple(arena, root, selector, &mut results);
+        collect_simple(arena, root, &mut matcher, &mut results);
         results
     }
 }
@@ -406,8 +549,9 @@ pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<
     if list.selectors.len() == 1 {
         return select_all(arena, root, &list.selectors[0]);
     }
+    let mut matchers = build_list_matchers(arena.len(), &list.selectors);
     let mut results = Vec::new();
-    collect_list(arena, root, list, &mut results);
+    collect_list(arena, root, &mut matchers, &mut results);
     results
 }
 
@@ -427,13 +571,18 @@ pub fn select_first(arena: &Arena, root: NodeId, selector: &Selector) -> Option<
     if let Some(id) = simple_id_selector(selector) {
         return find_first_id(arena, root, id);
     }
-    find_first(arena, root, selector)
+    let mut matcher = SelectorMatcher::new(arena.len(), selector);
+    find_first(arena, root, &mut matcher)
 }
 
 /// Select the first matching node from a selector list.
 pub fn select_first_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Option<NodeId> {
     // DFS finds the first match in document order.
-    find_first_list(arena, root, list)
+    if list.selectors.len() == 1 {
+        return select_first(arena, root, &list.selectors[0]);
+    }
+    let mut matchers = build_list_matchers(arena.len(), &list.selectors);
+    find_first_list(arena, root, &mut matchers)
 }
 
 // ---------------------------------------------------------------------------
@@ -441,19 +590,24 @@ pub fn select_first_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Op
 // ---------------------------------------------------------------------------
 
 /// DFS collection without bloom.
-fn collect_simple(arena: &Arena, node: NodeId, selector: &Selector, results: &mut Vec<NodeId>) {
+fn collect_simple(
+    arena: &Arena,
+    node: NodeId,
+    matcher: &mut SelectorMatcher<'_>,
+    results: &mut Vec<NodeId>,
+) {
     if node.is_null() {
         return;
     }
 
     let n = arena.get(node);
-    if is_element(n) && match_selector(arena, node, selector) {
+    if is_element(n) && matcher.matches(arena, node) {
         results.push(node);
     }
 
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_simple(arena, child, selector, results);
+        collect_simple(arena, child, matcher, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -461,19 +615,28 @@ fn collect_simple(arena: &Arena, node: NodeId, selector: &Selector, results: &mu
 /// Single DFS for a selector list. Traversing the actual links, rather than
 /// sorting allocation ids, preserves document order for public arenas whose
 /// nodes were allocated before they were attached.
-fn collect_list(arena: &Arena, node: NodeId, list: &SelectorList, results: &mut Vec<NodeId>) {
+fn collect_list(
+    arena: &Arena,
+    node: NodeId,
+    matchers: &mut [SelectorMatcher<'_>],
+    results: &mut Vec<NodeId>,
+) {
     if node.is_null() {
         return;
     }
 
     let current = arena.get(node);
-    if is_element(current) && match_selector_list(arena, node, list) {
+    if is_element(current)
+        && matchers
+            .iter_mut()
+            .any(|matcher| matcher.matches(arena, node))
+    {
         results.push(node);
     }
 
     let mut child = current.first_child;
     while !child.is_null() {
-        collect_list(arena, child, list, results);
+        collect_list(arena, child, matchers, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -518,7 +681,7 @@ fn collect_tag(arena: &Arena, node: NodeId, target_tag: Tag, results: &mut Vec<N
 fn collect_bloom(
     arena: &Arena,
     node: NodeId,
-    selector: &Selector,
+    matcher: &mut SelectorMatcher<'_>,
     blooms: &[AncestorBloom],
     bloom_hashes: &[u32],
     results: &mut Vec<NodeId>,
@@ -533,14 +696,14 @@ fn collect_bloom(
         let bloom = &blooms[node.index()];
         let bloom_pass = bloom_hashes.iter().all(|&h| bloom.may_contain(h));
 
-        if bloom_pass && match_selector(arena, node, selector) {
+        if bloom_pass && matcher.matches(arena, node) {
             results.push(node);
         }
     }
 
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_bloom(arena, child, selector, blooms, bloom_hashes, results);
+        collect_bloom(arena, child, matcher, blooms, bloom_hashes, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -576,19 +739,19 @@ fn compute_descendant_hashes(selector: &Selector) -> Vec<u32> {
 }
 
 /// DFS to find first matching node.
-fn find_first(arena: &Arena, node: NodeId, selector: &Selector) -> Option<NodeId> {
+fn find_first(arena: &Arena, node: NodeId, matcher: &mut SelectorMatcher<'_>) -> Option<NodeId> {
     if node.is_null() {
         return None;
     }
 
     let n = arena.get(node);
-    if is_element(n) && match_selector(arena, node, selector) {
+    if is_element(n) && matcher.matches(arena, node) {
         return Some(node);
     }
 
     let mut child = n.first_child;
     while !child.is_null() {
-        if let Some(found) = find_first(arena, child, selector) {
+        if let Some(found) = find_first(arena, child, matcher) {
             return Some(found);
         }
         child = arena.get(child).next_sibling;
@@ -639,19 +802,27 @@ fn find_first_tag(arena: &Arena, node: NodeId, target_tag: Tag) -> Option<NodeId
 }
 
 /// DFS to find first matching node for a selector list.
-fn find_first_list(arena: &Arena, node: NodeId, list: &SelectorList) -> Option<NodeId> {
+fn find_first_list(
+    arena: &Arena,
+    node: NodeId,
+    matchers: &mut [SelectorMatcher<'_>],
+) -> Option<NodeId> {
     if node.is_null() {
         return None;
     }
 
     let n = arena.get(node);
-    if is_element(n) && match_selector_list(arena, node, list) {
+    if is_element(n)
+        && matchers
+            .iter_mut()
+            .any(|matcher| matcher.matches(arena, node))
+    {
         return Some(node);
     }
 
     let mut child = n.first_child;
     while !child.is_null() {
-        if let Some(found) = find_first_list(arena, child, list) {
+        if let Some(found) = find_first_list(arena, child, matchers) {
             return Some(found);
         }
         child = arena.get(child).next_sibling;
@@ -956,5 +1127,58 @@ mod tests {
         assert!(contains_class_token("a\tb\nc", "b"));
         assert!(contains_class_token("  a   b  ", "a"));
         assert!(!contains_class_token("  a   b  ", "c"));
+    }
+
+    #[test]
+    fn memo_uses_dense_and_sparse_representations_at_the_state_bound() {
+        let dense = MatchMemo::new(32, 4);
+        assert!(matches!(
+            dense,
+            MatchMemo::Dense {
+                ref states,
+                width: 4
+            } if states.len() == 128
+        ));
+
+        let sparse = MatchMemo::new(DENSE_MEMO_STATE_LIMIT + 1, 1);
+        assert!(matches!(sparse, MatchMemo::Sparse(ref states) if states.is_empty()));
+    }
+
+    #[test]
+    fn selector_lists_share_the_dense_state_budget() {
+        let list = parse_selector("div span, p a").unwrap();
+        let matchers = build_list_matchers(DENSE_MEMO_STATE_LIMIT / 2 + 1, &list.selectors);
+        assert_eq!(matchers.len(), 2);
+        assert!(
+            matchers
+                .iter()
+                .all(|matcher| matches!(&matcher.memo, MatchMemo::Sparse(_)))
+        );
+    }
+
+    #[test]
+    fn repeated_candidates_reuse_memoized_chain_states() {
+        let doc = fhp_tree::parse("<main><div><div><div><span>x</span></div></div></div></main>")
+            .unwrap();
+        let selector = parse_selector("section > div div div span")
+            .unwrap()
+            .selectors
+            .pop()
+            .unwrap();
+        let mut matcher = SelectorMatcher::new(doc.arena().len(), &selector);
+
+        for index in 0..doc.arena().len() {
+            let node = NodeId(index as u32);
+            let _ = matcher.matches(doc.arena(), node);
+        }
+        let first_pass_states = matcher.memo.populated_len();
+        assert!(first_pass_states > 0);
+        assert!(first_pass_states <= doc.arena().len() * selector.chain.len());
+
+        for index in 0..doc.arena().len() {
+            let node = NodeId(index as u32);
+            let _ = matcher.matches(doc.arena(), node);
+        }
+        assert_eq!(matcher.memo.populated_len(), first_pass_states);
     }
 }

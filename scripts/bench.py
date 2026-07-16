@@ -27,18 +27,36 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 RUSTFLAGS = "-C target-cpu=native"
 CARGO_INCREMENTAL = "0"
 README_START = "<!-- benchmark-summary:start -->"
 README_END = "<!-- benchmark-summary:end -->"
-ORDER_ROTATIONS = ("fhp-first", "fhp-middle", "fhp-last")
-DEFAULT_ORDER = "fhp-middle"
+BENCH_INDEX_START = "<!-- latest-benchmark:start -->"
+BENCH_INDEX_END = "<!-- latest-benchmark:end -->"
+ORDER_ROTATIONS = (
+    "fhp-scraper-tl",
+    "fhp-tl-scraper",
+    "scraper-fhp-tl",
+    "scraper-tl-fhp",
+    "tl-fhp-scraper",
+    "tl-scraper-fhp",
+)
+DEFAULT_ORDER = ORDER_ROTATIONS[0]
 QUICK_RUN_ARGS = ("--quick", "--noplot")
 PUBLISH_RUN_ARGS = ("--noplot", "--quiet")
 FAIL_THRESHOLD = 0.05
 WARN_THRESHOLD = 0.02
 EXPECTED_CONFIDENCE_LEVEL = 0.95
+P95_P50_LIMIT = 2.0
+FAR_OUTLIER_LIMIT = 0.05
+ROTATION_SPREAD_LIMIT = 1.10
+CALIBRATION_MIN = 0.90
+CALIBRATION_MAX = 1.10
+CALIBRATION_IDS = (
+    "diagnostic/calibration/memcpy_100kb",
+    "diagnostic/calibration/tl_parse_100kb",
+)
 CRITERION_DEFAULT_SETTINGS = {
     "warm_up_time_seconds": 3.0,
     "measurement_time_seconds": 5.0,
@@ -84,23 +102,23 @@ class Harness:
         }
 
 
-FACADE_FEATURES = ("css-selector", "encoding", "entity-decode")
+FACADE_FEATURES = ("css-selector", "encoding", "entity-decode", "simd")
 
 # Each binary has an isolated Criterion output tree.  The async-only e2e slice
 # is separate so enabling Tokio does not duplicate all synchronous samples.
 FULL_MATRIX: Tuple[Harness, ...] = (
-    Harness("fhp-simd/simd", "fhp-simd", "simd_bench"),
+    Harness("fhp-simd/simd", "fhp-simd", "simd_bench", ("simd",)),
     Harness(
         "fhp-tokenizer/tokenizer",
         "fhp-tokenizer",
         "tokenizer_bench",
-        ("entity-decode",),
+        ("entity-decode", "simd"),
     ),
     Harness(
         "fhp-tree/tree",
         "fhp-tree",
         "tree_bench",
-        ("encoding", "entity-decode"),
+        ("encoding", "entity-decode", "simd"),
     ),
     Harness("fhp-selector/selector", "fhp-selector", "selector_bench"),
     Harness("fhp-selector/xpath", "fhp-selector", "xpath_bench"),
@@ -163,6 +181,11 @@ class Estimate:
     throughput_value: Optional[float]
     harness: str
     rotation: Optional[str] = None
+    criterion_median_ns: Optional[float] = None
+    normalized_p50_ns: Optional[float] = None
+    normalized_p95_ns: Optional[float] = None
+    far_outlier_ratio: Optional[float] = None
+    attempt: int = 1
 
     def as_metadata(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -203,6 +226,11 @@ class PublishedEstimate:
     throughput_value: Optional[float]
     run_count: int
     rotations: Tuple[str, ...]
+    criterion_median_ns: Optional[float] = None
+    normalized_p50_ns: Optional[float] = None
+    normalized_p95_ns: Optional[float] = None
+    far_outlier_ratio: Optional[float] = None
+    stable: bool = True
 
     def as_metadata(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -216,6 +244,31 @@ class ContractRatio:
     lower: float
     upper: float
     run_count: int
+    stable: bool = True
+
+    def as_metadata(self) -> Dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class StabilityDecision:
+    benchmark: str
+    stable: bool
+    p95_p50: float
+    far_outlier_ratio: float
+    rotation_spread: float
+    reasons: Tuple[str, ...]
+
+    def as_metadata(self) -> Dict[str, Any]:
+        return dataclasses.asdict(self)
+
+
+@dataclasses.dataclass(frozen=True)
+class CalibrationDecision:
+    status: str
+    median_baseline_current_ratio: Optional[float]
+    ratios: Mapping[str, float]
+    reason: str
 
     def as_metadata(self) -> Dict[str, Any]:
         return dataclasses.asdict(self)
@@ -359,33 +412,71 @@ def validate_fixture_manifest(root: Path) -> List[FixtureRecord]:
     return current
 
 
-def _marker_span(text: str) -> Tuple[int, int]:
-    if text.count(README_START) != 1 or text.count(README_END) != 1:
-        raise BenchError("README.md must contain exactly one benchmark summary marker pair")
-    start = text.index(README_START)
-    end = text.index(README_END)
+def semantic_contract_sha256(root: Path) -> str:
+    """Validate and hash the single benchmark semantic contract source."""
+
+    path = root / "benchmarks" / "contracts.json"
+    if not path.is_file():
+        raise BenchError(f"missing semantic benchmark contract: {path}")
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BenchError(f"invalid semantic benchmark contract {path}: {error}") from error
+    if not isinstance(document, dict) or document.get("schema_version") != 1:
+        raise BenchError("benchmarks/contracts.json must use semantic contract schema 1")
+    canonical = document.get("canonical_dom")
+    selectors = document.get("selectors")
+    if not isinstance(canonical, dict) or not isinstance(canonical.get("fixtures"), list):
+        raise BenchError("benchmarks/contracts.json has no canonical_dom.fixtures array")
+    if not canonical["fixtures"] or not isinstance(selectors, list) or not selectors:
+        raise BenchError("benchmarks/contracts.json contract arrays cannot be empty")
+    return _sha256_file(path)
+
+
+def _marker_span(
+    text: str,
+    start_marker: str = README_START,
+    end_marker: str = README_END,
+) -> Tuple[int, int]:
+    if text.count(start_marker) != 1 or text.count(end_marker) != 1:
+        raise BenchError("document must contain exactly one generated marker pair")
+    start = text.index(start_marker)
+    end = text.index(end_marker)
     if start >= end:
-        raise BenchError("README.md benchmark summary markers are out of order")
+        raise BenchError("generated document markers are out of order")
     return start, end
 
 
-def replace_marked_section(text: str, replacement: str) -> str:
+def replace_marked_section(
+    text: str,
+    replacement: str,
+    start_marker: str = README_START,
+    end_marker: str = README_END,
+) -> str:
     """Replace the README marker body deterministically and idempotently."""
 
-    if README_START in replacement or README_END in replacement:
-        raise BenchError("generated README summary must not contain marker comments")
-    start, end = _marker_span(text)
-    before = text[: start + len(README_START)]
+    if start_marker in replacement or end_marker in replacement:
+        raise BenchError("generated summary must not contain marker comments")
+    start, end = _marker_span(text, start_marker, end_marker)
+    before = text[: start + len(start_marker)]
     after = text[end:]
     body = replacement.strip("\n")
     return before + "\n" + body + "\n" + after
 
 
-def update_readme_summary(path: Path, replacement: str) -> None:
+def update_readme_summary(
+    path: Path,
+    replacement: str,
+    start_marker: str = README_START,
+    end_marker: str = README_END,
+) -> None:
     """Replace the generated section using the README's latest on-disk text."""
 
     current = path.read_text(encoding="utf-8")
-    _atomic_write_text(path, replace_marked_section(current, replacement))
+    _atomic_write_text(
+        path,
+        replace_marked_section(current, replacement, start_marker, end_marker),
+    )
 
 
 def _atomic_write_text(path: Path, text: str) -> None:
@@ -509,6 +600,9 @@ def _source_files(root: Path) -> List[Path]:
     runner = root / "scripts" / "bench.py"
     if runner.is_file():
         files.append(runner)
+    semantic_contract = root / "benchmarks" / "contracts.json"
+    if semantic_contract.is_file():
+        files.append(semantic_contract)
     return sorted(set(files), key=lambda path: path.relative_to(root).as_posix())
 
 
@@ -582,6 +676,7 @@ def capture_run_inputs(
     fixture_manifest = root / "testdata" / "README.md"
     return {
         "source_digest": source_digest(root),
+        "semantic_contract_sha256": semantic_contract_sha256(root),
         "lockfile_sha256": _sha256_file(lockfile) if lockfile.is_file() else None,
         "fixture_manifest_sha256": (
             _sha256_file(fixture_manifest) if fixture_manifest.is_file() else None
@@ -598,6 +693,7 @@ def assert_run_inputs_unchanged(root: Path, initial: Mapping[str, Any]) -> None:
         key
         for key in (
             "source_digest",
+            "semantic_contract_sha256",
             "lockfile_sha256",
             "fixture_manifest_sha256",
             "fixtures",
@@ -620,6 +716,24 @@ def _git_metadata(root: Path) -> Dict[str, Any]:
         required=False,
     )
     return {"commit": commit, "branch": branch, "dirty": bool(status)}
+
+
+def ensure_clean_publish_worktree(root: Path) -> None:
+    """Reject public benchmark generation from an unreconstructable tree."""
+
+    status = _capture(
+        ("git", "status", "--porcelain=v1", "--untracked-files=normal"),
+        root,
+    )
+    if status:
+        paths = [line[3:] if len(line) > 3 else line for line in status.splitlines()]
+        preview = ", ".join(paths[:5])
+        suffix = "" if len(paths) <= 5 else f" (+{len(paths) - 5} more)"
+        raise BenchError(
+            "official full save/publish requires a clean Git worktree; "
+            "commit or otherwise resolve: "
+            f"{preview}{suffix}"
+        )
 
 
 def _matrix_metadata(matrix: Sequence[Harness]) -> List[Dict[str, Any]]:
@@ -653,6 +767,11 @@ def capture_metadata(
             "matrix": _matrix_metadata(matrix),
         },
     }
+    metadata["official"] = bool(
+        scope == "full"
+        and mode in {"save", "compare", "publish"}
+        and not metadata["git"]["dirty"]
+    )
     metadata.update(inputs)
     return metadata
 
@@ -668,6 +787,7 @@ def _deep_get(value: Mapping[str, Any], path: str) -> Any:
 
 COMPATIBILITY_PATHS = (
     "schema_version",
+    "semantic_contract_sha256",
     "environment.cpu.architecture",
     "environment.cpu.model",
     "environment.cpu.native_target_features",
@@ -831,15 +951,17 @@ def _finite_number(value: Any, path: Path, label: str) -> float:
     return number
 
 
-def _mean_values(document: Mapping[str, Any], path: Path) -> Tuple[float, float, float]:
-    mean = document.get("mean")
-    if not isinstance(mean, Mapping):
-        raise BenchError(f"missing mean estimate in {path}")
-    interval = mean.get("confidence_interval")
+def _estimate_values(
+    document: Mapping[str, Any], path: Path, label: str
+) -> Tuple[float, float, float]:
+    estimate = document.get(label)
+    if not isinstance(estimate, Mapping):
+        raise BenchError(f"missing {label} estimate in {path}")
+    interval = estimate.get("confidence_interval")
     if not isinstance(interval, Mapping):
-        raise BenchError(f"missing mean confidence interval in {path}")
+        raise BenchError(f"missing {label} confidence interval in {path}")
     confidence_level = _finite_number(
-        interval.get("confidence_level"), path, "mean CI confidence_level"
+        interval.get("confidence_level"), path, f"{label} CI confidence_level"
     )
     if not math.isclose(
         confidence_level,
@@ -852,10 +974,68 @@ def _mean_values(document: Mapping[str, Any], path: Path) -> Tuple[float, float,
             f"expected {EXPECTED_CONFIDENCE_LEVEL}, got {confidence_level}"
         )
     return (
-        _finite_number(mean.get("point_estimate"), path, "mean.point_estimate"),
-        _finite_number(interval.get("lower_bound"), path, "mean CI lower_bound"),
-        _finite_number(interval.get("upper_bound"), path, "mean CI upper_bound"),
+        _finite_number(estimate.get("point_estimate"), path, f"{label}.point_estimate"),
+        _finite_number(interval.get("lower_bound"), path, f"{label} CI lower_bound"),
+        _finite_number(interval.get("upper_bound"), path, f"{label} CI upper_bound"),
     )
+
+
+def _mean_values(document: Mapping[str, Any], path: Path) -> Tuple[float, float, float]:
+    return _estimate_values(document, path, "mean")
+
+
+def _percentile(values: Sequence[float], percentile: float) -> float:
+    if not values:
+        raise BenchError("cannot calculate a percentile from an empty sample")
+    ordered = sorted(values)
+    if len(ordered) == 1:
+        return ordered[0]
+    position = (len(ordered) - 1) * percentile
+    lower = math.floor(position)
+    upper = math.ceil(position)
+    if lower == upper:
+        return ordered[lower]
+    fraction = position - lower
+    return ordered[lower] + (ordered[upper] - ordered[lower]) * fraction
+
+
+def _sample_statistics(
+    estimate_path: Path, criterion_median: float
+) -> Tuple[float, float, float]:
+    sample_path = estimate_path.parent / "sample.json"
+    tukey_path = estimate_path.parent / "tukey.json"
+    if not sample_path.is_file():
+        return criterion_median, criterion_median, 0.0
+    sample = _load_json_object(sample_path)
+    iterations = sample.get("iters")
+    times = sample.get("times")
+    if not isinstance(iterations, list) or not isinstance(times, list):
+        raise BenchError(f"invalid Criterion sample arrays in {sample_path}")
+    if not iterations or len(iterations) != len(times):
+        raise BenchError(f"mismatched Criterion sample arrays in {sample_path}")
+    normalized = []
+    for iteration, elapsed in zip(iterations, times):
+        count = _finite_number(iteration, sample_path, "sample iteration count")
+        duration = _finite_number(elapsed, sample_path, "sample elapsed time")
+        if count <= 0:
+            raise BenchError(f"non-positive Criterion iteration count in {sample_path}")
+        normalized.append(duration / count)
+    p50 = _percentile(normalized, 0.50)
+    p95 = _percentile(normalized, 0.95)
+    far_ratio = 0.0
+    if tukey_path.is_file():
+        try:
+            tukey = json.loads(tukey_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise BenchError(f"invalid Criterion Tukey data {tukey_path}: {error}") from error
+        if not isinstance(tukey, list) or len(tukey) != 4:
+            raise BenchError(f"Criterion Tukey data must have four fences: {tukey_path}")
+        low_far = _finite_number(tukey[0], tukey_path, "low far-outlier fence")
+        high_far = _finite_number(tukey[3], tukey_path, "high far-outlier fence")
+        far_ratio = sum(value < low_far or value > high_far for value in normalized) / len(
+            normalized
+        )
+    return p50, p95, far_ratio
 
 
 def _benchmark_identity(benchmark_path: Path) -> Tuple[str, Optional[str], Optional[float]]:
@@ -884,6 +1064,12 @@ def parse_new_estimates(
             raise BenchError(f"missing Criterion benchmark metadata beside {path}")
         document = _load_json_object(path)
         mean, lower, upper = _mean_values(document, path)
+        median, _, _ = _estimate_values(document, path, "median") if "median" in document else (
+            mean,
+            lower,
+            upper,
+        )
+        p50, p95, far_outlier_ratio = _sample_statistics(path, median)
         full_id, throughput_kind, throughput_value = _benchmark_identity(benchmark_path)
         estimates.append(
             Estimate(
@@ -895,6 +1081,42 @@ def parse_new_estimates(
                 throughput_value=throughput_value,
                 harness=harness.id,
                 rotation=rotation,
+                criterion_median_ns=median,
+                normalized_p50_ns=p50,
+                normalized_p95_ns=p95,
+                far_outlier_ratio=far_outlier_ratio,
+            )
+        )
+    return estimates
+
+
+def parse_named_estimates(home: Path, harness: Harness, name: str) -> List[Estimate]:
+    estimates: List[Estimate] = []
+    for directory in _named_baseline_dirs(home, name):
+        path = directory / "estimates.json"
+        document = _load_json_object(path)
+        mean, lower, upper = _mean_values(document, path)
+        median, _, _ = _estimate_values(document, path, "median") if "median" in document else (
+            mean,
+            lower,
+            upper,
+        )
+        full_id, throughput_kind, throughput_value = _benchmark_identity(
+            directory / "benchmark.json"
+        )
+        estimates.append(
+            Estimate(
+                benchmark=full_id,
+                mean_ns=mean,
+                lower_ns=lower,
+                upper_ns=upper,
+                throughput_kind=throughput_kind,
+                throughput_value=throughput_value,
+                harness=harness.id,
+                criterion_median_ns=median,
+                normalized_p50_ns=median,
+                normalized_p95_ns=median,
+                far_outlier_ratio=0.0,
             )
         )
     return estimates
@@ -959,6 +1181,161 @@ def classify_changes(changes: Iterable[ChangeEstimate]) -> List[GateDecision]:
     return sorted((classify_change(change) for change in changes), key=lambda item: item.benchmark)
 
 
+def majority_gate_decisions(
+    attempts: Sequence[Sequence[GateDecision]],
+) -> List[GateDecision]:
+    """Select the median severity across three complete comparison attempts."""
+
+    by_benchmark: Dict[str, List[GateDecision]] = {}
+    for attempt in attempts:
+        for decision in attempt:
+            by_benchmark.setdefault(decision.benchmark, []).append(decision)
+    severity = {"info": 0, "pass": 0, "warn": 1, "fail": 2}
+    final = []
+    for benchmark, decisions in sorted(by_benchmark.items()):
+        if len(decisions) == 1:
+            final.append(decisions[0])
+            continue
+        if len(decisions) != 3:
+            raise BenchError(
+                f"majority gate requires one or three decisions for {benchmark}; "
+                f"got {len(decisions)}"
+            )
+        chosen = sorted(decisions, key=lambda item: severity[item.level])[1]
+        final.append(
+            GateDecision(
+                benchmark=benchmark,
+                level=chosen.level,
+                reason=f"three-attempt majority: {chosen.reason}",
+                point=statistics.median(item.point for item in decisions),
+                lower=statistics.median(item.lower for item in decisions),
+                upper=statistics.median(item.upper for item in decisions),
+            )
+        )
+    return final
+
+
+def attempt_requires_rerun(
+    gates: Sequence[GateDecision], stability: Sequence[StabilityDecision]
+) -> bool:
+    """Repeat a full attempt after the first warning, failure, or unstable run."""
+
+    return any(decision.level in {"warn", "fail"} for decision in gates) or any(
+        not decision.stable for decision in stability
+    )
+
+
+def assess_stability(estimates: Sequence[Estimate]) -> List[StabilityDecision]:
+    grouped: Dict[str, List[Estimate]] = {}
+    for estimate in estimates:
+        if "/contract_equal/" in estimate.benchmark:
+            grouped.setdefault(estimate.benchmark, []).append(estimate)
+    decisions = []
+    for benchmark, runs in sorted(grouped.items()):
+        p50_values = [
+            run.normalized_p50_ns or run.criterion_median_ns or run.mean_ns for run in runs
+        ]
+        p95_values = [
+            run.normalized_p95_ns or run.criterion_median_ns or run.mean_ns for run in runs
+        ]
+        median_values = [run.criterion_median_ns or run.mean_ns for run in runs]
+        far_ratio = max((run.far_outlier_ratio or 0.0) for run in runs)
+        p95_p50 = max(
+            p95 / p50 if p50 > 0 else math.inf
+            for p50, p95 in zip(p50_values, p95_values)
+        )
+        minimum = min(median_values)
+        rotation_spread = max(median_values) / minimum if minimum > 0 else math.inf
+        reasons = []
+        if p95_p50 > P95_P50_LIMIT:
+            reasons.append(f"p95/p50 {p95_p50:.3f} exceeds {P95_P50_LIMIT:.2f}")
+        if far_ratio > FAR_OUTLIER_LIMIT:
+            reasons.append(
+                f"far-outlier ratio {far_ratio:.3%} exceeds {FAR_OUTLIER_LIMIT:.0%}"
+            )
+        if rotation_spread > ROTATION_SPREAD_LIMIT:
+            reasons.append(
+                f"rotation max/min {rotation_spread:.3f} exceeds {ROTATION_SPREAD_LIMIT:.2f}"
+            )
+        decisions.append(
+            StabilityDecision(
+                benchmark=benchmark,
+                stable=not reasons,
+                p95_p50=p95_p50,
+                far_outlier_ratio=far_ratio,
+                rotation_spread=rotation_spread,
+                reasons=tuple(reasons),
+            )
+        )
+    return decisions
+
+
+def majority_stability(
+    attempts: Sequence[Sequence[StabilityDecision]],
+) -> List[StabilityDecision]:
+    by_benchmark: Dict[str, List[StabilityDecision]] = {}
+    for attempt in attempts:
+        for decision in attempt:
+            by_benchmark.setdefault(decision.benchmark, []).append(decision)
+    final = []
+    for benchmark, decisions in sorted(by_benchmark.items()):
+        if len(decisions) not in {1, 3}:
+            raise BenchError(
+                f"stability majority requires one or three decisions for {benchmark}"
+            )
+        stable = sum(item.stable for item in decisions) >= (2 if len(decisions) == 3 else 1)
+        reasons = tuple(
+            sorted({reason for item in decisions if not item.stable for reason in item.reasons})
+        )
+        final.append(
+            StabilityDecision(
+                benchmark=benchmark,
+                stable=stable,
+                p95_p50=statistics.median(item.p95_p50 for item in decisions),
+                far_outlier_ratio=statistics.median(
+                    item.far_outlier_ratio for item in decisions
+                ),
+                rotation_spread=statistics.median(item.rotation_spread for item in decisions),
+                reasons=() if stable else reasons,
+            )
+        )
+    return final
+
+
+def assess_calibration(
+    baseline: Sequence[Estimate], current: Sequence[Estimate]
+) -> CalibrationDecision:
+    baseline_by_id = {estimate.benchmark: estimate for estimate in baseline}
+    current_by_id = {estimate.benchmark: estimate for estimate in current}
+    missing = [
+        benchmark
+        for benchmark in CALIBRATION_IDS
+        if benchmark not in baseline_by_id or benchmark not in current_by_id
+    ]
+    if missing:
+        return CalibrationDecision(
+            status="unavailable",
+            median_baseline_current_ratio=None,
+            ratios={},
+            reason="missing calibration workload(s): " + ", ".join(missing),
+        )
+    ratios = {}
+    for benchmark in CALIBRATION_IDS:
+        old = baseline_by_id[benchmark].criterion_median_ns or baseline_by_id[benchmark].mean_ns
+        new = current_by_id[benchmark].criterion_median_ns or current_by_id[benchmark].mean_ns
+        if old <= 0 or new <= 0:
+            raise BenchError(f"non-positive calibration median for {benchmark}")
+        ratios[benchmark] = old / new
+    median_ratio = statistics.median(ratios.values())
+    status = "pass" if CALIBRATION_MIN <= median_ratio <= CALIBRATION_MAX else "inconclusive"
+    reason = (
+        "calibration is within the accepted environment band"
+        if status == "pass"
+        else "inconclusive environment drift; regression results were not normalized"
+    )
+    return CalibrationDecision(status, median_ratio, ratios, reason)
+
+
 def _percent(value: float) -> str:
     return f"{value * 100:+.2f}%"
 
@@ -1017,22 +1394,24 @@ def command_verify(root: Path) -> int:
 
 
 def command_quick(root: Path) -> int:
-    validate_fixture_manifest(root)
+    fixtures = validate_fixture_manifest(root)
     matrix = _quick_matrix()
     namespace = "quick/" + _run_namespace()
     result_count = 0
+    commands = []
+    estimates = []
     for harness in matrix:
         home = _criterion_home(root, namespace, harness)
-        run_harness(
-            root,
-            harness,
-            home,
-            QUICK_RUN_ARGS,
-        )
+        commands.append(run_harness(root, harness, home, QUICK_RUN_ARGS))
         parsed = parse_new_estimates(home, harness)
         if not parsed:
             raise BenchError(f"quick harness produced no Criterion estimates: {harness.id}")
         result_count += len(parsed)
+        estimates.extend(parsed)
+    metadata = capture_metadata(root, "quick", matrix, fixtures, "quick")
+    metadata["commands"] = commands
+    metadata["estimates"] = [estimate.as_metadata() for estimate in estimates]
+    _atomic_write_json(root / "target" / "criterion" / namespace / "metadata.json", metadata)
     print(f"quick suite completed: {result_count} regression estimates")
     return 0
 
@@ -1214,6 +1593,8 @@ def assess_compare_coverage(
 
 def command_save(root: Path, name: str, quick: bool = False) -> int:
     validate_baseline_name(name)
+    if not quick:
+        ensure_clean_publish_worktree(root)
     ensure_baseline_name_available(root, name)
     fixtures = validate_fixture_manifest(root)
     matrix = _quick_matrix() if quick else FULL_MATRIX
@@ -1270,68 +1651,131 @@ def command_compare(root: Path, name: str, quick: bool = False) -> int:
     errors = compatibility_errors(baseline, current)
     if errors:
         raise BenchError("incompatible benchmark environment:\n  - " + "\n  - ".join(errors))
+    if not quick and baseline.get("official") is not True:
+        raise BenchError("full comparison requires an official clean-tree schema-3 baseline")
 
     for message in source_change_messages(baseline, current):
         print(message)
 
     baseline_index = _baseline_index_from_metadata(baseline, matrix)
+    baseline_estimates: List[Estimate] = []
     for harness in matrix:
-        actual_ids = parse_saved_baseline_ids(_normal_harness_home(root, harness), name)
+        home = _normal_harness_home(root, harness)
+        actual_ids = parse_saved_baseline_ids(home, name)
         if actual_ids != baseline_index[harness.id]:
             raise BenchError(
                 f"saved Criterion baseline IDs for {harness.id} do not match metadata; "
                 "the baseline is incomplete or has been modified"
             )
+        baseline_estimates.extend(parse_named_estimates(home, harness, name))
 
-    commands: List[Dict[str, Any]] = []
-    changes: List[ChangeEstimate] = []
-    coverage: Dict[str, Dict[str, List[str]]] = {}
     criterion_args = _compare_criterion_args(name, quick)
-    for harness in matrix:
-        home = _normal_harness_home(root, harness)
-        clear_transient_comparison_data(root, home)
-        order = DEFAULT_ORDER if harness.order_sensitive else None
-        commands.append(
-            run_harness(
-                root,
-                harness,
-                home,
-                criterion_args,
-                order,
+    commands: List[Dict[str, Any]] = []
+    attempt_changes: List[List[ChangeEstimate]] = []
+    attempt_decisions: List[List[GateDecision]] = []
+    attempt_estimates: List[List[Estimate]] = []
+    stability_attempts: List[List[StabilityDecision]] = []
+    attempt_coverage: List[Dict[str, Dict[str, List[str]]]] = []
+
+    def run_attempt(attempt: int) -> None:
+        changes: List[ChangeEstimate] = []
+        estimates: List[Estimate] = []
+        coverage: Dict[str, Dict[str, List[str]]] = {}
+        for harness in matrix:
+            home = _normal_harness_home(root, harness)
+            clear_transient_comparison_data(root, home)
+            order = DEFAULT_ORDER if harness.order_sensitive else None
+            command = run_harness(root, harness, home, criterion_args, order)
+            command["attempt"] = attempt
+            commands.append(command)
+            parsed_current = [
+                dataclasses.replace(estimate, attempt=attempt)
+                for estimate in parse_new_estimates(home, harness)
+            ]
+            if not parsed_current:
+                raise BenchError(f"comparison produced no current estimates for {harness.id}")
+            parsed_changes = parse_change_estimates(home, harness)
+            current_ids = {estimate.benchmark for estimate in parsed_current}
+            saved_ids = set(baseline_index[harness.id])
+            change_ids = {change.benchmark for change in parsed_changes}
+            harness_coverage = assess_compare_coverage(
+                harness.id, current_ids, saved_ids, change_ids
             )
-        )
-        current_estimates = parse_new_estimates(home, harness)
-        if not current_estimates:
-            raise BenchError(f"comparison produced no current estimates for {harness.id}")
-        parsed_changes = parse_change_estimates(home, harness)
-        current_ids = {estimate.benchmark for estimate in current_estimates}
-        saved_ids = set(baseline_index[harness.id])
-        change_ids = {change.benchmark for change in parsed_changes}
-        harness_coverage = assess_compare_coverage(
-            harness.id, current_ids, saved_ids, change_ids
-        )
-        uncompared_non_regression = harness_coverage["uncompared_non_regression_ids"]
-        if uncompared_non_regression:
-            print(
-                f"INFO {harness.id}: {len(uncompared_non_regression)} new non-regression "
-                "benchmark(s) reported without a baseline"
-            )
-        coverage[harness.id] = harness_coverage
-        changes.extend(parsed_changes)
+            uncompared = harness_coverage["uncompared_non_regression_ids"]
+            if uncompared:
+                print(
+                    f"INFO {harness.id}: {len(uncompared)} new non-regression "
+                    "benchmark(s) reported without a baseline"
+                )
+            coverage[harness.id] = harness_coverage
+            estimates.extend(parsed_current)
+            changes.extend(parsed_changes)
+        attempt_estimates.append(estimates)
+        attempt_changes.append(changes)
+        attempt_decisions.append(classify_changes(changes))
+        stability_attempts.append(assess_stability(estimates))
+        attempt_coverage.append(coverage)
+
+    run_attempt(1)
+    calibration = (
+        CalibrationDecision("disabled", None, {}, "quick comparisons are diagnostic")
+        if quick
+        else assess_calibration(baseline_estimates, attempt_estimates[0])
+    )
+    needs_rerun = attempt_requires_rerun(
+        attempt_decisions[0], stability_attempts[0]
+    )
+    if needs_rerun and not quick and calibration.status == "pass":
+        run_attempt(2)
+        run_attempt(3)
 
     assert_run_inputs_unchanged(root, current)
-    decisions = classify_changes(changes)
-    _print_gate_summary(decisions)
+    decisions = majority_gate_decisions(attempt_decisions)
+    stability = majority_stability(stability_attempts)
+    current["official"] = bool(
+        current["official"]
+        and baseline.get("official") is True
+        and calibration.status == "pass"
+        and all(decision.stable for decision in stability)
+    )
     current["baseline"] = name
     current["commands"] = commands
-    current["coverage"] = coverage
-    current["changes"] = [change.as_metadata() for change in changes]
+    current["attempt_count"] = len(attempt_decisions)
+    current["coverage_attempts"] = attempt_coverage
+    current["change_attempts"] = [
+        [change.as_metadata() for change in attempt] for attempt in attempt_changes
+    ]
+    current["decision_attempts"] = [
+        [decision.as_metadata() for decision in attempt] for attempt in attempt_decisions
+    ]
     current["decisions"] = [decision.as_metadata() for decision in decisions]
+    current["stability_attempts"] = [
+        [decision.as_metadata() for decision in attempt]
+        for attempt in stability_attempts
+    ]
+    current["stability"] = [decision.as_metadata() for decision in stability]
+    current["calibration"] = calibration.as_metadata()
     comparison_dir = root / "target" / "criterion" / "comparisons"
     output_name = f"{_run_namespace()}-vs-{_safe_component(name)}.json"
-    _atomic_write_json(comparison_dir / output_name, current)
-    return 1 if any(decision.level == "fail" for decision in decisions) else 0
+    output_path = comparison_dir / output_name
+    _atomic_write_json(output_path, current)
 
+    if calibration.status in {"unavailable", "inconclusive"}:
+        print(f"INCONCLUSIVE {calibration.reason}")
+        print(f"comparison metadata: {output_path.relative_to(root)}")
+        return 2
+
+    unstable = [decision.benchmark for decision in stability if not decision.stable]
+    if unstable:
+        print(
+            "INCONCLUSIVE contract-equal benchmark(s) remained unstable after "
+            f"three full attempts: {', '.join(unstable)}"
+        )
+        print(f"comparison metadata: {output_path.relative_to(root)}")
+        return 2
+
+    _print_gate_summary(decisions)
+    return 1 if any(decision.level == "fail" for decision in decisions) else 0
 
 def aggregate_estimates(estimates: Sequence[Estimate]) -> List[PublishedEstimate]:
     grouped: Dict[str, List[Estimate]] = {}
@@ -1346,6 +1790,9 @@ def aggregate_estimates(estimates: Sequence[Estimate]) -> List[PublishedEstimate
         if len(kinds) != 1 or len(values) != 1:
             raise BenchError(f"inconsistent throughput metadata across runs for {benchmark}")
         means = [run.mean_ns for run in runs]
+        medians = [run.criterion_median_ns or run.mean_ns for run in runs]
+        p50_values = [run.normalized_p50_ns or run.mean_ns for run in runs]
+        p95_values = [run.normalized_p95_ns or run.mean_ns for run in runs]
         if len(runs) == 1:
             lower = runs[0].lower_ns
             upper = runs[0].upper_ns
@@ -1370,6 +1817,10 @@ def aggregate_estimates(estimates: Sequence[Estimate]) -> List[PublishedEstimate
                         key=lambda value: ORDER_ROTATIONS.index(value),
                     )
                 ),
+                criterion_median_ns=statistics.median(medians),
+                normalized_p50_ns=statistics.median(p50_values),
+                normalized_p95_ns=statistics.median(p95_values),
+                far_outlier_ratio=max((run.far_outlier_ratio or 0.0) for run in runs),
             )
         )
     return published
@@ -1378,7 +1829,7 @@ def aggregate_estimates(estimates: Sequence[Estimate]) -> List[PublishedEstimate
 def validate_publish_run_cardinality(
     estimates: Sequence[Estimate], matrix: Sequence[Harness]
 ) -> None:
-    """Require one complete run, or all three order rotations, for every ID."""
+    """Require one complete run, or all six parser permutations, for every ID."""
 
     harnesses = {harness.id: harness for harness in matrix}
     grouped: Dict[Tuple[str, str], List[Estimate]] = {}
@@ -1414,18 +1865,18 @@ def contract_equal_ratios(estimates: Sequence[Estimate]) -> List[ContractRatio]:
     """Median paired ratios for IDs carrying ``contract_equal`` explicitly.
 
     Every ratio is formed within one independent publication run, then the
-    three run-local ratios are summarized.  This avoids dividing separately
+    six permutation-local ratios are summarized.  This avoids dividing separately
     aggregated parser estimates and preserves the publication run cardinality.
     """
 
-    per_run: Dict[Tuple[str, Optional[str]], Dict[str, Estimate]] = {}
+    per_run: Dict[Tuple[str, int, Optional[str]], Dict[str, Estimate]] = {}
     for estimate in estimates:
         if "/contract_equal/" not in estimate.benchmark:
             continue
         if "/" not in estimate.benchmark:
             continue
         group, implementation = estimate.benchmark.rsplit("/", 1)
-        key = (group, estimate.rotation)
+        key = (group, estimate.attempt, estimate.rotation)
         implementations = per_run.setdefault(key, {})
         if implementation in implementations:
             raise BenchError(
@@ -1434,8 +1885,8 @@ def contract_equal_ratios(estimates: Sequence[Estimate]) -> List[ContractRatio]:
         implementations[implementation] = estimate
 
     samples: Dict[Tuple[str, str], List[float]] = {}
-    for (group, rotation), implementations in sorted(
-        per_run.items(), key=lambda item: (item[0][0], item[0][1] or "")
+    for (group, attempt, rotation), implementations in sorted(
+        per_run.items(), key=lambda item: (item[0][0], item[0][1], item[0][2] or "")
     ):
         fhp = implementations.get("fast_html_parser") or implementations.get("fhp")
         if fhp is None or fhp.mean_ns <= 0:
@@ -1445,7 +1896,8 @@ def contract_equal_ratios(estimates: Sequence[Estimate]) -> List[ContractRatio]:
                 continue
             candidate = implementations[competitor]
             samples.setdefault((group, competitor), []).append(
-                candidate.mean_ns / fhp.mean_ns
+            (candidate.criterion_median_ns or candidate.mean_ns)
+            / (fhp.criterion_median_ns or fhp.mean_ns)
             )
 
     ratios: List[ContractRatio] = []
@@ -1514,8 +1966,8 @@ def _correctness_status(benchmark: str) -> str:
 
 def _result_table(estimates: Sequence[PublishedEstimate]) -> str:
     lines = [
-        "| Benchmark | Category | Correctness status | Estimate | 95% CI / run range | Throughput | Runs |",
-        "|---|---|---|---:|---:|---:|---:|",
+        "| Benchmark | Category | Correctness status | Estimate | 95% CI / run range | Criterion median | p50 / p95 | Far outliers | Stable | Throughput | Runs |",
+        "|---|---|---|---:|---:|---:|---:|---:|---|---:|---:|",
     ]
     for estimate in estimates:
         interval_label = "95% CI" if estimate.run_count == 1 else "run range"
@@ -1524,12 +1976,17 @@ def _result_table(estimates: Sequence[PublishedEstimate]) -> str:
             f"{_format_duration(estimate.upper_ns)}"
         )
         lines.append(
-            "| `{}` | `{}` | {} | {} | {} | {} | {} |".format(
+            "| `{}` | `{}` | {} | {} | {} | {} | {} / {} | {:.2%} | {} | {} | {} |".format(
                 _escape_markdown(estimate.benchmark),
                 _escape_markdown(_benchmark_category(estimate.benchmark)),
                 _escape_markdown(_correctness_status(estimate.benchmark)),
                 _format_duration(estimate.mean_ns),
                 interval,
+                _format_duration(estimate.criterion_median_ns or estimate.mean_ns),
+                _format_duration(estimate.normalized_p50_ns or estimate.mean_ns),
+                _format_duration(estimate.normalized_p95_ns or estimate.mean_ns),
+                estimate.far_outlier_ratio or 0.0,
+                "yes" if estimate.stable else "no",
                 _format_throughput(estimate),
                 estimate.run_count,
             )
@@ -1541,14 +1998,14 @@ def _ratio_table(ratios: Sequence[ContractRatio]) -> str:
     if not ratios:
         return "No explicit `contract_equal` ratio was available in this run."
     lines = [
-        "| Contract-equal group | Competitor | Median competitor/FHP | Run range | Runs |",
-        "|---|---|---:|---:|---:|",
+        "| Contract-equal group | Competitor | Median competitor/FHP | Run range | Stable | Runs |",
+        "|---|---|---:|---:|---|---:|",
     ]
     for ratio in ratios:
         lines.append(
             f"| `{_escape_markdown(ratio.group)}` | `{_escape_markdown(ratio.competitor)}` "
             f"| {ratio.ratio:.3f}× | {ratio.lower:.3f}×–{ratio.upper:.3f}× "
-            f"| {ratio.run_count} |"
+            f"| {'yes' if ratio.stable else 'no'} | {ratio.run_count} |"
         )
     return "\n".join(lines)
 
@@ -1610,18 +2067,31 @@ def _readme_result_table(estimates: Sequence[PublishedEstimate]) -> str:
     return "\n".join(lines)
 
 
-def _readme_ratio_table(ratios: Sequence[ContractRatio]) -> str:
+def _readme_comparison_table(
+    estimates: Sequence[PublishedEstimate], ratios: Sequence[ContractRatio]
+) -> str:
     if not ratios:
         return "No explicit `contract_equal` ratio was available in this run."
+    by_benchmark = {estimate.benchmark: estimate for estimate in estimates}
     lines = [
-        "| Equal workload | vs | Median | Range |",
+        "| Equal workload | FHP | Competitor | Ratio |",
         "|---|---|---:|---:|",
     ]
     for ratio in ratios:
+        fhp_id = ratio.group + "/fast_html_parser"
+        competitor_id = ratio.group + "/" + ratio.competitor
+        try:
+            fhp = by_benchmark[fhp_id]
+            competitor = by_benchmark[competitor_id]
+        except KeyError as error:
+            raise BenchError(
+                f"missing compact comparison estimate for {error.args[0]}"
+            ) from error
         lines.append(
             f"| {_readme_workload_label(ratio.group)} "
-            f"| `{_escape_markdown(ratio.competitor)}` | {ratio.ratio:.3f}× "
-            f"| {ratio.lower:.3f}×–{ratio.upper:.3f}× |"
+            f"| {_format_duration(fhp.mean_ns)} "
+            f"| `{_escape_markdown(ratio.competitor)}` "
+            f"{_format_duration(competitor.mean_ns)} | {ratio.ratio:.3f}× |"
         )
     return "\n".join(lines)
 
@@ -1674,10 +2144,12 @@ def generate_report_markdown(
         ),
         "```",
     ]
+    attempt_count = int(metadata.get("attempt_count", 1))
     range_note = (
         "Single-run rows show Criterion's 95% confidence interval. The two "
-        "order-sensitive comparison harnesses show the median of three run means "
-        "and their min–max range. Lower time is better."
+        "order-sensitive comparison harnesses use all six parser permutations"
+        f" across {attempt_count} full attempt(s); their estimate is the median of "
+        "run means and the range is min–max. Lower time is better."
     )
     return "\n".join(
         [
@@ -1689,7 +2161,10 @@ def generate_report_markdown(
             "",
             "| Field | Value |",
             "|---|---|",
+            f"| Metadata schema | `{metadata['schema_version']}` |",
+            f"| Official | `{str(bool(metadata.get('official'))).lower()}` |",
             f"| Source digest | `{metadata['source_digest']}` |",
+            f"| Semantic contract digest | `{metadata['semantic_contract_sha256']}` |",
             f"| Fixture manifest digest | `{metadata['fixture_manifest_sha256']}` |",
             f"| Git commit | `{git['commit']}` ({'dirty' if git['dirty'] else 'clean'}) |",
             f"| Target | `{environment['target']}` |",
@@ -1724,7 +2199,7 @@ def generate_report_markdown(
             "Ratios are emitted only when the benchmark ID contains the explicit "
             "`contract_equal` contract marker. Values above 1× mean FHP completed "
             "the same checked workload faster. Each value is formed inside one "
-            "independent run before the three run-local ratios are summarized.",
+            "independent permutation run before paired ratios are summarized.",
             "",
             _ratio_table(ratios),
             "",
@@ -1767,18 +2242,41 @@ def generate_readme_summary(
         f"source `{str(metadata['source_digest'])[:12]}`.",
         "",
         "Representative FHP DOM-build results. Each range is the minimum and "
-        "maximum run mean across three parser-order rotations. Owned, "
+        "maximum run mean across all six parser permutations. Owned, "
         "zero-copy, streaming, selector, and all other absolute estimates "
         "remain in the full report.",
         "",
         _readme_result_table(absolute),
         "",
-        "Validated equal-work comparisons. Values above 1× mean the competitor "
-        "took longer than FHP for the same checked result:",
+        "Validated equal-work comparisons. Times are permutation medians; the "
+        "ratio is the median of paired run-local competitor/FHP ratios. "
+        "Values above 1× favor FHP:",
         "",
-        _readme_ratio_table(compact_ratios),
+        _readme_comparison_table(estimates, compact_ratios),
     ]
     return "\n".join(lines)
+
+
+def generate_benchmark_index_summary(
+    metadata: Mapping[str, Any], report_path: Path
+) -> str:
+    environment = metadata["environment"]
+    cpu = environment["cpu"]
+    relative_report = report_path.relative_to("benchmarks")
+    return "\n".join(
+        [
+            f"- [Full performance report]({relative_report.as_posix()}) contains ",
+            "  absolute estimates, six-permutation ranges, and contract-equal ratios for",
+            f"  source digest `{str(metadata['source_digest'])[:12]}` on "
+            f"{cpu['model']}.",
+            f"  Provenance: [{report_path.stem}.json]"
+            f"({relative_report.with_suffix('.json').as_posix()}).",
+            "- [Local baseline repeatability report]"
+            "(results/2026-07-13-local-baseline-repeatability.md) records a",
+            "  same-source `save`/`compare` experiment and targeted reruns. It",
+            "  documents measurement stability; it is not a cross-parser speed report.",
+        ]
+    )
 
 
 def _report_stem(metadata: Mapping[str, Any]) -> str:
@@ -1789,105 +2287,144 @@ def _report_stem(metadata: Mapping[str, Any]) -> str:
 
 
 def command_publish(root: Path) -> int:
+    ensure_clean_publish_worktree(root)
     fixtures = validate_fixture_manifest(root)
     readme_path = root / "README.md"
+    benchmark_index_path = root / "benchmarks" / "README.md"
     if not readme_path.is_file():
         raise BenchError("missing README.md")
+    if not benchmark_index_path.is_file():
+        raise BenchError("missing benchmarks/README.md")
     _marker_span(readme_path.read_text(encoding="utf-8"))
+    _marker_span(
+        benchmark_index_path.read_text(encoding="utf-8"),
+        BENCH_INDEX_START,
+        BENCH_INDEX_END,
+    )
 
     metadata = capture_metadata(root, "publish", FULL_MATRIX, fixtures)
     stem = _report_stem(metadata)
-    raw_root = (
-        root
-        / "target"
-        / "criterion"
-        / "publish"
-        / stem
-        / _run_namespace()
-    )
+    raw_root = root / "target" / "criterion" / "publish" / stem / _run_namespace()
     commands: List[Dict[str, Any]] = []
-    estimates: List[Estimate] = []
+    attempt_estimates: List[List[Estimate]] = []
+    stability_attempts: List[List[StabilityDecision]] = []
 
-    # Run the complete targeted suite once.  FHP is registered first for the
-    # initial order-sensitive samples, then those two harnesses are repeated in
-    # the middle and last positions to expose registration/thermal bias.
-    for harness in FULL_MATRIX:
-        rotation = ORDER_ROTATIONS[0] if harness.order_sensitive else None
-        home = raw_root / "criterion" / _safe_component(harness.id.replace("/", "__"))
-        if rotation:
-            home = home / rotation
-        commands.append(
-            run_harness(
-                root,
-                harness,
-                home,
-                PUBLISH_RUN_ARGS,
-                rotation,
-            )
-        )
-        parsed = parse_new_estimates(home, harness, rotation)
-        if not parsed:
-            raise BenchError(f"publish harness produced no estimates: {harness.id}")
-        estimates.extend(parsed)
-
-    for rotation in ORDER_ROTATIONS[1:]:
-        for harness in (item for item in FULL_MATRIX if item.order_sensitive):
-            home = (
-                raw_root
-                / "criterion"
-                / _safe_component(harness.id.replace("/", "__"))
-                / rotation
-            )
-            commands.append(
-                run_harness(
+    def run_attempt(attempt: int) -> None:
+        estimates: List[Estimate] = []
+        for harness in FULL_MATRIX:
+            permutations = ORDER_ROTATIONS if harness.order_sensitive else (None,)
+            for permutation in permutations:
+                home = (
+                    raw_root
+                    / "criterion"
+                    / f"attempt-{attempt}"
+                    / _safe_component(harness.id.replace("/", "__"))
+                )
+                if permutation:
+                    home = home / permutation
+                command = run_harness(
                     root,
                     harness,
                     home,
                     PUBLISH_RUN_ARGS,
-                    rotation,
+                    permutation,
                 )
-            )
-            parsed = parse_new_estimates(home, harness, rotation)
-            if not parsed:
-                raise BenchError(
-                    f"publish rotation {rotation} produced no estimates: {harness.id}"
-                )
-            estimates.extend(parsed)
+                command["attempt"] = attempt
+                commands.append(command)
+                parsed = [
+                    dataclasses.replace(estimate, attempt=attempt)
+                    for estimate in parse_new_estimates(home, harness, permutation)
+                ]
+                if not parsed:
+                    raise BenchError(
+                        f"publish attempt {attempt} produced no estimates: {harness.id}"
+                    )
+                estimates.extend(parsed)
+        validate_publish_run_cardinality(estimates, FULL_MATRIX)
+        attempt_estimates.append(estimates)
+        stability_attempts.append(assess_stability(estimates))
+
+    run_attempt(1)
+    if any(not decision.stable for decision in stability_attempts[0]):
+        run_attempt(2)
+        run_attempt(3)
 
     assert_run_inputs_unchanged(root, metadata)
-    metadata["commands"] = commands
-    metadata["publish_rotations"] = list(ORDER_ROTATIONS)
-    validate_publish_run_cardinality(estimates, FULL_MATRIX)
-    published = aggregate_estimates(estimates)
-    ratios = contract_equal_ratios(estimates)
-    report_relative = Path("benchmarks") / "results" / f"{stem}.md"
-    report_path = root / report_relative
-    metadata["report"] = report_relative.as_posix()
+    stability = majority_stability(stability_attempts)
+    estimates = [estimate for attempt in attempt_estimates for estimate in attempt]
+    stable_by_benchmark = {decision.benchmark: decision.stable for decision in stability}
+    published = [
+        dataclasses.replace(
+            estimate,
+            stable=stable_by_benchmark.get(estimate.benchmark, True),
+        )
+        for estimate in aggregate_estimates(estimates)
+    ]
+    ratios = []
+    for ratio in contract_equal_ratios(estimates):
+        related = [
+            stable
+            for benchmark, stable in stable_by_benchmark.items()
+            if benchmark.startswith(ratio.group + "/")
+        ]
+        ratios.append(dataclasses.replace(ratio, stable=bool(related) and all(related)))
 
+    metadata["commands"] = commands
+    metadata["publish_permutations"] = list(ORDER_ROTATIONS)
+    metadata["attempt_count"] = len(attempt_estimates)
+    metadata["stability_attempts"] = [
+        [decision.as_metadata() for decision in attempt]
+        for attempt in stability_attempts
+    ]
+    metadata["stability"] = [decision.as_metadata() for decision in stability]
+    metadata["official"] = bool(
+        metadata["official"] and all(decision.stable for decision in stability)
+    )
+    report_relative = Path("benchmarks") / "results" / f"{stem}.md"
+    sidecar_relative = report_relative.with_suffix(".json")
+    report_path = root / report_relative
+    sidecar_path = root / sidecar_relative
+    metadata["report"] = report_relative.as_posix()
+    metadata["provenance_sidecar"] = sidecar_relative.as_posix()
+
+    report_text = generate_report_markdown(metadata, published, ratios)
+    report_sha256 = hashlib.sha256(report_text.encode("utf-8")).hexdigest()
     raw_document = {
         "metadata": metadata,
+        "report_sha256": report_sha256,
         "runs": [estimate.as_metadata() for estimate in estimates],
         "summary": [estimate.as_metadata() for estimate in published],
         "contract_equal_ratios": [ratio.as_metadata() for ratio in ratios],
     }
     _atomic_write_json(raw_root / "metadata-and-results.json", raw_document)
-    _atomic_write_text(
-        report_path,
-        generate_report_markdown(metadata, published, ratios),
-    )
+
+    if not metadata["official"]:
+        unstable = [decision.benchmark for decision in stability if not decision.stable]
+        raise BenchError(
+            "publication remained unstable after three full attempts; latest docs were "
+            "not updated. Machine-local evidence: "
+            f"{raw_root.relative_to(root)}; unstable IDs: {', '.join(unstable)}"
+        )
+
+    _atomic_write_text(report_path, report_text)
+    _atomic_write_json(sidecar_path, raw_document)
     readme_summary = generate_readme_summary(
         metadata,
         published,
         ratios,
         report_relative,
     )
-    # Re-read at write time so unrelated README edits made during the long
-    # benchmark run are preserved around the generated marker section.
     update_readme_summary(readme_path, readme_summary)
+    update_readme_summary(
+        benchmark_index_path,
+        generate_benchmark_index_summary(metadata, report_relative),
+        BENCH_INDEX_START,
+        BENCH_INDEX_END,
+    )
     print(f"published benchmark summary: {report_relative}")
+    print(f"published provenance sidecar: {sidecar_relative}")
     print(f"raw machine-local data: {raw_root.relative_to(root)}")
     return 0
-
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

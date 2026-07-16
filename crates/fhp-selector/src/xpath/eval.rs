@@ -6,34 +6,34 @@ use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
 use fhp_tree::node::{NodeFlags, NodeId};
 
-use super::ast::{PathStep, Predicate, XPathExpr, XPathResult};
+use super::ast::{NameTest, PathStep, Predicate, XPathExpr, XPathResult};
 
 /// Evaluate an XPath expression against an arena starting from `root`.
 pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
     match expr {
         XPathExpr::DescendantByTag(tag) => {
-            let nodes = find_descendants_by_tag(arena, root, *tag);
+            let nodes = find_descendants_by_tag(arena, root, tag);
             XPathResult::Nodes(nodes)
         }
 
         XPathExpr::DescendantByAttr { tag, attr, value } => {
-            let nodes = find_descendants_by_tag_and_attr(arena, root, *tag, attr, Some(value));
+            let nodes = find_descendants_by_tag_and_attr(arena, root, tag, attr, Some(value));
             XPathResult::Nodes(nodes)
         }
 
         XPathExpr::DescendantByAttrExists { tag, attr } => {
-            let nodes = find_descendants_by_tag_and_attr_exists(arena, root, *tag, attr);
+            let nodes = find_descendants_by_tag_and_attr_exists(arena, root, tag, attr);
             XPathResult::Nodes(nodes)
         }
 
         XPathExpr::ContainsPredicate { tag, attr, substr } => {
-            let nodes = find_descendants_by_tag_and_contains(arena, root, *tag, attr, substr);
+            let nodes = find_descendants_by_tag_and_contains(arena, root, tag, attr, substr);
             XPathResult::Nodes(nodes)
         }
 
         XPathExpr::PositionPredicate { tag, pos } => {
             let predicate = Predicate::Position(*pos);
-            let nodes = find_descendants_by_tag(arena, root, *tag)
+            let nodes = find_descendants_by_tag(arena, root, tag)
                 .into_iter()
                 .filter(|&node| matches_predicate(arena, node, &predicate))
                 .collect();
@@ -118,6 +118,40 @@ fn is_element(n: &fhp_tree::node::Node) -> bool {
         && !n.flags.has(NodeFlags::IS_DOCTYPE)
 }
 
+#[inline]
+fn matches_name_test(
+    arena: &Arena,
+    node: NodeId,
+    element: &fhp_tree::node::Node,
+    name: &NameTest,
+) -> bool {
+    match name {
+        NameTest::Interned(tag) => element.tag == *tag,
+        NameTest::Literal(literal) => {
+            element.tag == Tag::Unknown
+                && arena
+                    .unknown_tag_name(node)
+                    .is_some_and(|actual| actual.eq_ignore_ascii_case(literal))
+        }
+    }
+}
+
+#[inline]
+fn same_element_name(arena: &Arena, left: NodeId, right: NodeId) -> bool {
+    let left_node = arena.get(left);
+    let right_node = arena.get(right);
+    if left_node.tag != right_node.tag {
+        return false;
+    }
+    if left_node.tag != Tag::Unknown {
+        return true;
+    }
+    match (arena.unknown_tag_name(left), arena.unknown_tag_name(right)) {
+        (Some(left_name), Some(right_name)) => left_name.eq_ignore_ascii_case(right_name),
+        _ => false,
+    }
+}
+
 /// Generic DFS: collect descendant nodes that satisfy `predicate`.
 fn dfs_collect(
     arena: &Arena,
@@ -140,12 +174,12 @@ fn dfs_collect(
 }
 
 /// DFS: find all descendant elements with a specific tag.
-fn find_descendants_by_tag(arena: &Arena, root: NodeId, tag: Tag) -> Vec<NodeId> {
+fn find_descendants_by_tag(arena: &Arena, root: NodeId, tag: &NameTest) -> Vec<NodeId> {
     let mut results = Vec::new();
     dfs_collect(
         arena,
         root,
-        &|_, _, n| is_element(n) && n.tag == tag,
+        &|a, id, n| is_element(n) && matches_name_test(a, id, n, tag),
         &mut results,
     );
     results
@@ -155,7 +189,7 @@ fn find_descendants_by_tag(arena: &Arena, root: NodeId, tag: Tag) -> Vec<NodeId>
 fn find_descendants_by_tag_and_attr(
     arena: &Arena,
     root: NodeId,
-    tag: Tag,
+    tag: &NameTest,
     attr: &str,
     value: Option<&str>,
 ) -> Vec<NodeId> {
@@ -165,7 +199,7 @@ fn find_descendants_by_tag_and_attr(
         root,
         &|a, id, n| {
             is_element(n)
-                && n.tag == tag
+                && matches_name_test(a, id, n, tag)
                 && a.attrs(id).iter().any(|at| {
                     a.attr_name(at).eq_ignore_ascii_case(attr)
                         && value.is_some_and(|expected| a.attr_value(at).unwrap_or("") == expected)
@@ -180,7 +214,7 @@ fn find_descendants_by_tag_and_attr(
 fn find_descendants_by_tag_and_attr_exists(
     arena: &Arena,
     root: NodeId,
-    tag: Tag,
+    tag: &NameTest,
     attr: &str,
 ) -> Vec<NodeId> {
     let mut results = Vec::new();
@@ -189,7 +223,7 @@ fn find_descendants_by_tag_and_attr_exists(
         root,
         &|a, id, n| {
             is_element(n)
-                && n.tag == tag
+                && matches_name_test(a, id, n, tag)
                 && a.attrs(id)
                     .iter()
                     .any(|at| a.attr_name(at).eq_ignore_ascii_case(attr))
@@ -203,7 +237,7 @@ fn find_descendants_by_tag_and_attr_exists(
 fn find_descendants_by_tag_and_contains(
     arena: &Arena,
     root: NodeId,
-    tag: Tag,
+    tag: &NameTest,
     attr: &str,
     substr: &str,
 ) -> Vec<NodeId> {
@@ -213,7 +247,7 @@ fn find_descendants_by_tag_and_contains(
         root,
         &|a, id, n| {
             is_element(n)
-                && n.tag == tag
+                && matches_name_test(a, id, n, tag)
                 && a.attrs(id).iter().any(|at| {
                     a.attr_name(at).eq_ignore_ascii_case(attr)
                         && a.attr_value(at).unwrap_or("").contains(substr)
@@ -287,7 +321,7 @@ fn evaluate_absolute_path(arena: &Arena, root: NodeId, steps: &[PathStep]) -> Ve
         next.clear();
         for &node_id in &current {
             let n = arena.get(node_id);
-            if !is_element(n) || n.tag != step.tag {
+            if !is_element(n) || !matches_name_test(arena, node_id, n, &step.tag) {
                 continue;
             }
             if let Some(ref pred) = step.predicate {
@@ -354,7 +388,7 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
             let mut idx = 0usize;
             while !child.is_null() {
                 let c = arena.get(child);
-                if is_element(c) && c.tag == n.tag {
+                if is_element(c) && same_element_name(arena, child, node) {
                     idx += 1;
                     if child == node {
                         return idx == *pos;

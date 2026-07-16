@@ -1,6 +1,6 @@
 [package]
 name = "fhp-simd"
-version = "0.1.2"
+version = "0.2.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -12,8 +12,12 @@ keywords = ["simd", "html", "parser", "neon", "avx2"]
 categories = ["algorithms"]
 exclude = ["benches/", "tests/"]
 
+[features]
+default = ["simd"]
+simd = []
+
 [dependencies]
-fhp-core = { version = "0.1.2", path = "../fhp-core" }
+fhp-core = { version = "0.2.0", path = "../fhp-core" }
 
 [dev-dependencies]
 criterion = { workspace = true }

@@ -5,22 +5,31 @@
 [![License](https://img.shields.io/crates/l/fast-html-parser.svg)](LICENSE-MIT)
 [![MSRV](https://img.shields.io/badge/MSRV-1.85-blue.svg)](https://blog.rust-lang.org/2025/02/20/Rust-1.85.0.html)
 
-SIMD-optimized HTML parser for Rust, built for web scraping workloads.
+A high-speed, pragmatic HTML parser for Rust web-scraping workloads.
 
-Uses SIMD instructions (SSE4.2, AVX2, NEON) for tokenization and builds a cache-line aligned arena-based DOM tree for fast traversal.
+`fast-html-parser` deliberately is not a browser engine or a fully conforming
+HTML5 implementation. It keeps a synthetic document root and implements a
+curated set of malformed-markup repairs useful to scrapers, while preserving a
+compact, 64-byte arena node layout. Browser wrapper synthesis (`html`, `head`,
+and `body`), foreign SVG/MathML content, template/scripting algorithms, and
+context-aware fragment parsing are outside the v0.2 contract. See
+[Compatibility](COMPATIBILITY.md) before relying on browser-specific DOM shape.
+
+The default `simd` feature uses runtime dispatch for SSE4.2, AVX2, or NEON when
+available. Disabling default features forces the portable scalar backend.
 
 ## Installation
 
 ```toml
 [dependencies]
-fast-html-parser = "0.1.2"
+fast-html-parser = "0.2.0"
 ```
 
 To enable optional features:
 
 ```toml
 [dependencies]
-fast-html-parser = { version = "0.1.2", features = ["xpath", "encoding", "async-tokio"] }
+fast-html-parser = { version = "0.2.0", features = ["xpath", "encoding", "async-tokio"] }
 ```
 
 ## Quick Start
@@ -86,29 +95,72 @@ use fast_html_parser::HtmlParser;
 
 let parser = HtmlParser::builder()
     .max_input_size(64 * 1024 * 1024)
-    .fragment_mode(true)
     .build();
 
-let doc = parser.parse_str("<p>fragment</p>").unwrap();
+let doc = parser.parse_str("<p>page section</p>").unwrap();
+assert_eq!(doc.root().text_content(), "page section");
 ```
+
+The returned root is always the parser's synthetic document root. v0.2 removes
+`fragment_mode`; it does not synthesize browser `html`, `head`, or `body`
+wrappers.
 
 ### Streaming
 
 ```rust
-use fast_html_parser::streaming::parse_stream;
+use fast_html_parser::streaming::{StreamParser, parse_stream_with_limit};
 
 let html = b"<div><p>Hello</p></div>";
-let doc = parse_stream(html.chunks(8)).unwrap();
+let doc = parse_stream_with_limit(html.chunks(8), 1024 * 1024).unwrap();
+assert_eq!(doc.root().text_content(), "Hello");
+
+let mut parser = StreamParser::with_max_input_size(1024 * 1024);
+parser.feed(b"<article>").unwrap();
+parser.feed(b"from chunks</article>").unwrap();
+let doc = parser.finish().unwrap();
+assert_eq!(doc.root().text_content(), "from chunks");
 ```
+
+Both raw and decoded byte counts are limited; the effective ceiling is
+`min(configured_limit, u32::MAX)`. Encoding, nesting, and size failures make a
+stream parser terminal. Iterator and async helpers stop reading after the first
+error.
+
+### Early Stop
+
+```rust
+use fast_html_parser::Tag;
+use fast_html_parser::streaming::{
+    EarlyStopOutcome, EarlyStopParser, EarlyStopProgress, MatchCompleteness,
+};
+
+let mut parser = EarlyStopParser::stop_after_element(|node| node.tag() == Tag::Article);
+let progress = parser.feed(b"<article><b>complete</b></article><p>unread</p>").unwrap();
+assert_eq!(progress, EarlyStopProgress::Matched);
+
+let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+    panic!("expected an article")
+};
+assert_eq!(found.completeness(), MatchCompleteness::SubtreeComplete);
+assert_eq!(found.node().text_content(), "complete");
+```
+
+Use `stop_on_create` when a start tag and its attributes are sufficient, or
+`stop_after_element` when the complete matched subtree is required. The match
+owns its `Document`; `node_id()` remains valid for that document.
 
 ### Encoding Detection
 
 ```rust
 use fast_html_parser::HtmlParser;
 
-// Automatically detects encoding from BOM or <meta charset>
+// Detects encoding from a BOM or an HTML <meta> prescan, then falls back to UTF-8.
 let doc = HtmlParser::parse_bytes(b"<p>Hello</p>").unwrap();
 ```
+
+HTTP `Content-Type` encoding hints are not accepted by the parser in v0.2;
+apply an HTTP-layer decision before calling the parser if your scraper needs
+that signal.
 
 ## Feature Flags
 
@@ -120,6 +172,7 @@ let doc = HtmlParser::parse_bytes(b"<p>Hello</p>").unwrap();
 | `encoding` | Yes | Raw-byte and streaming parsing with encoding detection (BOM, meta charset) |
 | `async-tokio` | No | Async parsing via Tokio |
 | `async-async-std` | No | Async parsing via async-std |
+| `simd` | Yes | Runtime-dispatched SIMD scanning; disable default features for scalar-only execution |
 
 ## Architecture
 
@@ -127,7 +180,7 @@ The parser is organized as a workspace of focused crates:
 
 | Crate | Purpose |
 |---|---|
-| `fhp-core` | Interned HTML tags (PHF), entity table, error types |
+| `fhp-core` | Interned HTML tags, generated WHATWG entity PHF/legacy trie, error types |
 | `fhp-simd` | SIMD abstraction layer with runtime dispatch |
 | `fhp-tokenizer` | Two-phase tokenizer (structural indexing + token extraction) |
 | `fhp-tree` | Arena-based DOM tree with 64-byte aligned nodes |
@@ -147,42 +200,26 @@ Benchmarks use Criterion with explicit workload boundaries:
 
 DOM construction, zero-copy parsing, owned-input transfer, and streaming
 rewriting are reported separately. Cross-parser speed ratios are emitted only
-when the parsers produce the same checked observable signature for that
-fixture. Raw Criterion samples remain machine-local; each published summary
+when the parsers produce the same canonical DOM digest for that fixture. Raw
+Criterion samples remain machine-local; each published summary
 records the source, fixture, machine, toolchain, build flags, and commands.
 
 <!-- benchmark-summary:start -->
-_Generated by `python3 scripts/bench.py publish`; lower time is better._
-
-Full report: [2026-07-13-fd2d1b6e846f-aarch64-apple-darwin.md](benchmarks/results/2026-07-13-fd2d1b6e846f-aarch64-apple-darwin.md)
-
-Environment: `aarch64-apple-darwin`, `rustc 1.93.0`, source `fd2d1b6e846f`.
-
-Representative FHP DOM-build results. Each range is the minimum and maximum run mean across three parser-order rotations. Owned, zero-copy, streaming, selector, and all other absolute estimates remain in the full report.
-
-| Workload | FHP time | Range | Throughput |
-|---|---:|---:|---:|
-| Synthetic 100 KB — DOM build | 298.94 µs | 292.55 µs–316.22 µs | 367.78 MiB/s |
-| Synthetic 1 KB — DOM build | 4.05 µs | 3.98 µs–4.28 µs | 348.44 MiB/s |
-| Synthetic 5 MB — DOM build | 13.88 ms | 12.85 ms–15.42 ms | 370.70 MiB/s |
-| GitHub 301 KB — DOM build | 506.15 µs | 485.71 µs–524.25 µs | 567.31 MiB/s |
-| Hacker News 34 KB — DOM build | 114.33 µs | 112.90 µs–125.26 µs | 285.98 MiB/s |
-| Stack Overflow 415 KB — DOM build | 928.81 µs | 926.67 µs–986.47 µs | 426.21 MiB/s |
-| Wikipedia 590 KB — DOM build | 1.80 ms | 1.79 ms–2.04 ms | 312.19 MiB/s |
-
-Validated equal-work comparisons. Values above 1× mean the competitor took longer than FHP for the same checked result:
-
-| Equal workload | vs | Median | Range |
-|---|---|---:|---:|
-| Synthetic 100 KB — `.card` selector | `tl` | 2.078× | 2.024×–2.223× |
-| Synthetic 100 KB — `p` selector | `tl` | 1.185× | 1.096×–1.310× |
-| Synthetic 1 KB — DOM build | `scraper` | 7.352× | 7.225×–7.555× |
-| GitHub 301 KB — DOM build | `scraper` | 5.669× | 5.596×–5.826× |
-| Hacker News 34 KB — DOM build | `scraper` | 5.444× | 5.318×–5.649× |
+_No official schema-3 v0.2 benchmark has been published yet. A clean,
+user-approved commit must be measured with `python3 scripts/bench.py publish`
+before release._
 <!-- benchmark-summary:end -->
 
-The published table uses three independent parser-order rotations. Local
-`save`/`compare` failures are regression candidates and require confirmation;
+The [2026-07-15 report](benchmarks/results/2026-07-15-b4fcf640b253-aarch64-apple-darwin.md)
+came from a dirty worktree and is kept only as provisional historical data; it
+is excluded from the latest link and official comparisons.
+`bench.py publish` now requires a clean source tree and updates this README and
+the benchmark index together. A clean, approved commit must replace the report
+before release.
+
+The current comparison harness counterbalances parser order with the complete
+set of all six parser permutations. The provisional report predates that contract.
+Local `save`/`compare` failures are regression candidates and require confirmation;
 the [same-source repeatability study](benchmarks/results/2026-07-13-local-baseline-repeatability.md)
 shows where microbenchmarks, async scheduling, and lifecycle teardown were
 sensitive to run order or machine state.
@@ -196,6 +233,26 @@ python3 scripts/bench.py quick
 See [Benchmark results](benchmarks/README.md) for verification, baseline,
 comparison, and publication commands. Fixture sizes, digests, and provenance
 are documented in [Benchmark fixtures](testdata/README.md).
+
+## Local Quality Gates
+
+This repository intentionally does not rely on GitHub Actions. Run the required
+development gate locally:
+
+```bash
+python3 scripts/release.py check
+```
+
+Maintainers run the stricter clean-tree release gate with the intended version:
+
+```bash
+python3 scripts/release.py release --version 0.2.0
+```
+
+The release command checks the MSRV, platform targets, cargo-deny, SIMD modes,
+fuzz targets, package contents and licenses, and clean benchmark metadata. It
+does not install missing toolchains, targets, `cargo-deny`, or `cargo-fuzz`.
+See [Contributing](CONTRIBUTING.md) for prerequisites.
 
 ## Examples
 

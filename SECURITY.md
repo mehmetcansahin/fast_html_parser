@@ -4,7 +4,8 @@
 
 | Version | Supported          |
 |---------|--------------------|
-| 0.1.x   | :white_check_mark: |
+| 0.2.x   | :white_check_mark: |
+| 0.1.x   | :x:                |
 
 ## Reporting a Vulnerability
 
@@ -15,11 +16,26 @@ Please report security vulnerabilities through
 
 ## Scope
 
+`fast-html-parser` is a pragmatic web-scraping parser, not a browser engine or
+an HTML sanitizer. Reports should evaluate behavior against the documented
+[compatibility contract](COMPATIBILITY.md). Missing browser wrapper synthesis,
+foreign-content integration, template/scripting algorithms, and context-aware
+fragment parsing are documented non-goals rather than security defects.
+
 The following areas are of particular interest:
 
 - **SIMD unsafe code** — memory safety issues in NEON/SSE/AVX intrinsics
 - **Denial of service** — inputs that cause excessive memory or CPU usage
-- **Encoding attacks** — malformed byte sequences that bypass sanitization
+- **Encoding attacks** — malformed byte sequences that bypass the documented
+  BOM/meta/UTF-8 decoding policy
+- **Limit bypasses** — raw or decoded input, 512-element nesting, selector
+  complexity, or terminal streaming errors that fail open
+- **Source draining** — iterator or async adapters continuing to read after the
+  first parse failure or an early-stop result
+
+The parser does not make untrusted markup safe for insertion into HTML, CSS,
+JavaScript, URLs, or other output contexts. Use a dedicated sanitizer and
+context-appropriate escaping.
 
 ## Response Timeline
 

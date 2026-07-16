@@ -43,6 +43,7 @@ use traverse::{Ancestors, BreadthFirst, Children, DepthFirst, Siblings};
 
 /// Error type for HTML parsing.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum HtmlError {
     /// Input was too large to parse.
     #[error("input too large: {size} bytes (max {max})")]
@@ -56,6 +57,16 @@ pub enum HtmlError {
     /// Encoding detection or conversion failed.
     #[error("encoding error: {0}")]
     Encoding(#[from] fhp_core::error::EncodingError),
+
+    /// Tokenization or tree construction failed.
+    #[error("parse error: {0}")]
+    Parse(#[from] fhp_core::error::ParseError),
+
+    /// A streaming parser was used after a previous terminal error.
+    ///
+    /// The original error is returned by the operation that first fails.
+    #[error("parser is terminal after a previous error")]
+    ParserTerminated,
 
     /// I/O error during streaming or async parsing.
     #[error("I/O error: {0}")]
@@ -103,7 +114,7 @@ pub fn parse_with_limit(input: &str, max_input_size: usize) -> Result<Document, 
     let mut builder = TreeBuilder::with_capacity_hint(input.len());
     builder.set_source(input);
     fhp_tokenizer::tokenize_into(input, &mut builder);
-    let (arena, root) = builder.finish();
+    let (arena, root) = builder.finish()?;
 
     Ok(Document { arena, root })
 }
@@ -145,7 +156,7 @@ pub fn parse_owned_with_limit(input: String, max_input_size: usize) -> Result<Do
     // Set source pointer tracking without copying data.
     builder.set_source_ptr(&input);
     fhp_tokenizer::tokenize_into(&input, &mut builder);
-    let (mut arena, root) = builder.finish();
+    let (mut arena, root) = builder.finish()?;
     // Transfer the String's allocation directly — no memcpy.
     arena.set_source_owned(input);
 

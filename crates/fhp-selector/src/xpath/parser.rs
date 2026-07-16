@@ -13,10 +13,8 @@
 //! - `//*` — descendant wildcard
 //! - `..` — parent axis
 
+use super::ast::{NameTest, PathStep, Predicate, XPathExpr};
 use fhp_core::error::XPathError;
-use fhp_core::tag::Tag;
-
-use super::ast::{PathStep, Predicate, XPathExpr};
 
 /// Parse an XPath expression string into an AST.
 ///
@@ -157,7 +155,7 @@ impl<'a> XPathParser<'a> {
     /// Build a descendant expression with a predicate.
     fn build_descendant_with_predicate(
         &self,
-        tag: Tag,
+        tag: NameTest,
         pred: Predicate,
     ) -> Result<XPathExpr, XPathError> {
         match pred {
@@ -278,16 +276,10 @@ impl<'a> XPathParser<'a> {
         Ok(Predicate::Position(n))
     }
 
-    /// Read a tag name and resolve to a [`Tag`].
-    fn read_tag_name(&mut self) -> Result<Tag, XPathError> {
+    /// Read an element name into an interned-or-literal name test.
+    fn read_tag_name(&mut self) -> Result<NameTest, XPathError> {
         let name = self.read_ident()?;
-        let tag = Tag::from_bytes(name.as_bytes());
-        if tag == Tag::Unknown {
-            return Err(XPathError::Invalid {
-                reason: format!("unknown tag: {name}"),
-            });
-        }
-        Ok(tag)
+        Ok(NameTest::from_html_name(&name))
     }
 
     /// Read an identifier (letters, digits, hyphens).
@@ -387,18 +379,22 @@ impl<'a> XPathParser<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::xpath::ast::{Predicate, XPathExpr};
+    use crate::xpath::ast::{NameTest, Predicate, XPathExpr};
+    use fhp_core::tag::Tag;
 
     #[test]
     fn parse_descendant_tag() {
         let expr = parse_xpath("//div").unwrap();
-        assert_eq!(expr, XPathExpr::DescendantByTag(Tag::Div));
+        assert_eq!(
+            expr,
+            XPathExpr::DescendantByTag(NameTest::Interned(Tag::Div))
+        );
     }
 
     #[test]
     fn parse_descendant_p() {
         let expr = parse_xpath("//p").unwrap();
-        assert_eq!(expr, XPathExpr::DescendantByTag(Tag::P));
+        assert_eq!(expr, XPathExpr::DescendantByTag(NameTest::Interned(Tag::P)));
     }
 
     #[test]
@@ -407,7 +403,7 @@ mod tests {
         assert_eq!(
             expr,
             XPathExpr::DescendantByAttr {
-                tag: Tag::A,
+                tag: NameTest::Interned(Tag::A),
                 attr: "href".to_string(),
                 value: "http://example.com".to_string(),
             }
@@ -420,7 +416,7 @@ mod tests {
         assert_eq!(
             expr,
             XPathExpr::DescendantByAttr {
-                tag: Tag::A,
+                tag: NameTest::Interned(Tag::A),
                 attr: "href".to_string(),
                 value: "url".to_string(),
             }
@@ -433,7 +429,7 @@ mod tests {
         assert_eq!(
             expr,
             XPathExpr::DescendantByAttrExists {
-                tag: Tag::A,
+                tag: NameTest::Interned(Tag::A),
                 attr: "href".to_string(),
             }
         );
@@ -445,7 +441,7 @@ mod tests {
         assert_eq!(
             expr,
             XPathExpr::ContainsPredicate {
-                tag: Tag::A,
+                tag: NameTest::Interned(Tag::A),
                 attr: "class".to_string(),
                 substr: "nav".to_string(),
             }
@@ -458,7 +454,7 @@ mod tests {
         assert_eq!(
             expr,
             XPathExpr::PositionPredicate {
-                tag: Tag::Li,
+                tag: NameTest::Interned(Tag::Li),
                 pos: 3,
             }
         );
@@ -470,7 +466,7 @@ mod tests {
         assert_eq!(
             expr,
             XPathExpr::PositionPredicate {
-                tag: Tag::Li,
+                tag: NameTest::Interned(Tag::Li),
                 pos: 2,
             }
         );
@@ -481,7 +477,9 @@ mod tests {
         let expr = parse_xpath("//p/text()").unwrap();
         assert_eq!(
             expr,
-            XPathExpr::TextExtract(Box::new(XPathExpr::DescendantByTag(Tag::P)))
+            XPathExpr::TextExtract(Box::new(XPathExpr::DescendantByTag(NameTest::Interned(
+                Tag::P
+            ))))
         );
     }
 
@@ -492,15 +490,15 @@ mod tests {
             expr,
             XPathExpr::AbsolutePath(vec![
                 PathStep {
-                    tag: Tag::Html,
+                    tag: NameTest::Interned(Tag::Html),
                     predicate: None,
                 },
                 PathStep {
-                    tag: Tag::Body,
+                    tag: NameTest::Interned(Tag::Body),
                     predicate: None,
                 },
                 PathStep {
-                    tag: Tag::Div,
+                    tag: NameTest::Interned(Tag::Div),
                     predicate: None,
                 },
             ])
@@ -513,7 +511,7 @@ mod tests {
         match expr {
             XPathExpr::AbsolutePath(steps) => {
                 assert_eq!(steps.len(), 3);
-                assert_eq!(steps[2].tag, Tag::Div);
+                assert_eq!(steps[2].tag, NameTest::Interned(Tag::Div));
                 assert_eq!(
                     steps[2].predicate,
                     Some(Predicate::AttrEquals {
@@ -578,8 +576,11 @@ mod tests {
     }
 
     #[test]
-    fn parse_unknown_tag_error() {
-        assert!(parse_xpath("//foobar").is_err());
+    fn parse_literal_name_test() {
+        assert_eq!(
+            parse_xpath("//FoObAr").unwrap(),
+            XPathExpr::DescendantByTag(NameTest::Literal("foobar".into()))
+        );
     }
 
     #[test]

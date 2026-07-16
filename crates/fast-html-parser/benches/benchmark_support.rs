@@ -5,7 +5,7 @@ use crate::contract_support::{
     DomImplementation, SelectorWorkloadContract, assert_selector_workload_counts, fixture_contract,
     intersect_selector_parity, selector_workload_contract,
 };
-use crate::contract_support::{FhpBenchOrder, FixtureContract, order_fhp_blocks};
+use crate::contract_support::{FhpBenchOrder, FixtureContract, order_dom_parser_blocks};
 use criterion::measurement::WallTime;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput};
 
@@ -166,25 +166,26 @@ fn register_parse_case(group: &mut Group<'_>, case: ParseCase, html: &str) {
 }
 
 fn semantic_parse_cases(order: FhpBenchOrder) -> Vec<ParseCase> {
-    order_fhp_blocks(
+    let mut cases = order_dom_parser_blocks(
         vec![
             ParseCase::FastHtmlParserBuild,
             ParseCase::FastHtmlParserLifecycle,
             ParseCase::FastHtmlParserOwnedBuild,
             ParseCase::FastHtmlParserOwnedLifecycle,
         ],
+        vec![ParseCase::ScraperBuild, ParseCase::ScraperLifecycle],
         vec![
-            vec![ParseCase::ScraperBuild, ParseCase::ScraperLifecycle],
-            vec![
-                ParseCase::TlBuild,
-                ParseCase::TlLifecycle,
-                ParseCase::TlOwnedBuild,
-                ParseCase::TlOwnedLifecycle,
-            ],
-            vec![ParseCase::LolHtmlLifecycle],
+            ParseCase::TlBuild,
+            ParseCase::TlLifecycle,
+            ParseCase::TlOwnedBuild,
+            ParseCase::TlOwnedLifecycle,
         ],
         order,
-    )
+    );
+    // Keep the streaming rewriter outside the three-parser DOM permutation: it
+    // is a distinct lifecycle workload and has no comparable materialized tree.
+    cases.push(ParseCase::LolHtmlLifecycle);
+    cases
 }
 
 #[cfg(feature = "css-selector")]
@@ -193,7 +194,8 @@ fn direct_parse_cases(
     order: FhpBenchOrder,
 ) -> Vec<ParseCase> {
     let mut fhp = Vec::new();
-    let mut others = Vec::<Vec<ParseCase>>::new();
+    let mut scraper = Vec::new();
+    let mut tl = Vec::new();
     for implementation in implementations {
         let cases = match implementation {
             DomImplementation::FastHtmlParser => vec![
@@ -207,11 +209,56 @@ fn direct_parse_cases(
         };
         if *implementation == DomImplementation::FastHtmlParser {
             fhp = cases;
+        } else if *implementation == DomImplementation::Scraper {
+            scraper = cases;
         } else {
-            others.push(cases);
+            tl = cases;
         }
     }
-    order_fhp_blocks(fhp, others, order)
+    order_dom_parser_blocks(fhp, scraper, tl, order)
+}
+
+#[cfg(feature = "css-selector")]
+fn parse_contract_equal_sets(
+    contract: &FixtureContract,
+) -> Vec<(&'static str, Vec<DomImplementation>)> {
+    if contract.parity.fast_html_parser_scraper
+        && contract.parity.fast_html_parser_tl
+        && contract.parity.scraper_tl
+    {
+        return vec![(
+            "all_dom",
+            vec![
+                DomImplementation::FastHtmlParser,
+                DomImplementation::Scraper,
+                DomImplementation::Tl,
+            ],
+        )];
+    }
+
+    let mut sets = Vec::new();
+    if contract.parity.fast_html_parser_scraper {
+        sets.push((
+            "fhp_scraper",
+            vec![
+                DomImplementation::FastHtmlParser,
+                DomImplementation::Scraper,
+            ],
+        ));
+    }
+    if contract.parity.fast_html_parser_tl {
+        sets.push((
+            "fhp_tl",
+            vec![DomImplementation::FastHtmlParser, DomImplementation::Tl],
+        ));
+    }
+    if contract.parity.scraper_tl {
+        sets.push((
+            "scraper_tl",
+            vec![DomImplementation::Scraper, DomImplementation::Tl],
+        ));
+    }
+    sets
 }
 
 pub fn register_parse_groups(
@@ -233,12 +280,7 @@ pub fn register_parse_groups(
 
     #[cfg(feature = "css-selector")]
     {
-        if contract.parity.fast_html_parser_scraper {
-            let parity_id = "fhp_scraper_dom";
-            let implementations = [
-                DomImplementation::FastHtmlParser,
-                DomImplementation::Scraper,
-            ];
+        for (parity_id, implementations) in parse_contract_equal_sets(contract) {
             let mut direct = c.benchmark_group(format!(
                 "{suite}/{benchmark_fixture_id}/parse/contract_equal/{parity_id}"
             ));
@@ -359,7 +401,8 @@ fn selector_cases(
     order: FhpBenchOrder,
 ) -> Vec<SelectorBenchCase> {
     let mut fhp = Vec::new();
-    let mut others = Vec::<Vec<SelectorBenchCase>>::new();
+    let mut scraper = Vec::new();
+    let mut tl = Vec::new();
     for implementation in implementations {
         let cases = match implementation {
             DomImplementation::FastHtmlParser => vec![
@@ -376,11 +419,13 @@ fn selector_cases(
         };
         if *implementation == DomImplementation::FastHtmlParser {
             fhp = cases;
+        } else if *implementation == DomImplementation::Scraper {
+            scraper = cases;
         } else {
-            others.push(cases);
+            tl = cases;
         }
     }
-    order_fhp_blocks(fhp, others, order)
+    order_dom_parser_blocks(fhp, scraper, tl, order)
 }
 
 #[cfg(feature = "css-selector")]

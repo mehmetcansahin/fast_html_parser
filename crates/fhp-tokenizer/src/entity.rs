@@ -1,115 +1,157 @@
-//! Entity decoding with SIMD fast-path.
-//!
-//! If the input contains no `&` characters, returns `Cow::Borrowed` (zero
-//! allocation). Otherwise, decodes named (`&amp;`), decimal (`&#60;`), and
-//! hex (`&#x3C;`) character references using `fhp_core::entity`.
+//! WHATWG character-reference decoding with a zero-allocation fast path.
 
 use std::borrow::Cow;
 
-/// Maximum number of bytes considered for a character-reference body.
-///
-/// HTML named references are short (the longest standard name is well below
-/// this bound), while numeric references need at most ten decimal digits.
-/// Bounding the search prevents an input containing many `&` bytes without a
-/// terminating `;` from repeatedly scanning the entire remaining suffix.
-const MAX_ENTITY_BODY_LEN: usize = 64;
+use fhp_core::entity::{decode_numeric, longest_named_prefix};
+use memchr::memchr;
 
-/// Decode HTML entities in a string.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EntityContext {
+    Text,
+    Attribute,
+}
+
+enum Replacement {
+    Named(&'static str),
+    Numeric(char),
+}
+
+impl Replacement {
+    #[inline]
+    fn push_into(self, output: &mut String) {
+        match self {
+            Self::Named(value) => output.push_str(value),
+            Self::Numeric(value) => output.push(value),
+        }
+    }
+}
+
+/// Decode HTML character references in text content.
 ///
-/// Fast path: if no `&` is present, returns `Cow::Borrowed` with zero
-/// allocation. Otherwise, decodes entities and returns `Cow::Owned`.
+/// Named references use the complete pinned WHATWG data set, including
+/// multi-codepoint replacements and the legacy names for which the trailing
+/// semicolon may be omitted. If no reference is decoded, the input is returned
+/// as a borrowed string.
+#[inline]
+pub fn decode_entities(input: &str) -> Cow<'_, str> {
+    decode_entities_in(input, EntityContext::Text)
+}
+
+/// Decode HTML character references in an attribute value.
 ///
-/// # Examples
-///
-/// ```
-/// use fhp_tokenizer::entity::decode_entities;
-///
-/// assert_eq!(decode_entities("hello"), "hello");
-/// assert_eq!(decode_entities("a &amp; b"), "a & b");
-/// assert_eq!(decode_entities("&#60;div&#62;"), "<div>");
-/// assert_eq!(decode_entities("&#x3C;br&#x3E;"), "<br>");
-/// ```
-pub fn decode_entities<'a>(input: &'a str) -> Cow<'a, str> {
-    // Fast path: no ampersand → no entities to decode.
-    if !input.as_bytes().contains(&b'&') {
+/// This applies the ambiguous-ampersand rule: a legacy named reference without
+/// a semicolon is not decoded when followed by an ASCII alphanumeric byte or
+/// `=`.
+#[inline]
+pub fn decode_attribute_entities(input: &str) -> Cow<'_, str> {
+    decode_entities_in(input, EntityContext::Attribute)
+}
+
+fn decode_entities_in(input: &str, context: EntityContext) -> Cow<'_, str> {
+    let bytes = input.as_bytes();
+    let Some(mut amp) = memchr(b'&', bytes) else {
         return Cow::Borrowed(input);
+    };
+
+    let mut output = None;
+    let mut copied_until = 0usize;
+
+    loop {
+        let Some((replacement, consumed)) = decode_reference(input, amp + 1, context) else {
+            let search_from = amp + 1;
+            let Some(relative_amp) = memchr(b'&', &bytes[search_from..]) else {
+                break;
+            };
+            amp = search_from + relative_amp;
+            continue;
+        };
+
+        let output = output.get_or_insert_with(|| String::with_capacity(input.len()));
+        output.push_str(&input[copied_until..amp]);
+        replacement.push_into(output);
+        copied_until = amp + 1 + consumed;
+
+        let Some(relative_amp) = memchr(b'&', &bytes[copied_until..]) else {
+            break;
+        };
+        amp = copied_until + relative_amp;
     }
 
-    decode_entities_slow(input)
+    let Some(mut output) = output else {
+        return Cow::Borrowed(input);
+    };
+
+    output.push_str(&input[copied_until..]);
+    Cow::Owned(output)
 }
 
-/// Slow path: actually decode entities.
-fn decode_entities_slow(input: &str) -> Cow<'_, str> {
-    let mut result = String::with_capacity(input.len());
-    let mut cursor = 0usize;
+/// Decode the reference whose body begins at `start` (immediately after `&`).
+/// Returns the replacement and bytes consumed after the ampersand.
+fn decode_reference(
+    input: &str,
+    start: usize,
+    context: EntityContext,
+) -> Option<(Replacement, usize)> {
+    let bytes = input.as_bytes();
+    let first = *bytes.get(start)?;
 
-    while let Some(rel_amp) = input[cursor..].find('&') {
-        let amp = cursor + rel_amp;
-        // Preserve all UTF-8 before '&' verbatim.
-        result.push_str(&input[cursor..amp]);
-
-        // Look for a nearby closing ';' after '&'. Character references have
-        // bounded names; scanning the whole suffix for every ampersand makes
-        // inputs such as "&&&&..." quadratic.
-        let search_end = (amp + 1 + MAX_ENTITY_BODY_LEN + 1).min(input.len());
-        if let Some(semi) = input.as_bytes()[amp + 1..search_end]
-            .iter()
-            .position(|&b| b == b';')
-            .map(|rel| amp + 1 + rel)
-        {
-            let entity_body = &input[amp + 1..semi];
-            if try_decode_entity_into(entity_body, &mut result) {
-                cursor = semi + 1;
-                continue;
-            }
-        }
-
-        // Unrecognized entity — keep '&' and continue scanning.
-        result.push('&');
-        cursor = amp + 1;
+    if first == b'#' {
+        return decode_numeric_reference(input, start);
     }
 
-    // Append remaining tail.
-    if cursor < input.len() {
-        result.push_str(&input[cursor..]);
+    // Scan the name once. The core matcher records the longest legacy terminal
+    // while locating the complete name, then prefers an exact PHF hit when a
+    // semicolon terminates it. Exact misses and semicolon-less references reuse
+    // the recorded legacy candidate instead of rescanning the same bytes.
+    let matched = longest_named_prefix(&bytes[start..])?;
+    let name_end = start + matched.name_len;
+    let has_semicolon = bytes.get(name_end) == Some(&b';');
+    if !has_semicolon && !matched.allows_legacy_omission {
+        return None;
     }
 
-    Cow::Owned(result)
+    if context == EntityContext::Attribute
+        && !has_semicolon
+        && matches!(bytes.get(name_end), Some(byte) if byte.is_ascii_alphanumeric() || *byte == b'=')
+    {
+        return None;
+    }
+
+    Some((
+        Replacement::Named(matched.value),
+        matched.name_len + usize::from(has_semicolon),
+    ))
 }
 
-/// Try to decode a single entity body directly into the result buffer.
-///
-/// Returns `true` if decoded successfully, writing directly to `result`
-/// without any intermediate `String` allocation.
-fn try_decode_entity_into(body: &str, result: &mut String) -> bool {
-    if body.is_empty() {
-        return false;
+fn decode_numeric_reference(input: &str, start: usize) -> Option<(Replacement, usize)> {
+    let bytes = input.as_bytes();
+    let mut cursor = start + 1; // skip '#'
+    let is_hex = matches!(bytes.get(cursor), Some(b'x' | b'X'));
+    if is_hex {
+        cursor += 1;
     }
+    let digits_start = cursor;
 
-    if let Some(digits) = body.strip_prefix('#') {
-        // Numeric entity.
-        if digits.starts_with('x') || digits.starts_with('X') {
-            // Hex: &#xHH;
-            if let Some(c) = fhp_core::entity::decode_numeric(&digits[1..], true) {
-                result.push(c);
-                return true;
-            }
+    while let Some(&byte) = bytes.get(cursor) {
+        let valid = if is_hex {
+            byte.is_ascii_hexdigit()
         } else {
-            // Decimal: &#DD;
-            if let Some(c) = fhp_core::entity::decode_numeric(digits, false) {
-                result.push(c);
-                return true;
-            }
+            byte.is_ascii_digit()
+        };
+        if !valid {
+            break;
         }
-    } else {
-        // Named entity — &'static str, zero alloc.
-        if let Some(s) = fhp_core::entity::decode_named(body) {
-            result.push_str(s);
-            return true;
-        }
+        cursor += 1;
     }
 
-    false
+    if cursor == digits_start {
+        return None;
+    }
+
+    let value = decode_numeric(&input[digits_start..cursor], is_hex)?;
+    let has_semicolon = bytes.get(cursor) == Some(&b';');
+    let consumed = cursor - start + usize::from(has_semicolon);
+    Some((Replacement::Numeric(value), consumed))
 }
 
 #[cfg(test)]
@@ -117,87 +159,60 @@ mod tests {
     use super::*;
 
     #[test]
-    fn no_entities_borrowed() {
-        let result = decode_entities("hello world");
-        assert!(matches!(result, Cow::Borrowed(_)));
-        assert_eq!(result, "hello world");
+    fn no_reference_is_borrowed() {
+        assert!(matches!(decode_entities("hello world"), Cow::Borrowed(_)));
+        assert!(matches!(decode_entities("a & b"), Cow::Borrowed(_)));
     }
 
     #[test]
-    fn named_entities() {
-        assert_eq!(decode_entities("&amp;"), "&");
-        assert_eq!(decode_entities("&lt;"), "<");
-        assert_eq!(decode_entities("&gt;"), ">");
-        assert_eq!(decode_entities("&quot;"), "\"");
-        assert_eq!(decode_entities("&apos;"), "'");
+    fn decodes_full_whatwg_and_multi_codepoint_entities() {
+        assert_eq!(decode_entities("&CounterClockwiseContourIntegral;"), "∳");
+        assert_eq!(decode_entities("&NotEqualTilde;"), "≂̸");
+        assert_eq!(decode_entities("&Afr;"), "𝔄");
     }
 
     #[test]
-    fn numeric_decimal() {
-        assert_eq!(decode_entities("&#60;"), "<");
-        assert_eq!(decode_entities("&#62;"), ">");
-        assert_eq!(decode_entities("&#38;"), "&");
+    fn applies_legacy_semicolon_omission_rules() {
+        assert_eq!(decode_entities("&copy test"), "© test");
+        assert_eq!(decode_entities("&notin;"), "∉");
+        assert_eq!(decode_entities("&notin"), "¬in");
+        assert_eq!(decode_entities("&notit;"), "¬it;");
+        assert_eq!(
+            decode_entities("&NotEqualTilde test"),
+            "&NotEqualTilde test"
+        );
     }
 
     #[test]
-    fn numeric_hex() {
-        assert_eq!(decode_entities("&#x3C;"), "<");
-        assert_eq!(decode_entities("&#x3E;"), ">");
-        assert_eq!(decode_entities("&#X3c;"), "<");
+    fn attribute_context_rejects_ambiguous_ampersands() {
+        assert_eq!(decode_attribute_entities("&copy test"), "© test");
+        assert_eq!(decode_attribute_entities("&copy=test"), "&copy=test");
+        assert_eq!(decode_attribute_entities("&notin;"), "∉");
+        assert_eq!(decode_attribute_entities("&notin"), "&notin");
+        assert_eq!(decode_attribute_entities("&notit;"), "&notit;");
+        assert_eq!(decode_attribute_entities("&copy;=test"), "©=test");
     }
 
     #[test]
-    fn numeric_references_apply_html_replacement_semantics() {
-        assert_eq!(decode_entities("&#xD800;"), "\u{FFFD}");
-        assert_eq!(decode_entities("&#1114112;"), "\u{FFFD}");
-        assert_eq!(decode_entities("&#999999999999999999999999;"), "\u{FFFD}");
-        assert_eq!(decode_entities("&#128; &#x82;"), "\u{20AC} \u{201A}");
-        assert_eq!(decode_entities("&#xFDD0;"), "\u{FDD0}");
+    fn numeric_references_allow_missing_semicolons() {
+        assert_eq!(decode_entities("&#60div"), "<div");
+        assert_eq!(decode_entities("&#x3Cdiv"), "ύiv");
+        assert_eq!(decode_entities("&#x3C;div"), "<div");
+        assert_eq!(decode_entities("&#128; &#x82;"), "€ ‚");
     }
 
     #[test]
-    fn mixed_entities() {
-        assert_eq!(decode_entities("a &amp; b &lt; c &#62; d"), "a & b < c > d");
-    }
-
-    #[test]
-    fn unknown_entity_passthrough() {
+    fn malformed_references_are_preserved() {
+        assert_eq!(decode_entities("&&&&"), "&&&&");
         assert_eq!(decode_entities("&unknown;"), "&unknown;");
+        assert_eq!(decode_entities("&#; &#x;"), "&#; &#x;");
     }
 
     #[test]
-    fn ampersand_without_semicolon() {
-        assert_eq!(decode_entities("a & b"), "a & b");
-    }
-
-    #[test]
-    fn empty_input() {
-        let result = decode_entities("");
-        assert!(matches!(result, Cow::Borrowed(_)));
-        assert_eq!(result, "");
-    }
-
-    #[test]
-    fn entity_at_end() {
-        assert_eq!(decode_entities("hello&amp;"), "hello&");
-    }
-
-    #[test]
-    fn consecutive_entities() {
-        assert_eq!(decode_entities("&lt;&gt;&amp;"), "<>&");
-    }
-
-    #[test]
-    fn many_unterminated_ampersands_are_preserved() {
-        // Regression: the old implementation searched the entire remaining
-        // suffix for every ampersand, making this pattern O(n^2).
+    fn many_unterminated_ampersands_remain_linear_and_borrowed() {
         let input = "&".repeat(100_000);
-        assert_eq!(decode_entities(&input), input);
-    }
-
-    #[test]
-    fn excessively_long_entity_body_is_preserved() {
-        let input = format!("&{};", "a".repeat(MAX_ENTITY_BODY_LEN + 1));
-        assert_eq!(decode_entities(&input), input);
+        let decoded = decode_entities(&input);
+        assert!(matches!(decoded, Cow::Borrowed(_)));
+        assert_eq!(decoded, input);
     }
 }

@@ -1,3 +1,114 @@
+mod generated {
+    include!("generated_entities.rs");
+}
+
+/// Pinned WHATWG source used to generate the named-entity lookup tables.
+pub const NAMED_ENTITY_SOURCE_URL: &str = generated::ENTITY_SOURCE_URL;
+
+/// SHA-256 of the vendored WHATWG entity source.
+pub const NAMED_ENTITY_SOURCE_SHA256: &str = generated::ENTITY_SOURCE_SHA256;
+
+/// Number of records in the pinned WHATWG entity source.
+pub const NAMED_ENTITY_SOURCE_RECORD_COUNT: usize = generated::ENTITY_SOURCE_RECORD_COUNT;
+
+/// A terminal reached while matching a named character reference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct NamedEntityMatch {
+    /// Replacement Unicode scalar sequence.
+    pub value: &'static str,
+    /// Number of entity-name bytes consumed, excluding `&` and `;`.
+    pub name_len: usize,
+    /// Whether WHATWG permits this name without a trailing semicolon.
+    pub allows_legacy_omission: bool,
+}
+
+#[inline]
+fn legacy_trie_transition(node_index: usize, byte: u8) -> Option<usize> {
+    if node_index == 0 {
+        let next = generated::LEGACY_ENTITY_TRIE_ROOT[byte as usize];
+        return (next != generated::NO_ENTITY_NODE).then_some(next as usize);
+    }
+
+    let node = generated::LEGACY_ENTITY_TRIE_NODES.get(node_index)?;
+    let start = node.first_edge as usize;
+    let end = start + node.edge_count as usize;
+    let edges = &generated::LEGACY_ENTITY_TRIE_EDGES[start..end];
+    match edges {
+        [] => None,
+        [edge] => (edge.byte == byte).then_some(edge.next as usize),
+        [first, second] => {
+            if first.byte == byte {
+                Some(first.next as usize)
+            } else {
+                (second.byte == byte).then_some(second.next as usize)
+            }
+        }
+        _ => edges
+            .iter()
+            .find(|edge| edge.byte == byte)
+            .map(|edge| edge.next as usize),
+    }
+}
+
+/// Find the longest named-reference prefix after an ampersand.
+///
+/// `input` starts with the first name byte and may contain a trailing
+/// semicolon or ordinary text. The returned length excludes the semicolon.
+#[inline]
+pub fn longest_named_prefix(input: &[u8]) -> Option<NamedEntityMatch> {
+    let mut candidate_len = 0usize;
+    let mut legacy_node_index = Some(0usize);
+    let mut legacy_match = None;
+
+    for (offset, &byte) in input
+        .iter()
+        .take(generated::MAX_ENTITY_NAME_LEN)
+        .enumerate()
+    {
+        if !byte.is_ascii_alphanumeric() {
+            break;
+        }
+        candidate_len = offset + 1;
+
+        // Exact references are looked up once after the name terminator is
+        // known. While scanning that same name, retain the longest legacy
+        // terminal for the semicolon-less and exact-miss fallback paths.
+        if offset < generated::MAX_LEGACY_ENTITY_NAME_LEN {
+            legacy_node_index =
+                legacy_node_index.and_then(|node_index| legacy_trie_transition(node_index, byte));
+            if let Some(node_index) = legacy_node_index {
+                let node = generated::LEGACY_ENTITY_TRIE_NODES[node_index];
+                if node.value_index != generated::NO_ENTITY_VALUE {
+                    legacy_match = Some(NamedEntityMatch {
+                        value: generated::LEGACY_ENTITY_VALUES[node.value_index as usize],
+                        name_len: candidate_len,
+                        allows_legacy_omission: true,
+                    });
+                }
+            }
+        } else {
+            legacy_node_index = None;
+        }
+    }
+
+    if candidate_len != 0 && input.get(candidate_len) == Some(&b';') {
+        // The scan above only admits ASCII alphanumerics, so this conversion
+        // cannot fail. Keep it checked to avoid introducing unsafe code into
+        // the core crate.
+        let name = std::str::from_utf8(&input[..candidate_len]).ok()?;
+        if let Some(value) = decode_named(name) {
+            return Some(NamedEntityMatch {
+                value,
+                name_len: candidate_len,
+                allows_legacy_omission: legacy_match
+                    .is_some_and(|matched| matched.name_len == candidate_len),
+            });
+        }
+    }
+
+    legacy_match
+}
+
 /// Decode a named HTML entity to its character(s).
 ///
 /// Accepts the entity name **without** the leading `&` and trailing `;`.
@@ -14,7 +125,22 @@
 /// ```
 #[inline]
 pub fn decode_named(name: &str) -> Option<&'static str> {
-    ENTITY_MAP.get(name).copied()
+    if name.is_empty() || name.len() > generated::MAX_ENTITY_NAME_LEN {
+        return None;
+    }
+
+    // These six references dominate real-world HTML and tokenizer hot paths.
+    // Keep the complete PHF as the canonical exact table, but avoid SipHash
+    // setup for the smallest, most frequent spellings.
+    match name {
+        "amp" => Some("&"),
+        "lt" => Some("<"),
+        "gt" => Some(">"),
+        "quot" => Some("\""),
+        "apos" => Some("'"),
+        "nbsp" => Some("\u{00A0}"),
+        _ => generated::EXACT_ENTITIES.get(name).copied(),
+    }
 }
 
 /// Decode a numeric character reference (`&#123;` or `&#x1F600;`).
@@ -162,273 +288,6 @@ fn escape_impl<const ESCAPE_QUOTES: bool>(input: &str, out: &mut String) {
     out.push_str(&input[last..]);
 }
 
-/// Compile-time perfect-hash map of the most common HTML named entities.
-///
-/// This covers the ~250 most-used entities. The full HTML5 spec defines
-/// ~2200, but the long tail is almost never seen in practice.
-static ENTITY_MAP: phf::Map<&'static str, &'static str> = phf::phf_map! {
-    // Most common
-    "amp"    => "&",
-    "lt"     => "<",
-    "gt"     => ">",
-    "quot"   => "\"",
-    "apos"   => "'",
-    "nbsp"   => "\u{00A0}",
-
-    // Latin supplement
-    "iexcl"  => "\u{00A1}",
-    "cent"   => "\u{00A2}",
-    "pound"  => "\u{00A3}",
-    "curren" => "\u{00A4}",
-    "yen"    => "\u{00A5}",
-    "brvbar" => "\u{00A6}",
-    "sect"   => "\u{00A7}",
-    "uml"    => "\u{00A8}",
-    "copy"   => "\u{00A9}",
-    "ordf"   => "\u{00AA}",
-    "laquo"  => "\u{00AB}",
-    "not"    => "\u{00AC}",
-    "shy"    => "\u{00AD}",
-    "reg"    => "\u{00AE}",
-    "macr"   => "\u{00AF}",
-    "deg"    => "\u{00B0}",
-    "plusmn" => "\u{00B1}",
-    "sup2"   => "\u{00B2}",
-    "sup3"   => "\u{00B3}",
-    "acute"  => "\u{00B4}",
-    "micro"  => "\u{00B5}",
-    "para"   => "\u{00B6}",
-    "middot" => "\u{00B7}",
-    "cedil"  => "\u{00B8}",
-    "sup1"   => "\u{00B9}",
-    "ordm"   => "\u{00BA}",
-    "raquo"  => "\u{00BB}",
-    "frac14" => "\u{00BC}",
-    "frac12" => "\u{00BD}",
-    "frac34" => "\u{00BE}",
-    "iquest" => "\u{00BF}",
-
-    // Accented Latin
-    "Agrave" => "\u{00C0}",
-    "Aacute" => "\u{00C1}",
-    "Acirc"  => "\u{00C2}",
-    "Atilde" => "\u{00C3}",
-    "Auml"   => "\u{00C4}",
-    "Aring"  => "\u{00C5}",
-    "AElig"  => "\u{00C6}",
-    "Ccedil" => "\u{00C7}",
-    "Egrave" => "\u{00C8}",
-    "Eacute" => "\u{00C9}",
-    "Ecirc"  => "\u{00CA}",
-    "Euml"   => "\u{00CB}",
-    "Igrave" => "\u{00CC}",
-    "Iacute" => "\u{00CD}",
-    "Icirc"  => "\u{00CE}",
-    "Iuml"   => "\u{00CF}",
-    "ETH"    => "\u{00D0}",
-    "Ntilde" => "\u{00D1}",
-    "Ograve" => "\u{00D2}",
-    "Oacute" => "\u{00D3}",
-    "Ocirc"  => "\u{00D4}",
-    "Otilde" => "\u{00D5}",
-    "Ouml"   => "\u{00D6}",
-    "times"  => "\u{00D7}",
-    "Oslash" => "\u{00D8}",
-    "Ugrave" => "\u{00D9}",
-    "Uacute" => "\u{00DA}",
-    "Ucirc"  => "\u{00DB}",
-    "Uuml"   => "\u{00DC}",
-    "Yacute" => "\u{00DD}",
-    "THORN"  => "\u{00DE}",
-    "szlig"  => "\u{00DF}",
-    "agrave" => "\u{00E0}",
-    "aacute" => "\u{00E1}",
-    "acirc"  => "\u{00E2}",
-    "atilde" => "\u{00E3}",
-    "auml"   => "\u{00E4}",
-    "aring"  => "\u{00E5}",
-    "aelig"  => "\u{00E6}",
-    "ccedil" => "\u{00E7}",
-    "egrave" => "\u{00E8}",
-    "eacute" => "\u{00E9}",
-    "ecirc"  => "\u{00EA}",
-    "euml"   => "\u{00EB}",
-    "igrave" => "\u{00EC}",
-    "iacute" => "\u{00ED}",
-    "icirc"  => "\u{00EE}",
-    "iuml"   => "\u{00EF}",
-    "eth"    => "\u{00F0}",
-    "ntilde" => "\u{00F1}",
-    "ograve" => "\u{00F2}",
-    "oacute" => "\u{00F3}",
-    "ocirc"  => "\u{00F4}",
-    "otilde" => "\u{00F5}",
-    "ouml"   => "\u{00F6}",
-    "divide" => "\u{00F7}",
-    "oslash" => "\u{00F8}",
-    "ugrave" => "\u{00F9}",
-    "uacute" => "\u{00FA}",
-    "ucirc"  => "\u{00FB}",
-    "uuml"   => "\u{00FC}",
-    "yacute" => "\u{00FD}",
-    "thorn"  => "\u{00FE}",
-    "yuml"   => "\u{00FF}",
-
-    // Greek
-    "Alpha"   => "\u{0391}",
-    "Beta"    => "\u{0392}",
-    "Gamma"   => "\u{0393}",
-    "Delta"   => "\u{0394}",
-    "Epsilon" => "\u{0395}",
-    "Zeta"    => "\u{0396}",
-    "Eta"     => "\u{0397}",
-    "Theta"   => "\u{0398}",
-    "Iota"    => "\u{0399}",
-    "Kappa"   => "\u{039A}",
-    "Lambda"  => "\u{039B}",
-    "Mu"      => "\u{039C}",
-    "Nu"      => "\u{039D}",
-    "Xi"      => "\u{039E}",
-    "Omicron" => "\u{039F}",
-    "Pi"      => "\u{03A0}",
-    "Rho"     => "\u{03A1}",
-    "Sigma"   => "\u{03A3}",
-    "Tau"     => "\u{03A4}",
-    "Upsilon" => "\u{03A5}",
-    "Phi"     => "\u{03A6}",
-    "Chi"     => "\u{03A7}",
-    "Psi"     => "\u{03A8}",
-    "Omega"   => "\u{03A9}",
-    "alpha"   => "\u{03B1}",
-    "beta"    => "\u{03B2}",
-    "gamma"   => "\u{03B3}",
-    "delta"   => "\u{03B4}",
-    "epsilon" => "\u{03B5}",
-    "zeta"    => "\u{03B6}",
-    "eta"     => "\u{03B7}",
-    "theta"   => "\u{03B8}",
-    "iota"    => "\u{03B9}",
-    "kappa"   => "\u{03BA}",
-    "lambda"  => "\u{03BB}",
-    "mu"      => "\u{03BC}",
-    "nu"      => "\u{03BD}",
-    "xi"      => "\u{03BE}",
-    "omicron" => "\u{03BF}",
-    "pi"      => "\u{03C0}",
-    "rho"     => "\u{03C1}",
-    "sigmaf"  => "\u{03C2}",
-    "sigma"   => "\u{03C3}",
-    "tau"     => "\u{03C4}",
-    "upsilon" => "\u{03C5}",
-    "phi"     => "\u{03C6}",
-    "chi"     => "\u{03C7}",
-    "psi"     => "\u{03C8}",
-    "omega"   => "\u{03C9}",
-
-    // Math / symbols
-    "bull"    => "\u{2022}",
-    "hellip"  => "\u{2026}",
-    "prime"   => "\u{2032}",
-    "Prime"   => "\u{2033}",
-    "oline"   => "\u{203E}",
-    "frasl"   => "\u{2044}",
-    "trade"   => "\u{2122}",
-    "larr"    => "\u{2190}",
-    "uarr"    => "\u{2191}",
-    "rarr"    => "\u{2192}",
-    "darr"    => "\u{2193}",
-    "harr"    => "\u{2194}",
-    "lArr"    => "\u{21D0}",
-    "uArr"    => "\u{21D1}",
-    "rArr"    => "\u{21D2}",
-    "dArr"    => "\u{21D3}",
-    "hArr"    => "\u{21D4}",
-    "forall"  => "\u{2200}",
-    "part"    => "\u{2202}",
-    "exist"   => "\u{2203}",
-    "empty"   => "\u{2205}",
-    "nabla"   => "\u{2207}",
-    "isin"    => "\u{2208}",
-    "notin"   => "\u{2209}",
-    "ni"      => "\u{220B}",
-    "prod"    => "\u{220F}",
-    "sum"     => "\u{2211}",
-    "minus"   => "\u{2212}",
-    "lowast"  => "\u{2217}",
-    "radic"   => "\u{221A}",
-    "prop"    => "\u{221D}",
-    "infin"   => "\u{221E}",
-    "ang"     => "\u{2220}",
-    "and"     => "\u{2227}",
-    "or"      => "\u{2228}",
-    "cap"     => "\u{2229}",
-    "cup"     => "\u{222A}",
-    "int"     => "\u{222B}",
-    "there4"  => "\u{2234}",
-    "sim"     => "\u{223C}",
-    "cong"    => "\u{2245}",
-    "asymp"   => "\u{2248}",
-    "ne"      => "\u{2260}",
-    "equiv"   => "\u{2261}",
-    "le"      => "\u{2264}",
-    "ge"      => "\u{2265}",
-    "sub"     => "\u{2282}",
-    "sup"     => "\u{2283}",
-    "nsub"    => "\u{2284}",
-    "sube"    => "\u{2286}",
-    "supe"    => "\u{2287}",
-    "oplus"   => "\u{2295}",
-    "otimes"  => "\u{2297}",
-    "perp"    => "\u{22A5}",
-    "sdot"    => "\u{22C5}",
-
-    // Punctuation / typography
-    "ensp"    => "\u{2002}",
-    "emsp"    => "\u{2003}",
-    "thinsp"  => "\u{2009}",
-    "zwnj"    => "\u{200C}",
-    "zwj"     => "\u{200D}",
-    "lrm"     => "\u{200E}",
-    "rlm"     => "\u{200F}",
-    "ndash"   => "\u{2013}",
-    "mdash"   => "\u{2014}",
-    "lsquo"   => "\u{2018}",
-    "rsquo"   => "\u{2019}",
-    "sbquo"   => "\u{201A}",
-    "ldquo"   => "\u{201C}",
-    "rdquo"   => "\u{201D}",
-    "bdquo"   => "\u{201E}",
-    "dagger"  => "\u{2020}",
-    "Dagger"  => "\u{2021}",
-    "permil"  => "\u{2030}",
-    "lsaquo"  => "\u{2039}",
-    "rsaquo"  => "\u{203A}",
-    "euro"    => "\u{20AC}",
-
-    // Miscellaneous
-    "OElig"   => "\u{0152}",
-    "oelig"   => "\u{0153}",
-    "Scaron"  => "\u{0160}",
-    "scaron"  => "\u{0161}",
-    "Yuml"    => "\u{0178}",
-    "circ"    => "\u{02C6}",
-    "tilde"   => "\u{02DC}",
-    "fnof"    => "\u{0192}",
-
-    // Card suits / misc symbols
-    "spades"  => "\u{2660}",
-    "clubs"   => "\u{2663}",
-    "hearts"  => "\u{2665}",
-    "diams"   => "\u{2666}",
-    "loz"     => "\u{25CA}",
-    "lceil"   => "\u{2308}",
-    "rceil"   => "\u{2309}",
-    "lfloor"  => "\u{230A}",
-    "rfloor"  => "\u{230B}",
-    "lang"    => "\u{2329}",
-    "rang"    => "\u{232A}",
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -447,6 +306,79 @@ mod tests {
     fn unknown_entity() {
         assert_eq!(decode_named("nonexistent"), None);
         assert_eq!(decode_named(""), None);
+    }
+
+    #[test]
+    fn complete_whatwg_entity_data_is_available() {
+        assert_eq!(NAMED_ENTITY_SOURCE_RECORD_COUNT, 2231);
+        assert_eq!(decode_named("CounterClockwiseContourIntegral"), Some("∳"));
+        assert_eq!(decode_named("NotEqualTilde"), Some("≂̸"));
+        assert_eq!(decode_named("Afr"), Some("𝔄"));
+    }
+
+    #[test]
+    fn every_generated_exact_entity_decodes() {
+        assert_eq!(
+            generated::EXACT_ENTITIES.len(),
+            generated::EXACT_ENTITY_COUNT
+        );
+        assert_eq!(
+            generated::EXACT_ENTITY_COUNT + generated::LEGACY_ENTITY_COUNT,
+            NAMED_ENTITY_SOURCE_RECORD_COUNT
+        );
+
+        for (name, expected) in generated::EXACT_ENTITIES.entries() {
+            assert_eq!(decode_named(name), Some(*expected), "exact entity {name}");
+
+            let input = format!("{name};");
+            let matched = longest_named_prefix(input.as_bytes()).unwrap();
+            assert_eq!(matched.value, *expected, "exact entity {name}");
+            assert_eq!(matched.name_len, name.len(), "exact entity {name}");
+            assert_eq!(
+                matched.allows_legacy_omission,
+                generated::LEGACY_ENTITY_NAMES.binary_search(name).is_ok(),
+                "exact entity {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_generated_legacy_entity_matches_without_semicolon() {
+        assert_eq!(
+            generated::LEGACY_ENTITY_NAMES.len(),
+            generated::LEGACY_ENTITY_COUNT
+        );
+
+        for name in generated::LEGACY_ENTITY_NAMES {
+            let expected = decode_named(name).unwrap();
+            let input = format!("{name}!");
+            let matched = longest_named_prefix(input.as_bytes()).unwrap();
+            assert_eq!(matched.value, expected, "legacy entity {name}");
+            assert_eq!(matched.name_len, name.len(), "legacy entity {name}");
+            assert!(matched.allows_legacy_omission, "legacy entity {name}");
+        }
+    }
+
+    #[test]
+    fn longest_prefix_reports_legacy_omission() {
+        let matched = longest_named_prefix(b"notin;").unwrap();
+        assert_eq!(matched.value, "∉");
+        assert_eq!(matched.name_len, 5);
+        assert!(!matched.allows_legacy_omission);
+
+        let matched = longest_named_prefix(b"notit;").unwrap();
+        assert_eq!(matched.value, "¬");
+        assert_eq!(matched.name_len, 3);
+        assert!(matched.allows_legacy_omission);
+
+        let matched = longest_named_prefix(b"notin").unwrap();
+        assert_eq!(matched.value, "¬");
+        assert_eq!(matched.name_len, 3);
+        assert!(matched.allows_legacy_omission);
+
+        let matched = longest_named_prefix(b"NotEqualTilde;").unwrap();
+        assert_eq!(matched.value, "≂̸");
+        assert!(!matched.allows_legacy_omission);
     }
 
     #[test]

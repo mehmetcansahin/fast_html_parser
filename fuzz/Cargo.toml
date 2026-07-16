@@ -1,0 +1,46 @@
+[package]
+name = "fast-html-parser-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.85"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+fhp-tokenizer = { path = "../crates/fhp-tokenizer", features = ["entity-decode", "simd"] }
+fhp-tree = { path = "../crates/fhp-tree", features = ["encoding", "entity-decode", "simd"] }
+fhp-selector = { path = "../crates/fhp-selector" }
+
+[[bin]]
+name = "tokenizer_equivalence"
+path = "fuzz_targets/tokenizer_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "tree_equivalence"
+path = "fuzz_targets/tree_equivalence.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "entity_decode"
+path = "fuzz_targets/entity_decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "selector"
+path = "fuzz_targets/selector.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

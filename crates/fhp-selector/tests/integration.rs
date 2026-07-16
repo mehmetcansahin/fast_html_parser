@@ -702,7 +702,7 @@ fn xpath_invalid_expr() {
     let doc = parse("<div>x</div>").unwrap();
     assert!(doc.xpath("").is_err());
     assert!(doc.xpath("bad").is_err());
-    assert!(doc.xpath("//foobar").is_err());
+    assert!(doc.xpath("//div[").is_err());
 }
 
 // ---------------------------------------------------------------

@@ -58,6 +58,7 @@
 //! |---|---|---|
 //! | `css-selector` | Yes | CSS selector engine |
 //! | `entity-decode` | Yes | HTML entity decoding |
+//! | `simd` | Yes | Runtime-dispatched SIMD tokenizer; disable for forced scalar execution |
 //! | `xpath` | No | XPath expression support |
 //! | `encoding` | Yes | Raw-byte and streaming parsing with encoding detection |
 //! | `async-tokio` | No | Async parsing via Tokio |
@@ -89,7 +90,10 @@ pub use fhp_tree::node::NodeId;
 #[cfg(feature = "encoding")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub mod streaming {
-    pub use fhp_tree::streaming::{EarlyStopParser, ParseStatus, StreamParser, parse_stream};
+    pub use fhp_tree::streaming::{
+        EarlyStopMatch, EarlyStopOutcome, EarlyStopParser, EarlyStopProgress, MatchCompleteness,
+        StreamParser, parse_stream, parse_stream_with_limit,
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -165,7 +169,6 @@ const DEFAULT_MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
 ///
 /// let parser = HtmlParser::builder()
 ///     .max_input_size(128 * 1024 * 1024)
-///     .fragment_mode(true)
 ///     .build();
 ///
 /// let doc = parser.parse_str("<p>fragment</p>").unwrap();
@@ -173,14 +176,12 @@ const DEFAULT_MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
 /// ```
 pub struct ParserBuilder {
     max_input_size: usize,
-    fragment_mode: bool,
 }
 
 impl Default for ParserBuilder {
     fn default() -> Self {
         Self {
             max_input_size: DEFAULT_MAX_INPUT_SIZE,
-            fragment_mode: false,
         }
     }
 }
@@ -195,21 +196,10 @@ impl ParserBuilder {
         self
     }
 
-    /// Enable fragment mode.
-    ///
-    /// In fragment mode the parser treats input as an HTML fragment rather
-    /// than a full document. Currently this behaves identically to normal
-    /// mode (the parser already handles fragments gracefully).
-    pub fn fragment_mode(mut self, enabled: bool) -> Self {
-        self.fragment_mode = enabled;
-        self
-    }
-
     /// Consume the builder and create a configured [`HtmlParser`].
     pub fn build(self) -> HtmlParser {
         HtmlParser {
             max_input_size: self.max_input_size,
-            _fragment_mode: self.fragment_mode,
         }
     }
 }
@@ -236,7 +226,6 @@ impl ParserBuilder {
 /// ```
 pub struct HtmlParser {
     max_input_size: usize,
-    _fragment_mode: bool,
 }
 
 impl HtmlParser {
@@ -418,13 +407,6 @@ mod tests {
             result,
             Err(HtmlError::InputTooLarge { size: 23, max: 10 })
         ));
-    }
-
-    #[test]
-    fn builder_fragment_mode() {
-        let parser = HtmlParser::builder().fragment_mode(true).build();
-        let doc = parser.parse_str("<li>item</li>").unwrap();
-        assert_eq!(doc.root().text_content(), "item");
     }
 
     #[test]
