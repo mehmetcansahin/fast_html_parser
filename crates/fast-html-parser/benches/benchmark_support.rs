@@ -6,8 +6,12 @@ use crate::contract_support::{
     intersect_selector_parity, selector_workload_contract,
 };
 use crate::contract_support::{FhpBenchOrder, FixtureContract, order_dom_parser_blocks};
+#[cfg(feature = "css-selector")]
+use criterion::SamplingMode;
 use criterion::measurement::WallTime;
 use criterion::{BatchSize, BenchmarkGroup, BenchmarkId, Criterion, Throughput};
+#[cfg(feature = "css-selector")]
+use std::time::Duration;
 
 type Group<'a> = BenchmarkGroup<'a, WallTime>;
 
@@ -63,15 +67,10 @@ fn register_parse_case(group: &mut Group<'_>, case: ParseCase, html: &str) {
             );
         }),
         ParseCase::FastHtmlParserLifecycle => group.bench_function(id, |b| {
-            b.iter_batched(
-                || (),
-                |_| {
-                    let doc =
-                        fast_html_parser::HtmlParser::parse(std::hint::black_box(html)).unwrap();
-                    drop(std::hint::black_box(doc));
-                },
-                BatchSize::LargeInput,
-            );
+            b.iter(|| {
+                let doc = fast_html_parser::HtmlParser::parse(std::hint::black_box(html)).unwrap();
+                drop(std::hint::black_box(doc));
+            });
         }),
         ParseCase::FastHtmlParserOwnedBuild => group.bench_function(id, |b| {
             b.iter_batched(
@@ -98,14 +97,10 @@ fn register_parse_case(group: &mut Group<'_>, case: ParseCase, html: &str) {
             );
         }),
         ParseCase::ScraperLifecycle => group.bench_function(id, |b| {
-            b.iter_batched(
-                || (),
-                |_| {
-                    let doc = scraper::Html::parse_document(std::hint::black_box(html));
-                    drop(std::hint::black_box(doc));
-                },
-                BatchSize::LargeInput,
-            );
+            b.iter(|| {
+                let doc = scraper::Html::parse_document(std::hint::black_box(html));
+                drop(std::hint::black_box(doc));
+            });
         }),
         ParseCase::TlBuild => group.bench_function(id, |b| {
             b.iter_batched(
@@ -115,15 +110,11 @@ fn register_parse_case(group: &mut Group<'_>, case: ParseCase, html: &str) {
             );
         }),
         ParseCase::TlLifecycle => group.bench_function(id, |b| {
-            b.iter_batched(
-                || (),
-                |_| {
-                    let dom = tl::parse(std::hint::black_box(html), tl::ParserOptions::default())
-                        .unwrap();
-                    drop(std::hint::black_box(dom));
-                },
-                BatchSize::LargeInput,
-            );
+            b.iter(|| {
+                let dom =
+                    tl::parse(std::hint::black_box(html), tl::ParserOptions::default()).unwrap();
+                drop(std::hint::black_box(dom));
+            });
         }),
         ParseCase::TlOwnedBuild => group.bench_function(id, |b| {
             b.iter_batched(
@@ -285,6 +276,8 @@ pub fn register_parse_groups(
                 "{suite}/{benchmark_fixture_id}/parse/contract_equal/{parity_id}"
             ));
             direct.throughput(Throughput::Bytes(html.len() as u64));
+            direct.sampling_mode(SamplingMode::Flat);
+            direct.measurement_time(Duration::from_secs(10));
             for case in direct_parse_cases(&implementations, order) {
                 register_parse_case(&mut direct, case, html);
             }

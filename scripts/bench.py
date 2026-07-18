@@ -64,6 +64,22 @@ CRITERION_DEFAULT_SETTINGS = {
     "confidence_level": EXPECTED_CONFIDENCE_LEVEL,
     "significance_level": 0.05,
     "noise_threshold": 0.01,
+    "overrides": {
+        "parse_contract_equal": {
+            "benchmark_group_pattern": "*/parse/contract_equal/*",
+            "sampling_mode": "flat",
+            "measurement_time_seconds": 10.0,
+        }
+    },
+}
+STABILITY_POLICY = {
+    "p95_p50_limit": P95_P50_LIMIT,
+    "p95_p50_aggregation": "maximum_across_rotations",
+    "far_outlier_limit": FAR_OUTLIER_LIMIT,
+    "far_outlier_aggregation": "sample_count_weighted_across_rotations",
+    "rotation_spread_limit": ROTATION_SPREAD_LIMIT,
+    "attempt_policy": "two_of_three_after_first_unstable_or_gate",
+    "attempt_id_policy": "exact_harness_rotation_benchmark_set",
 }
 BASELINE_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
 RESERVED_BASELINES = {"base", "change", "new", "report"}
@@ -184,6 +200,7 @@ class Estimate:
     criterion_median_ns: Optional[float] = None
     normalized_p50_ns: Optional[float] = None
     normalized_p95_ns: Optional[float] = None
+    normalized_sample_count: Optional[int] = None
     far_outlier_ratio: Optional[float] = None
     attempt: int = 1
 
@@ -229,6 +246,7 @@ class PublishedEstimate:
     criterion_median_ns: Optional[float] = None
     normalized_p50_ns: Optional[float] = None
     normalized_p95_ns: Optional[float] = None
+    normalized_sample_count: Optional[int] = None
     far_outlier_ratio: Optional[float] = None
     stable: bool = True
 
@@ -764,6 +782,7 @@ def capture_metadata(
             "cargo_incremental": CARGO_INCREMENTAL,
             "rustflags": RUSTFLAGS,
             "criterion": criterion_contract(root, scope),
+            "stability": dict(STABILITY_POLICY),
             "matrix": _matrix_metadata(matrix),
         },
     }
@@ -805,6 +824,7 @@ COMPATIBILITY_PATHS = (
     "build_contract.cargo_incremental",
     "build_contract.rustflags",
     "build_contract.criterion",
+    "build_contract.stability",
     "build_contract.matrix",
     "fixtures",
 )
@@ -1001,11 +1021,17 @@ def _percentile(values: Sequence[float], percentile: float) -> float:
 
 def _sample_statistics(
     estimate_path: Path, criterion_median: float
-) -> Tuple[float, float, float]:
+) -> Tuple[float, float, float, int]:
     sample_path = estimate_path.parent / "sample.json"
     tukey_path = estimate_path.parent / "tukey.json"
     if not sample_path.is_file():
-        return criterion_median, criterion_median, 0.0
+        raise BenchError(
+            f"missing Criterion sample data beside {estimate_path}: {sample_path}"
+        )
+    if not tukey_path.is_file():
+        raise BenchError(
+            f"missing Criterion Tukey data beside {estimate_path}: {tukey_path}"
+        )
     sample = _load_json_object(sample_path)
     iterations = sample.get("iters")
     times = sample.get("times")
@@ -1022,20 +1048,18 @@ def _sample_statistics(
         normalized.append(duration / count)
     p50 = _percentile(normalized, 0.50)
     p95 = _percentile(normalized, 0.95)
-    far_ratio = 0.0
-    if tukey_path.is_file():
-        try:
-            tukey = json.loads(tukey_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise BenchError(f"invalid Criterion Tukey data {tukey_path}: {error}") from error
-        if not isinstance(tukey, list) or len(tukey) != 4:
-            raise BenchError(f"Criterion Tukey data must have four fences: {tukey_path}")
-        low_far = _finite_number(tukey[0], tukey_path, "low far-outlier fence")
-        high_far = _finite_number(tukey[3], tukey_path, "high far-outlier fence")
-        far_ratio = sum(value < low_far or value > high_far for value in normalized) / len(
-            normalized
-        )
-    return p50, p95, far_ratio
+    try:
+        tukey = json.loads(tukey_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BenchError(f"invalid Criterion Tukey data {tukey_path}: {error}") from error
+    if not isinstance(tukey, list) or len(tukey) != 4:
+        raise BenchError(f"Criterion Tukey data must have four fences: {tukey_path}")
+    low_far = _finite_number(tukey[0], tukey_path, "low far-outlier fence")
+    high_far = _finite_number(tukey[3], tukey_path, "high far-outlier fence")
+    far_ratio = sum(value < low_far or value > high_far for value in normalized) / len(
+        normalized
+    )
+    return p50, p95, far_ratio, len(normalized)
 
 
 def _benchmark_identity(benchmark_path: Path) -> Tuple[str, Optional[str], Optional[float]]:
@@ -1069,7 +1093,7 @@ def parse_new_estimates(
             lower,
             upper,
         )
-        p50, p95, far_outlier_ratio = _sample_statistics(path, median)
+        p50, p95, far_outlier_ratio, sample_count = _sample_statistics(path, median)
         full_id, throughput_kind, throughput_value = _benchmark_identity(benchmark_path)
         estimates.append(
             Estimate(
@@ -1084,6 +1108,7 @@ def parse_new_estimates(
                 criterion_median_ns=median,
                 normalized_p50_ns=p50,
                 normalized_p95_ns=p95,
+                normalized_sample_count=sample_count,
                 far_outlier_ratio=far_outlier_ratio,
             )
         )
@@ -1116,6 +1141,7 @@ def parse_named_estimates(home: Path, harness: Harness, name: str) -> List[Estim
                 criterion_median_ns=median,
                 normalized_p50_ns=median,
                 normalized_p95_ns=median,
+                normalized_sample_count=None,
                 far_outlier_ratio=0.0,
             )
         )
@@ -1186,6 +1212,10 @@ def majority_gate_decisions(
 ) -> List[GateDecision]:
     """Select the median severity across three complete comparison attempts."""
 
+    _validate_attempt_id_sets(
+        [[decision.benchmark for decision in attempt] for attempt in attempts],
+        "gate decision",
+    )
     by_benchmark: Dict[str, List[GateDecision]] = {}
     for attempt in attempts:
         for decision in attempt:
@@ -1225,6 +1255,66 @@ def attempt_requires_rerun(
     )
 
 
+def _validate_attempt_id_sets(
+    attempts: Sequence[Sequence[str]], context: str
+) -> None:
+    if not attempts:
+        return
+    expected = set(attempts[0])
+    if len(expected) != len(attempts[0]):
+        raise BenchError(f"duplicate benchmark IDs in {context} attempt 1")
+    for attempt_number, attempt in enumerate(attempts[1:], start=2):
+        actual = set(attempt)
+        if len(actual) != len(attempt):
+            raise BenchError(
+                f"duplicate benchmark IDs in {context} attempt {attempt_number}"
+            )
+        missing = sorted(expected - actual)
+        extra = sorted(actual - expected)
+        if missing or extra:
+            details = []
+            if missing:
+                details.append(f"missing IDs: {', '.join(missing)}")
+            if extra:
+                details.append(f"extra IDs: {', '.join(extra)}")
+            raise BenchError(
+                f"{context} benchmark-ID drift: attempt {attempt_number} "
+                "differs from attempt 1; "
+                + "; ".join(details)
+            )
+
+
+def _validate_attempt_estimate_ids(
+    attempts: Sequence[Sequence[Estimate]], context: str
+) -> None:
+    _validate_attempt_id_sets(
+        [
+            [
+                f"{estimate.harness}|{estimate.rotation or '-'}|{estimate.benchmark}"
+                for estimate in attempt
+            ]
+            for attempt in attempts
+        ],
+        f"{context} estimate",
+    )
+
+
+def _pooled_far_outlier_ratio(runs: Sequence[Estimate], benchmark: str) -> float:
+    if any(
+        run.normalized_sample_count is None or run.far_outlier_ratio is None
+        for run in runs
+    ):
+        raise BenchError(
+            f"missing Criterion far-outlier sample statistics for {benchmark}"
+        )
+    sample_count = sum(run.normalized_sample_count for run in runs)
+    if sample_count <= 0:
+        raise BenchError(f"non-positive Criterion sample count for {benchmark}")
+    return sum(
+        run.far_outlier_ratio * run.normalized_sample_count for run in runs
+    ) / sample_count
+
+
 def assess_stability(estimates: Sequence[Estimate]) -> List[StabilityDecision]:
     grouped: Dict[str, List[Estimate]] = {}
     for estimate in estimates:
@@ -1232,14 +1322,27 @@ def assess_stability(estimates: Sequence[Estimate]) -> List[StabilityDecision]:
             grouped.setdefault(estimate.benchmark, []).append(estimate)
     decisions = []
     for benchmark, runs in sorted(grouped.items()):
-        p50_values = [
-            run.normalized_p50_ns or run.criterion_median_ns or run.mean_ns for run in runs
+        missing_metrics = [
+            label
+            for run in runs
+            for label, value in (
+                ("criterion median", run.criterion_median_ns),
+                ("normalized p50", run.normalized_p50_ns),
+                ("normalized p95", run.normalized_p95_ns),
+                ("normalized sample count", run.normalized_sample_count),
+                ("far-outlier ratio", run.far_outlier_ratio),
+            )
+            if value is None
         ]
-        p95_values = [
-            run.normalized_p95_ns or run.criterion_median_ns or run.mean_ns for run in runs
-        ]
-        median_values = [run.criterion_median_ns or run.mean_ns for run in runs]
-        far_ratio = max((run.far_outlier_ratio or 0.0) for run in runs)
+        if missing_metrics:
+            raise BenchError(
+                f"missing Criterion stability statistics for {benchmark}: "
+                f"{', '.join(sorted(set(missing_metrics)))}"
+            )
+        p50_values = [run.normalized_p50_ns for run in runs]
+        p95_values = [run.normalized_p95_ns for run in runs]
+        median_values = [run.criterion_median_ns for run in runs]
+        far_ratio = _pooled_far_outlier_ratio(runs, benchmark)
         p95_p50 = max(
             p95 / p50 if p50 > 0 else math.inf
             for p50, p95 in zip(p50_values, p95_values)
@@ -1273,6 +1376,10 @@ def assess_stability(estimates: Sequence[Estimate]) -> List[StabilityDecision]:
 def majority_stability(
     attempts: Sequence[Sequence[StabilityDecision]],
 ) -> List[StabilityDecision]:
+    _validate_attempt_id_sets(
+        [[decision.benchmark for decision in attempt] for attempt in attempts],
+        "stability attempt contract_equal",
+    )
     by_benchmark: Dict[str, List[StabilityDecision]] = {}
     for attempt in attempts:
         for decision in attempt:
@@ -1729,6 +1836,7 @@ def command_compare(root: Path, name: str, quick: bool = False) -> int:
         run_attempt(2)
         run_attempt(3)
 
+    _validate_attempt_estimate_ids(attempt_estimates, "comparison")
     assert_run_inputs_unchanged(root, current)
     decisions = majority_gate_decisions(attempt_decisions)
     stability = majority_stability(stability_attempts)
@@ -1820,7 +1928,10 @@ def aggregate_estimates(estimates: Sequence[Estimate]) -> List[PublishedEstimate
                 criterion_median_ns=statistics.median(medians),
                 normalized_p50_ns=statistics.median(p50_values),
                 normalized_p95_ns=statistics.median(p95_values),
-                far_outlier_ratio=max((run.far_outlier_ratio or 0.0) for run in runs),
+                normalized_sample_count=sum(
+                    run.normalized_sample_count or 0 for run in runs
+                ),
+                far_outlier_ratio=_pooled_far_outlier_ratio(runs, benchmark),
             )
         )
     return published
@@ -2106,6 +2217,7 @@ def generate_report_markdown(
     rustc = environment["rustc"]
     git = metadata["git"]
     criterion = metadata["build_contract"]["criterion"]
+    stability_policy = metadata["build_contract"]["stability"]
     fixture_lines = [
         "| Fixture | Kind | Bytes | SHA-256 | Known source | Capture date |",
         "|---|---|---:|---|---|---|",
@@ -2179,6 +2291,8 @@ def generate_report_markdown(
             f"| Criterion | `{criterion['version']}`; quick={str(criterion['quick_mode']).lower()} |",
             f"| Criterion settings | "
             f"`{_escape_markdown(json.dumps(criterion['settings'], sort_keys=True))}` |",
+            f"| Stability policy | "
+            f"`{_escape_markdown(json.dumps(stability_policy, sort_keys=True))}` |",
             "",
             "## Harness and feature matrix",
             "",
@@ -2349,6 +2463,7 @@ def command_publish(root: Path) -> int:
         run_attempt(2)
         run_attempt(3)
 
+    _validate_attempt_estimate_ids(attempt_estimates, "publish")
     assert_run_inputs_unchanged(root, metadata)
     stability = majority_stability(stability_attempts)
     estimates = [estimate for attempt in attempt_estimates for estimate in attempt]

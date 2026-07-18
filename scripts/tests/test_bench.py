@@ -1,4 +1,5 @@
 import copy
+import dataclasses
 import hashlib
 import json
 import sys
@@ -30,6 +31,21 @@ def estimate_document(point, lower, upper):
 def write_json(path, value):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value), encoding="utf-8")
+
+
+def write_sample_statistics(result, normalized):
+    write_json(
+        result / "sample.json",
+        {
+            "sampling_mode": "Linear",
+            "iters": [1] * len(normalized),
+            "times": normalized,
+        },
+    )
+    write_json(
+        result / "tukey.json",
+        [min(normalized) - 1, min(normalized), max(normalized), max(normalized) + 1],
+    )
 
 
 def write_fixture_repository(root, files):
@@ -110,6 +126,7 @@ def sample_metadata():
                 "quick_mode": False,
                 "settings": dict(bench.CRITERION_DEFAULT_SETTINGS),
             },
+            "stability": dict(bench.STABILITY_POLICY),
             "matrix": [
                 {
                     "id": "example/harness",
@@ -198,6 +215,7 @@ class StabilityAndCalibrationTests(unittest.TestCase):
         p50=None,
         p95=None,
         far=0.0,
+        sample_count=100,
     ):
         return bench.Estimate(
             benchmark=benchmark,
@@ -211,6 +229,7 @@ class StabilityAndCalibrationTests(unittest.TestCase):
             criterion_median_ns=median,
             normalized_p50_ns=p50 or median,
             normalized_p95_ns=p95 or median,
+            normalized_sample_count=sample_count,
             far_outlier_ratio=far,
         )
 
@@ -223,19 +242,84 @@ class StabilityAndCalibrationTests(unittest.TestCase):
         decision = bench.assess_stability(stable)[0]
         self.assertTrue(decision.stable)
 
-        noisy = list(stable)
-        noisy[0] = self.estimate(
+        one_noisy_rotation = list(stable)
+        one_noisy_rotation[0] = self.estimate(
             benchmark,
             100,
             rotation=bench.ORDER_ROTATIONS[0],
             p50=100,
-            p95=201,
+            p95=150,
             far=0.06,
         )
+        pooled = bench.assess_stability(one_noisy_rotation)[0]
+        self.assertTrue(pooled.stable)
+        self.assertAlmostEqual(pooled.far_outlier_ratio, 0.01)
+
+        noisy = [
+            self.estimate(
+                benchmark,
+                100 + index,
+                rotation=rotation,
+                p50=100,
+                p95=201,
+                far=0.06,
+            )
+            for index, rotation in enumerate(bench.ORDER_ROTATIONS)
+        ]
         unstable = bench.assess_stability(noisy)[0]
         self.assertFalse(unstable.stable)
         majority = bench.majority_stability([[unstable], [decision], [decision]])[0]
         self.assertTrue(majority.stable)
+
+    def test_stability_far_outliers_are_weighted_by_sample_count(self):
+        benchmark = "comparison/x/contract_equal/all/dom/build/fast_html_parser"
+        decision = bench.assess_stability(
+            [
+                self.estimate(benchmark, 100, far=0.10, sample_count=10),
+                self.estimate(benchmark, 100, far=0.00, sample_count=90),
+            ]
+        )[0]
+        self.assertTrue(decision.stable)
+        self.assertAlmostEqual(decision.far_outlier_ratio, 0.01)
+
+        exact_limit = bench.assess_stability(
+            [self.estimate(benchmark, 100, far=bench.FAR_OUTLIER_LIMIT)]
+        )[0]
+        self.assertTrue(exact_limit.stable)
+        self.assertEqual(exact_limit.far_outlier_ratio, bench.FAR_OUTLIER_LIMIT)
+
+    def test_stability_rejects_missing_criterion_statistics(self):
+        benchmark = "comparison/x/contract_equal/all/dom/build/fast_html_parser"
+        estimate = self.estimate(benchmark, 100, far=None)
+        with self.assertRaisesRegex(
+            bench.BenchError, "missing Criterion stability statistics"
+        ):
+            bench.assess_stability([estimate])
+
+    def test_stability_majority_rejects_attempt_id_drift(self):
+        expected_id = "comparison/x/contract_equal/all/dom/build/fast_html_parser"
+        extra_id = "comparison/y/contract_equal/all/dom/build/fast_html_parser"
+
+        def decision(benchmark):
+            return bench.StabilityDecision(
+                benchmark=benchmark,
+                stable=True,
+                p95_p50=1.1,
+                far_outlier_ratio=0.0,
+                rotation_spread=1.0,
+                reasons=(),
+            )
+
+        with self.assertRaisesRegex(bench.BenchError, "benchmark-ID drift") as error:
+            bench.majority_stability(
+                [
+                    [decision(expected_id)],
+                    [decision(extra_id)],
+                    [decision(expected_id)],
+                ]
+            )
+        self.assertIn(f"missing IDs: {expected_id}", str(error.exception))
+        self.assertIn(f"extra IDs: {extra_id}", str(error.exception))
 
     def test_calibration_detects_environment_drift(self):
         baseline = [self.estimate(benchmark, 100) for benchmark in bench.CALIBRATION_IDS]
@@ -254,6 +338,18 @@ class StabilityAndCalibrationTests(unittest.TestCase):
             [bench.GateDecision(change, "fail", "fail", 0.08, 0.06, 0.10)],
         ]
         self.assertEqual(bench.majority_gate_decisions(decisions)[0].level, "warn")
+
+    def test_gate_majority_rejects_attempt_id_drift(self):
+        expected = bench.GateDecision("regression/parser/build", "pass", "", 0, 0, 0)
+        extra = bench.GateDecision("regression/parser/other", "pass", "", 0, 0, 0)
+        with self.assertRaisesRegex(bench.BenchError, "gate decision benchmark-ID drift"):
+            bench.majority_gate_decisions([[expected], [extra], [expected]])
+
+    def test_full_attempt_estimate_identity_rejects_non_contract_drift(self):
+        first = self.estimate("diagnostic/parser/build", 100, rotation="rotation-a")
+        second = dataclasses.replace(first, benchmark="diagnostic/parser/other")
+        with self.assertRaisesRegex(bench.BenchError, "estimate benchmark-ID drift"):
+            bench._validate_attempt_estimate_ids([[first], [second]], "publish")
 
     def test_warn_fail_or_instability_repeats_the_full_attempt(self):
         change = "regression/parser/build"
@@ -333,6 +429,7 @@ class CriterionJsonTests(unittest.TestCase):
                         "throughput": {"Bytes": 2048},
                     },
                 )
+                write_sample_statistics(benchmark_root / "new", [mean, mean])
                 parsed.extend(bench.parse_new_estimates(home, harness, rotation))
 
             aggregated = bench.aggregate_estimates(parsed)
@@ -342,6 +439,8 @@ class CriterionJsonTests(unittest.TestCase):
             self.assertEqual(aggregated[0].upper_ns, 140.0)
             self.assertEqual(aggregated[0].run_count, 6)
             self.assertEqual(aggregated[0].rotations, bench.ORDER_ROTATIONS)
+            self.assertEqual(aggregated[0].normalized_sample_count, 12)
+            self.assertEqual(aggregated[0].far_outlier_ratio, 0.0)
 
     def test_normalized_percentiles_and_far_outliers_are_recorded(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -362,7 +461,61 @@ class CriterionJsonTests(unittest.TestCase):
             self.assertEqual(estimate.criterion_median_ns, 10.0)
             self.assertAlmostEqual(estimate.normalized_p50_ns, 11.5)
             self.assertGreater(estimate.normalized_p95_ns, 40.0)
+            self.assertEqual(estimate.normalized_sample_count, 4)
             self.assertEqual(estimate.far_outlier_ratio, 0.25)
+
+    def test_missing_sample_or_tukey_artifact_is_rejected(self):
+        for missing, message in (
+            ("sample.json", "missing Criterion sample data"),
+            ("tukey.json", "missing Criterion Tukey data"),
+        ):
+            with self.subTest(
+                missing=missing
+            ), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                result = home / "case" / "new"
+                write_json(
+                    result / "estimates.json", estimate_document(20.0, 18.0, 22.0)
+                )
+                write_json(result / "benchmark.json", {"full_id": "regression/case"})
+                if missing != "sample.json":
+                    write_json(
+                        result / "sample.json",
+                        {"sampling_mode": "Linear", "iters": [1], "times": [20]},
+                    )
+                if missing != "tukey.json":
+                    write_json(result / "tukey.json", [0, 10, 30, 40])
+
+                with self.assertRaisesRegex(bench.BenchError, message):
+                    bench.parse_new_estimates(
+                        home, bench.Harness("harness", "package", "bench")
+                    )
+
+    def test_malformed_sample_or_tukey_artifact_is_rejected(self):
+        for malformed, value, message in (
+            (
+                "sample.json",
+                {"iters": "invalid", "times": []},
+                "invalid Criterion sample arrays",
+            ),
+            ("tukey.json", {"not": "fences"}, "must have four fences"),
+        ):
+            with self.subTest(
+                malformed=malformed
+            ), tempfile.TemporaryDirectory() as temporary:
+                home = Path(temporary)
+                result = home / "case" / "new"
+                write_json(
+                    result / "estimates.json", estimate_document(20.0, 18.0, 22.0)
+                )
+                write_json(result / "benchmark.json", {"full_id": "regression/case"})
+                write_sample_statistics(result, [20.0, 21.0])
+                write_json(result / malformed, value)
+
+                with self.assertRaisesRegex(bench.BenchError, message):
+                    bench.parse_new_estimates(
+                        home, bench.Harness("harness", "package", "bench")
+                    )
 
 
 class CompatibilityTests(unittest.TestCase):
@@ -409,6 +562,9 @@ version = "0.5.1"
         current["build_contract"]["rustflags"] = "-C opt-level=2"
         current["build_contract"]["criterion"]["version"] = "0.6.0"
         current["build_contract"]["criterion"]["settings"]["sample_size"] = 200
+        current["build_contract"]["stability"]["far_outlier_aggregation"] = (
+            "maximum_across_rotations"
+        )
         current["build_contract"]["matrix"][0]["features"] = ["feature-b"]
         current["fixtures"][0]["sha256"] = "f" * 64
         errors = bench.compatibility_errors(baseline, current)
@@ -419,6 +575,7 @@ version = "0.5.1"
         self.assertIn("environment.cargo", joined)
         self.assertIn("build_contract.rustflags", joined)
         self.assertIn("build_contract.criterion", joined)
+        self.assertIn("build_contract.stability", joined)
         self.assertIn("build_contract.matrix", joined)
         self.assertIn("fixtures", joined)
 
@@ -648,6 +805,8 @@ class MarkdownTests(unittest.TestCase):
         self.assertIn("| Benchmark | Category | Correctness status |", report)
         self.assertIn("| Fixture | Kind | Bytes | SHA-256 | Known source | Capture date |", report)
         self.assertIn("Criterion settings", report)
+        self.assertIn("Stability policy", report)
+        self.assertIn("sample_count_weighted_across_rotations", report)
         self.assertEqual(report.count("Single-run rows show"), 1)
 
     def test_readme_summary_uses_compact_dom_and_equal_work_tables(self):
@@ -796,6 +955,21 @@ class MarkdownTests(unittest.TestCase):
 
 
 class MatrixAndCommandTests(unittest.TestCase):
+    def test_contract_equal_parse_override_is_recorded_in_metadata(self):
+        with mock.patch.object(
+            bench, "locked_package_version", return_value="0.5.1"
+        ):
+            criterion = bench.criterion_contract(Path("."), "full")
+        override = criterion["settings"]["overrides"]["parse_contract_equal"]
+        self.assertEqual(
+            override,
+            {
+                "benchmark_group_pattern": "*/parse/contract_equal/*",
+                "sampling_mode": "flat",
+                "measurement_time_seconds": 10.0,
+            },
+        )
+
     def test_production_matrix_enables_simd_explicitly(self):
         by_id = {harness.id: harness for harness in bench.FULL_MATRIX}
         self.assertEqual(by_id["fhp-simd/simd"].features, ("simd",))
