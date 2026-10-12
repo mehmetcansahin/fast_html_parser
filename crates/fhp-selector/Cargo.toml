@@ -12,10 +12,13 @@ keywords = ["css", "selector", "xpath", "html", "parser"]
 categories = ["parser-implementations", "web-programming"]
 exclude = ["benches/", "tests/"]
 
+[features]
+default = ["xpath"]
+xpath = []
+
 [dependencies]
 fhp-core = { version = "0.2.0", path = "../fhp-core" }
 fhp-tree = { version = "0.2.0", path = "../fhp-tree", default-features = false }
-thiserror = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -27,3 +30,4 @@ harness = false
 [[bench]]
 name = "xpath_bench"
 harness = false
+required-features = ["xpath"]

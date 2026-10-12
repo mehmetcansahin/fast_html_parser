@@ -137,7 +137,7 @@ FULL_MATRIX: Tuple[Harness, ...] = (
         ("encoding", "entity-decode", "simd"),
     ),
     Harness("fhp-selector/selector", "fhp-selector", "selector_bench"),
-    Harness("fhp-selector/xpath", "fhp-selector", "xpath_bench"),
+    Harness("fhp-selector/xpath", "fhp-selector", "xpath_bench", ("xpath",)),
     Harness(
         "fast-html-parser/e2e",
         "fast-html-parser",

@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! CSS selector and XPath engine for the SIMD-optimized HTML parser.
 //!
 //! Provides CSS selector parsing, XPath evaluation, and a convenience API
@@ -18,6 +19,7 @@
 //! # Quick Start — XPath
 //!
 //! ```
+//! # #[cfg(feature = "xpath")] {
 //! use fhp_tree::parse;
 //! use fhp_selector::Selectable;
 //! use fhp_selector::xpath::ast::XPathResult;
@@ -28,6 +30,7 @@
 //!     XPathResult::Strings(texts) => assert_eq!(texts[0], "Hello"),
 //!     _ => panic!("expected strings"),
 //! }
+//! # }
 //! ```
 //!
 //! # Supported CSS Selectors
@@ -60,20 +63,28 @@ pub mod bloom;
 pub mod matcher;
 /// CSS selector parser.
 pub mod parser;
+mod space;
 /// XPath expression support.
+#[cfg(feature = "xpath")]
+#[cfg_attr(docsrs, doc(cfg(feature = "xpath")))]
 pub mod xpath;
 
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 
-use fhp_core::error::{SelectorError, XPathError};
+use fhp_core::error::SelectorError;
+#[cfg(feature = "xpath")]
+use fhp_core::error::XPathError;
 use fhp_core::tag::Tag;
 use fhp_tree::node::{NodeFlags, NodeId};
+use fhp_tree::traverse::DepthFirst;
 use fhp_tree::{Document, NodeRef};
 
 use matcher::{select_all_list, select_first_list};
 use parser::parse_selector;
+use space::{contains_html_space_token, split_html_space};
+#[cfg(feature = "xpath")]
 use xpath::ast::{XPathExpr, XPathResult};
 
 #[inline]
@@ -324,6 +335,8 @@ impl<'a> Selection<'a> {
     /// `div`, and an axis like `//div` also yields the context `div` itself.
     /// This scoping is intentional so XPath composes with a prior selection;
     /// for a document-wide query, evaluate from the document root instead.
+    #[cfg(feature = "xpath")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "xpath")))]
     pub fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError> {
         let parsed = xpath::parser::parse_xpath(expr)?;
 
@@ -346,6 +359,19 @@ impl<'a> Selection<'a> {
                     .map(|id| self.doc.arena().text(id).to_owned())
                     .collect(),
             ));
+        }
+
+        if self.nodes.len() > 1 {
+            if let XPathExpr::PositionPredicate { tag, pos } = &parsed {
+                return Ok(XPathResult::Nodes(
+                    xpath::eval::find_descendants_by_tag_at_position_for_roots(
+                        self.doc.arena(),
+                        &self.nodes,
+                        tag,
+                        *pos,
+                    ),
+                ));
+            }
         }
 
         let mut all_nodes = Vec::new();
@@ -470,6 +496,7 @@ pub trait Selectable {
     /// # Example
     ///
     /// ```
+    /// # #[cfg(feature = "xpath")] {
     /// use fhp_tree::parse;
     /// use fhp_selector::Selectable;
     /// use fhp_selector::xpath::ast::XPathResult;
@@ -480,7 +507,10 @@ pub trait Selectable {
     ///     XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
     ///     _ => panic!("expected nodes"),
     /// }
+    /// # }
     /// ```
+    #[cfg(feature = "xpath")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "xpath")))]
     fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError>;
 }
 
@@ -513,8 +543,7 @@ impl Selectable for Document {
     fn find_by_tag(&self, tag: Tag) -> Selection<'_> {
         let arena = self.arena();
         let mut nodes = Vec::new();
-        for i in 0..arena.len() {
-            let id = NodeId(i as u32);
+        for id in DepthFirst::new(arena, self.root_id()) {
             let n = arena.get(id);
             if n.tag == tag && is_document_element(n) {
                 nodes.push(id);
@@ -525,8 +554,10 @@ impl Selectable for Document {
 
     fn find_by_id(&self, id: &str) -> Option<NodeRef<'_>> {
         let arena = self.arena();
-        for i in 0..arena.len() {
-            let node_id = NodeId(i as u32);
+        for node_id in DepthFirst::new(arena, self.root_id()) {
+            if !is_document_element(arena.get(node_id)) {
+                continue;
+            }
             let attrs = arena.attrs(node_id);
             for attr in attrs {
                 if arena.attr_name(attr).eq_ignore_ascii_case("id")
@@ -542,13 +573,15 @@ impl Selectable for Document {
     fn find_by_class(&self, class: &str) -> Selection<'_> {
         let arena = self.arena();
         let mut nodes = Vec::new();
-        for i in 0..arena.len() {
-            let id = NodeId(i as u32);
+        for id in DepthFirst::new(arena, self.root_id()) {
+            if !is_document_element(arena.get(id)) {
+                continue;
+            }
             let attrs = arena.attrs(id);
             for attr in attrs {
                 if arena.attr_name(attr).eq_ignore_ascii_case("class") {
                     if let Some(val) = arena.attr_value(attr) {
-                        if val.split_whitespace().any(|c| c == class) {
+                        if contains_html_space_token(val, class) {
                             nodes.push(id);
                             break;
                         }
@@ -562,8 +595,10 @@ impl Selectable for Document {
     fn find_by_attr(&self, name: &str, value: &str) -> Selection<'_> {
         let arena = self.arena();
         let mut nodes = Vec::new();
-        for i in 0..arena.len() {
-            let id = NodeId(i as u32);
+        for id in DepthFirst::new(arena, self.root_id()) {
+            if !is_document_element(arena.get(id)) {
+                continue;
+            }
             let attrs = arena.attrs(id);
             for attr in attrs {
                 if arena.attr_name(attr).eq_ignore_ascii_case(name)
@@ -577,6 +612,7 @@ impl Selectable for Document {
         Selection::new(self, nodes)
     }
 
+    #[cfg(feature = "xpath")]
     fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError> {
         let parsed = xpath::parser::parse_xpath(expr)?;
         Ok(xpath::eval::evaluate(&parsed, self.arena(), self.root_id()))
@@ -594,55 +630,23 @@ pub struct DocumentIndex<'a> {
 }
 
 impl<'a> DocumentIndex<'a> {
-    /// Build an index from a document by scanning all nodes in a single pass.
-    ///
-    /// If the arena has a pre-built tag index (constructed inline during tree
-    /// building), the tag map is copied directly — avoiding the tag scan.
+    /// Build an index from a document in one document-order traversal.
     pub fn build(doc: &'a Document) -> Self {
         let arena = doc.arena();
         let mut id_map = HashMap::with_capacity(arena.len() / 8);
         let mut class_map: HashMap<String, Vec<NodeId>> = HashMap::with_capacity(arena.len() / 4);
+        let mut tag_map: HashMap<Tag, Vec<NodeId>> = HashMap::with_capacity(64);
 
-        // Use pre-built tag index if available.
-        let tag_map = if let Some(pre_built) = arena.tag_index() {
-            let mut map = HashMap::with_capacity(64);
-            for (tag_u8, ids) in pre_built.iter().enumerate() {
-                let filtered_ids: Vec<_> = ids
-                    .iter()
-                    .copied()
-                    .filter(|&id| is_document_element(arena.get(id)))
-                    .collect();
-                if !filtered_ids.is_empty() {
-                    // SAFETY: Tag is repr(u8), but not all u8 values are valid.
-                    // We only insert entries that were created via new_element with
-                    // a valid Tag, so the cast is safe (values came from Tag as u8).
-                    let tag: Tag = unsafe { std::mem::transmute(tag_u8 as u8) };
-                    map.insert(tag, filtered_ids);
-                }
-            }
-            map
-        } else {
-            let mut map: HashMap<Tag, Vec<NodeId>> = HashMap::with_capacity(64);
-            for i in 0..arena.len() {
-                let node_id = NodeId(i as u32);
-                let n = arena.get(node_id);
-                if !is_document_element(n) {
-                    continue;
-                }
-                map.entry(n.tag).or_default().push(node_id);
-            }
-            map
-        };
-
-        // Build id and class maps — still requires attribute scan.
-        for i in 0..arena.len() {
-            let node_id = NodeId(i as u32);
+        // Arena allocation order is not necessarily DOM order: HTML foster
+        // parenting can move a later-allocated node before a table. Traverse
+        // tree links so every lookup has the same order as CSS selection.
+        for node_id in DepthFirst::new(arena, doc.root_id()) {
             let n = arena.get(node_id);
-
-            // Skip non-element nodes.
             if !is_document_element(n) {
                 continue;
             }
+
+            tag_map.entry(n.tag).or_default().push(node_id);
 
             let attrs = arena.attrs(node_id);
             for attr in attrs {
@@ -654,9 +658,11 @@ impl<'a> DocumentIndex<'a> {
                 }
                 if attr_name.eq_ignore_ascii_case("class") {
                     if let Some(val) = arena.attr_value(attr) {
-                        for class in val.split_whitespace() {
+                        for class in split_html_space(val) {
                             if let Some(ids) = class_map.get_mut(class) {
-                                ids.push(node_id);
+                                if ids.last().copied() != Some(node_id) {
+                                    ids.push(node_id);
+                                }
                             } else {
                                 class_map.insert(class.to_owned(), vec![node_id]);
                             }
@@ -864,6 +870,7 @@ mod tests {
         assert_eq!(texts, vec!["a", "b"]);
     }
 
+    #[cfg(feature = "xpath")]
     #[test]
     fn xpath_descendant() {
         let doc = parse("<div><p>Hello</p></div>").unwrap();
@@ -874,6 +881,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "xpath")]
     #[test]
     fn xpath_text_extract() {
         let doc = parse("<div><p>Hello</p></div>").unwrap();
@@ -887,6 +895,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "xpath")]
     #[test]
     fn xpath_invalid() {
         let doc = parse("<div>x</div>").unwrap();
@@ -894,6 +903,7 @@ mod tests {
         assert!(doc.xpath("bad").is_err());
     }
 
+    #[cfg(feature = "xpath")]
     #[test]
     fn selection_xpath_chaining() {
         let doc = parse("<ul><li>1</li><li>2</li></ul><ol><li>3</li></ol>").unwrap();

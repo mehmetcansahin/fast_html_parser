@@ -18,6 +18,7 @@ use crate::ast::{
     AttrOp, AttrSelector, Combinator, CompoundSelector, Selector, SelectorList, SimpleSelector,
 };
 use crate::bloom::{AncestorBloom, build_ancestor_blooms, hash_str, hash_tag};
+use crate::space::contains_html_space_token;
 
 // ---------------------------------------------------------------------------
 // Simple & compound matching
@@ -64,7 +65,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
                 arena.attr_name(a).eq_ignore_ascii_case("class")
                     && arena
                         .attr_value(a)
-                        .is_some_and(|v| contains_class_token(v, class_name))
+                        .is_some_and(|v| contains_html_space_token(v, class_name))
             })
         }
 
@@ -118,7 +119,7 @@ fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
             }
             AttrOp::Includes => {
                 if let Some(sel_val) = &sel.value {
-                    return contains_class_token(val, sel_val.as_str());
+                    return contains_html_space_token(val, sel_val.as_str());
                 }
             }
             AttrOp::StartsWith => {
@@ -138,39 +139,6 @@ fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
             }
         }
     }
-    false
-}
-
-/// Fast ASCII class-token matcher for `class="..."`.
-///
-/// CSS class lists are ASCII whitespace-separated in HTML practice; this avoids
-/// Unicode-aware `split_whitespace()` overhead in the hot path.
-#[inline]
-fn contains_class_token(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return false;
-    }
-    let h = haystack.as_bytes();
-    let n = needle.as_bytes();
-    let mut i = 0usize;
-
-    while i < h.len() {
-        while i < h.len() && h[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        if i >= h.len() {
-            break;
-        }
-        let start = i;
-        while i < h.len() && !h[i].is_ascii_whitespace() {
-            i += 1;
-        }
-        let len = i - start;
-        if len == n.len() && &h[start..i] == n {
-            return true;
-        }
-    }
-
     false
 }
 
@@ -1117,16 +1085,16 @@ mod tests {
 
     #[test]
     fn class_token_exact_word() {
-        assert!(contains_class_token("a b c", "b"));
-        assert!(!contains_class_token("a bc d", "b"));
-        assert!(!contains_class_token("abc", "b"));
+        assert!(contains_html_space_token("a b c", "b"));
+        assert!(!contains_html_space_token("a bc d", "b"));
+        assert!(!contains_html_space_token("abc", "b"));
     }
 
     #[test]
     fn class_token_ascii_whitespace() {
-        assert!(contains_class_token("a\tb\nc", "b"));
-        assert!(contains_class_token("  a   b  ", "a"));
-        assert!(!contains_class_token("  a   b  ", "c"));
+        assert!(contains_html_space_token("a\tb\nc", "b"));
+        assert!(contains_html_space_token("  a   b  ", "a"));
+        assert!(!contains_html_space_token("  a   b  ", "c"));
     }
 
     #[test]

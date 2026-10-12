@@ -16,9 +16,6 @@ exclude = ["benches/", "tests/"]
 default = ["simd"]
 simd = []
 
-[dependencies]
-fhp-core = { version = "0.2.0", path = "../fhp-core" }
-
 [dev-dependencies]
 criterion = { workspace = true }
 

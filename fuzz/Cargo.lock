@@ -59,7 +59,6 @@ version = "0.2.0"
 dependencies = [
  "encoding_rs",
  "fhp-core",
- "thiserror",
 ]
 
 [[package]]
@@ -68,15 +67,11 @@ version = "0.2.0"
 dependencies = [
  "fhp-core",
  "fhp-tree",
- "thiserror",
 ]
 
 [[package]]
 name = "fhp-simd"
 version = "0.2.0"
-dependencies = [
- "fhp-core",
-]
 
 [[package]]
 name = "fhp-tokenizer"
@@ -84,6 +79,7 @@ version = "0.2.0"
 dependencies = [
  "fhp-core",
  "fhp-simd",
+ "memchr",
 ]
 
 [[package]]

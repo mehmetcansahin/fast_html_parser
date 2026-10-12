@@ -2,6 +2,8 @@
 //!
 //! Walks the DOM tree and collects nodes or text matching an [`XPathExpr`](crate::xpath::ast::XPathExpr).
 
+use std::collections::{HashMap, HashSet};
+
 use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
 use fhp_tree::node::{NodeFlags, NodeId};
@@ -32,11 +34,7 @@ pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
         }
 
         XPathExpr::PositionPredicate { tag, pos } => {
-            let predicate = Predicate::Position(*pos);
-            let nodes = find_descendants_by_tag(arena, root, tag)
-                .into_iter()
-                .filter(|&node| matches_predicate(arena, node, &predicate))
-                .collect();
+            let nodes = find_descendants_by_tag_at_position(arena, root, tag, *pos);
             XPathResult::Nodes(nodes)
         }
 
@@ -136,22 +134,6 @@ fn matches_name_test(
     }
 }
 
-#[inline]
-fn same_element_name(arena: &Arena, left: NodeId, right: NodeId) -> bool {
-    let left_node = arena.get(left);
-    let right_node = arena.get(right);
-    if left_node.tag != right_node.tag {
-        return false;
-    }
-    if left_node.tag != Tag::Unknown {
-        return true;
-    }
-    match (arena.unknown_tag_name(left), arena.unknown_tag_name(right)) {
-        (Some(left_name), Some(right_name)) => left_name.eq_ignore_ascii_case(right_name),
-        _ => false,
-    }
-}
-
 /// Generic DFS: collect descendant nodes that satisfy `predicate`.
 fn dfs_collect(
     arena: &Arena,
@@ -183,6 +165,223 @@ fn find_descendants_by_tag(arena: &Arena, root: NodeId, tag: &NameTest) -> Vec<N
         &mut results,
     );
     results
+}
+
+/// Find the `pos`th matching element child under every parent in one DFS.
+///
+/// The context root is included for descendant-or-self semantics. Its position
+/// may depend on siblings outside the traversed subtree, so that one node is
+/// checked separately; every descendant position is then computed while its
+/// parent's children are visited once.
+fn find_descendants_by_tag_at_position(
+    arena: &Arena,
+    root: NodeId,
+    tag: &NameTest,
+    pos: usize,
+) -> Vec<NodeId> {
+    if root.is_null() || pos == 0 {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    let root_node = arena.get(root);
+    if is_element(root_node)
+        && matches_name_test(arena, root, root_node, tag)
+        && has_position_within_parent(arena, root, tag, pos)
+    {
+        results.push(root);
+    }
+
+    collect_positioned_descendants(arena, root, tag, pos, &mut results);
+    results
+}
+
+/// Find positioned descendants across document-ordered context roots.
+///
+/// A selection can contain many siblings, so checking every context root by
+/// rescanning its preceding siblings would be quadratic. Cache the positioned
+/// child for each parent and traverse overlapping context subtrees only once.
+pub(crate) fn find_descendants_by_tag_at_position_for_roots(
+    arena: &Arena,
+    roots: &[NodeId],
+    tag: &NameTest,
+    pos: usize,
+) -> Vec<NodeId> {
+    let mut position_cache = RootPositionCache::with_capacity(roots.len());
+    find_descendants_by_tag_at_position_for_roots_cached(
+        arena,
+        roots,
+        tag,
+        pos,
+        &mut position_cache,
+    )
+}
+
+fn find_descendants_by_tag_at_position_for_roots_cached(
+    arena: &Arena,
+    roots: &[NodeId],
+    tag: &NameTest,
+    pos: usize,
+    position_cache: &mut RootPositionCache,
+) -> Vec<NodeId> {
+    if pos == 0 {
+        return Vec::new();
+    }
+
+    let mut results = Vec::new();
+    let mut visited = HashSet::with_capacity(roots.len());
+
+    for &root in roots {
+        if root.is_null() || !visited.insert(root) {
+            continue;
+        }
+
+        let root_node = arena.get(root);
+        if is_element(root_node)
+            && matches_name_test(arena, root, root_node, tag)
+            && has_position_within_parent_cached(arena, root, tag, pos, position_cache)
+        {
+            results.push(root);
+        }
+
+        collect_positioned_descendants_once(arena, root, tag, pos, &mut results, &mut visited);
+    }
+
+    results
+}
+
+fn collect_positioned_descendants(
+    arena: &Arena,
+    parent: NodeId,
+    tag: &NameTest,
+    pos: usize,
+    results: &mut Vec<NodeId>,
+) {
+    let mut matching_position = 0usize;
+    let mut child = arena.get(parent).first_child;
+    while !child.is_null() {
+        let child_node = arena.get(child);
+        if is_element(child_node) && matches_name_test(arena, child, child_node, tag) {
+            matching_position += 1;
+            if matching_position == pos {
+                results.push(child);
+            }
+        }
+        collect_positioned_descendants(arena, child, tag, pos, results);
+        child = child_node.next_sibling;
+    }
+}
+
+fn collect_positioned_descendants_once(
+    arena: &Arena,
+    parent: NodeId,
+    tag: &NameTest,
+    pos: usize,
+    results: &mut Vec<NodeId>,
+    visited: &mut HashSet<NodeId>,
+) {
+    let mut matching_position = 0usize;
+    let mut child = arena.get(parent).first_child;
+    while !child.is_null() {
+        let child_node = arena.get(child);
+        let first_visit = visited.insert(child);
+        if is_element(child_node) && matches_name_test(arena, child, child_node, tag) {
+            matching_position += 1;
+            if first_visit && matching_position == pos {
+                results.push(child);
+            }
+        }
+        if first_visit {
+            collect_positioned_descendants_once(arena, child, tag, pos, results, visited);
+        }
+        child = child_node.next_sibling;
+    }
+}
+
+fn has_position_within_parent(
+    arena: &Arena,
+    node: NodeId,
+    tag: &NameTest,
+    expected: usize,
+) -> bool {
+    let parent = arena.get(node).parent;
+    if parent.is_null() {
+        return expected == 1;
+    }
+
+    nth_matching_child(arena, parent, tag, expected) == Some(node)
+}
+
+fn has_position_within_parent_cached(
+    arena: &Arena,
+    node: NodeId,
+    tag: &NameTest,
+    expected: usize,
+    position_cache: &mut RootPositionCache,
+) -> bool {
+    let parent = arena.get(node).parent;
+    if parent.is_null() {
+        return expected == 1;
+    }
+
+    position_cache.positioned_child(arena, parent, tag, expected) == Some(node)
+}
+
+struct RootPositionCache {
+    positioned_children: HashMap<NodeId, Option<NodeId>>,
+    #[cfg(test)]
+    parent_scans: usize,
+}
+
+impl RootPositionCache {
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            positioned_children: HashMap::with_capacity(capacity),
+            #[cfg(test)]
+            parent_scans: 0,
+        }
+    }
+
+    fn positioned_child(
+        &mut self,
+        arena: &Arena,
+        parent: NodeId,
+        tag: &NameTest,
+        expected: usize,
+    ) -> Option<NodeId> {
+        if let Some(&positioned) = self.positioned_children.get(&parent) {
+            return positioned;
+        }
+
+        #[cfg(test)]
+        {
+            self.parent_scans += 1;
+        }
+        let positioned = nth_matching_child(arena, parent, tag, expected);
+        self.positioned_children.insert(parent, positioned);
+        positioned
+    }
+}
+
+fn nth_matching_child(
+    arena: &Arena,
+    parent: NodeId,
+    tag: &NameTest,
+    expected: usize,
+) -> Option<NodeId> {
+    let mut position = 0usize;
+    let mut sibling = arena.get(parent).first_child;
+    while !sibling.is_null() {
+        let sibling_node = arena.get(sibling);
+        if is_element(sibling_node) && matches_name_test(arena, sibling, sibling_node, tag) {
+            position += 1;
+            if position == expected {
+                return Some(sibling);
+            }
+        }
+        sibling = sibling_node.next_sibling;
+    }
+    None
 }
 
 /// DFS: find descendants by tag with exact attribute match (single pass).
@@ -319,13 +518,25 @@ fn evaluate_absolute_path(arena: &Arena, root: NodeId, steps: &[PathStep]) -> Ve
 
     for (i, step) in steps.iter().enumerate() {
         next.clear();
+        let mut position_parent = NodeId::NULL;
+        let mut position = 0usize;
         for &node_id in &current {
             let n = arena.get(node_id);
             if !is_element(n) || !matches_name_test(arena, node_id, n, &step.tag) {
                 continue;
             }
+
+            // `current` contains each parent's children contiguously in DOM
+            // order, so the position among nodes matching this step's name can
+            // be maintained without rescanning preceding siblings.
+            if n.parent == position_parent {
+                position += 1;
+            } else {
+                position_parent = n.parent;
+                position = 1;
+            }
             if let Some(ref pred) = step.predicate {
-                if !matches_predicate(arena, node_id, pred) {
+                if !matches_predicate(arena, node_id, pred, position) {
                     continue;
                 }
             }
@@ -365,7 +576,7 @@ fn collect_element_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) 
 }
 
 /// Check if a node matches a predicate.
-fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
+fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate, position: usize) -> bool {
     match pred {
         Predicate::AttrEquals { attr, value } => arena.attrs(node).iter().any(|a| {
             arena.attr_name(a).eq_ignore_ascii_case(attr)
@@ -377,27 +588,7 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate) -> bool {
                 && arena.attr_value(a).unwrap_or("").contains(substr.as_str())
         }),
 
-        Predicate::Position(pos) => {
-            // 1-based position among siblings of same type.
-            let n = arena.get(node);
-            if n.parent.is_null() {
-                return *pos == 1;
-            }
-            let parent = arena.get(n.parent);
-            let mut child = parent.first_child;
-            let mut idx = 0usize;
-            while !child.is_null() {
-                let c = arena.get(child);
-                if is_element(c) && same_element_name(arena, child, node) {
-                    idx += 1;
-                    if child == node {
-                        return idx == *pos;
-                    }
-                }
-                child = c.next_sibling;
-            }
-            false
-        }
+        Predicate::Position(pos) => position == *pos,
 
         Predicate::AttrExists { attr } => arena
             .attrs(node)
@@ -488,6 +679,32 @@ mod tests {
             XPathResult::Nodes(nodes) => assert_eq!(nodes.len(), 1),
             _ => panic!("expected Nodes"),
         }
+    }
+
+    #[test]
+    fn positioned_selection_roots_scan_their_shared_parent_once() {
+        const WIDTH: usize = 1_024;
+        let mut html = String::with_capacity(WIDTH * 9 + 16);
+        html.push_str("<ul>");
+        for _ in 0..WIDTH {
+            html.push_str("<li></li>");
+        }
+        html.push_str("</ul>");
+
+        let doc = fhp_tree::parse(&html).unwrap();
+        let tag = NameTest::Interned(Tag::Li);
+        let roots = find_descendants_by_tag(doc.arena(), doc.root_id(), &tag);
+        let mut position_cache = RootPositionCache::with_capacity(roots.len());
+        let nodes = find_descendants_by_tag_at_position_for_roots_cached(
+            doc.arena(),
+            &roots,
+            &tag,
+            WIDTH,
+            &mut position_cache,
+        );
+
+        assert_eq!(nodes, vec![roots[WIDTH - 1]]);
+        assert_eq!(position_cache.parent_scans, 1);
     }
 
     #[test]

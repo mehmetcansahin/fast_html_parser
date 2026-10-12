@@ -12,6 +12,8 @@ use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
 use fhp_tree::node::{NodeFlags, NodeId};
 
+use crate::space::split_html_space;
+
 /// 256-bit bloom filter, stack-allocated.
 ///
 /// Uses 4 `u64` words (256 bits total). False-positive rate is low
@@ -122,7 +124,7 @@ fn build_recursive(
             // stay case-sensitive, matching CSS semantics).
             if name.eq_ignore_ascii_case("class") {
                 if let Some(val) = arena.attr_value(attr) {
-                    for class in val.split_whitespace() {
+                    for class in split_html_space(val) {
                         child_bloom.insert(hash_str(class));
                     }
                 }

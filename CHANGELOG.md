@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserve Rust 1.85 support for multi-root positioned XPath evaluation.
+- Bound oversized raw-text/RCDATA closing-tag candidates without accumulating
+  their discarded source; preserve the original tag name and quote state.
+- Preserve raw-text character references at EOF in unfinished closing-tag
+  candidates across one-shot, callback, streaming, and early-stop parsing.
+
 ## [0.2.0] - 2026-07-16
 
 ### Added

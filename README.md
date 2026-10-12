@@ -81,6 +81,13 @@ assert_eq!(doc.root().text_content(), "Hello");
 
 ### XPath
 
+XPath is opt-in. Enable the `xpath` feature in your dependency:
+
+```toml
+[dependencies]
+fast-html-parser = { version = "0.2.0", features = ["xpath"] }
+```
+
 ```rust
 use fast_html_parser::prelude::*;
 

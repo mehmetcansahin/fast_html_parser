@@ -1,3 +1,5 @@
+#![cfg(feature = "xpath")]
+
 use fhp_selector::Selectable;
 use fhp_selector::xpath::ast::XPathResult;
 use fhp_tree::parse;

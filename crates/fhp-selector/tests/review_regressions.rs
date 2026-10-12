@@ -1,3 +1,5 @@
+use fhp_core::tag::Tag;
+#[cfg(feature = "xpath")]
 use fhp_selector::xpath::ast::XPathResult;
 use fhp_selector::{DocumentIndex, Selectable};
 use fhp_tree::parse;
@@ -20,6 +22,7 @@ fn selector_lists_return_matches_in_document_order() {
     );
 }
 
+#[cfg(feature = "xpath")]
 #[test]
 fn xpath_descendant_position_is_relative_to_each_parent() {
     let doc = parse(
@@ -39,6 +42,7 @@ fn xpath_descendant_position_is_relative_to_each_parent() {
     assert_eq!(texts, ["a2", "b2"]);
 }
 
+#[cfg(feature = "xpath")]
 #[test]
 fn selection_xpath_deduplicates_overlapping_text_nodes() {
     let doc = parse("<div><p>same</p></div>").unwrap();
@@ -50,6 +54,7 @@ fn selection_xpath_deduplicates_overlapping_text_nodes() {
     );
 }
 
+#[cfg(feature = "xpath")]
 #[test]
 fn selection_xpath_preserves_empty_string_result_variant() {
     let doc = parse("<p>text</p>").unwrap();
@@ -75,6 +80,7 @@ fn nth_child_above_u16_max_uses_the_actual_sibling_index() {
     assert_eq!(doc.select("i:nth-child(65536)").unwrap().len(), 1);
 }
 
+#[cfg(feature = "xpath")]
 #[test]
 fn xpath_text_selects_only_direct_child_text_nodes() {
     let doc = parse("<p>outer <b>nested</b> tail</p>").unwrap();
@@ -94,6 +100,7 @@ fn empty_css_substring_operands_never_match() {
     assert!(doc.select("[data-x*='']").unwrap().is_empty());
 }
 
+#[cfg(feature = "xpath")]
 #[test]
 fn valueless_attributes_have_an_empty_string_value_for_queries() {
     let doc = parse("<input disabled>").unwrap();
@@ -150,4 +157,200 @@ fn document_index_keeps_the_first_element_for_duplicate_ids() {
         index.find_by_id(&doc, "dup").unwrap().text_content(),
         "first"
     );
+}
+
+#[test]
+fn document_index_deduplicates_repeated_class_tokens_per_element() {
+    let doc = parse(
+        "<div id='first' class='target other target target'></div>\
+         <span id='second' class='target'></span>",
+    )
+    .unwrap();
+    let index = DocumentIndex::build(&doc);
+
+    let indexed_ids: Vec<_> = index
+        .find_by_class(&doc, "target")
+        .into_iter()
+        .map(|node| node.attr("id").unwrap())
+        .collect();
+    assert_eq!(indexed_ids, ["first", "second"]);
+    assert_eq!(indexed_ids.len(), doc.find_by_class("target").len());
+}
+
+#[test]
+fn convenience_queries_and_index_follow_foster_parented_dom_order() {
+    let doc = parse(
+        "<table>\
+           <tr><td><div id='dup' class='ordered' data-order='inside'>second</div></td></tr>\
+           <div id='dup' class='ordered' data-order='fostered'>first</div>\
+         </table>",
+    )
+    .unwrap();
+
+    let expected = ["fostered", "inside"];
+    let selected: Vec<_> = doc
+        .select("[data-order]")
+        .unwrap()
+        .iter()
+        .map(|node| node.attr("data-order").unwrap())
+        .collect();
+    assert_eq!(selected, expected);
+
+    assert_eq!(
+        doc.find_by_id("dup").unwrap().attr("data-order"),
+        Some("fostered")
+    );
+    assert_eq!(
+        doc.find_by_class("ordered")
+            .iter()
+            .map(|node| node.attr("data-order").unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        doc.find_by_attr("class", "ordered")
+            .iter()
+            .map(|node| node.attr("data-order").unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        doc.find_by_tag(Tag::Div)
+            .iter()
+            .map(|node| node.attr("data-order").unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+
+    let index = DocumentIndex::build(&doc);
+    assert_eq!(
+        index.find_by_id(&doc, "dup").unwrap().attr("data-order"),
+        Some("fostered")
+    );
+    assert_eq!(
+        index
+            .find_by_class(&doc, "ordered")
+            .into_iter()
+            .map(|node| node.attr("data-order").unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+    assert_eq!(
+        index
+            .find_by_tag(&doc, Tag::Div)
+            .into_iter()
+            .map(|node| node.attr("data-order").unwrap())
+            .collect::<Vec<_>>(),
+        expected
+    );
+}
+
+#[test]
+fn class_queries_use_html_space_characters_consistently() {
+    let em_space_token = "alpha\u{2003}beta";
+    let vertical_tab_token = "gamma\u{000b}delta";
+    let html = format!(
+        "<div id='em' class='{em_space_token}'></div>\
+         <div id='vt' class='{vertical_tab_token}'></div>\
+         <div id='spaces' class='one\ttwo\nthree\u{000c}four\rfive'></div>"
+    );
+    let doc = parse(&html).unwrap();
+    let index = DocumentIndex::build(&doc);
+
+    assert!(doc.select(".alpha").unwrap().is_empty());
+    assert!(doc.select("[class~='alpha']").unwrap().is_empty());
+    assert_eq!(doc.select("[class~='alpha\u{2003}beta']").unwrap().len(), 1);
+    assert_eq!(doc.find_by_class(em_space_token).len(), 1);
+    assert_eq!(index.find_by_class(&doc, em_space_token).len(), 1);
+    let em = doc.find_by_id("em").unwrap();
+    assert!(em.has_class(em_space_token));
+    assert!(!em.has_class("alpha"));
+
+    assert!(doc.select("[class~='gamma']").unwrap().is_empty());
+    assert_eq!(
+        doc.select("[class~='gamma\u{000b}delta']").unwrap().len(),
+        1
+    );
+    assert_eq!(doc.find_by_class(vertical_tab_token).len(), 1);
+    assert_eq!(index.find_by_class(&doc, vertical_tab_token).len(), 1);
+    let vt = doc.find_by_id("vt").unwrap();
+    assert!(vt.has_class(vertical_tab_token));
+    assert!(!vt.has_class("gamma"));
+
+    for class in ["one", "two", "three", "four", "five"] {
+        assert_eq!(doc.select(&format!(".{class}")).unwrap().len(), 1);
+        assert_eq!(doc.find_by_class(class).len(), 1);
+        assert_eq!(index.find_by_class(&doc, class).len(), 1);
+    }
+}
+
+#[cfg(feature = "xpath")]
+#[test]
+fn xpath_positions_scale_across_wide_sibling_sets() {
+    const WIDTH: usize = 8_192;
+    let mut html = String::with_capacity(WIDTH * 10 + 32);
+    html.push_str("<html><body><ul>");
+    for index in 1..=WIDTH {
+        html.push_str("<li>");
+        html.push_str(&index.to_string());
+        html.push_str("</li>");
+    }
+    html.push_str("</ul></body></html>");
+
+    let doc = parse(&html).unwrap();
+    for expression in ["//li[8192]", "/html/body/ul/li[8192]"] {
+        let XPathResult::Nodes(nodes) = doc.xpath(expression).unwrap() else {
+            panic!("expected node result");
+        };
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(doc.get(nodes[0]).text_content(), WIDTH.to_string());
+    }
+}
+
+#[cfg(feature = "xpath")]
+#[test]
+fn selection_xpath_positions_scale_across_wide_sibling_roots() {
+    const WIDTH: usize = 8_192;
+    let mut html = String::with_capacity(WIDTH * 10 + 32);
+    html.push_str("<ul>");
+    for index in 1..=WIDTH {
+        html.push_str("<li>");
+        html.push_str(&index.to_string());
+        html.push_str("</li>");
+    }
+    html.push_str("</ul>");
+
+    let doc = parse(&html).unwrap();
+    let roots = doc.select("li").unwrap();
+    let XPathResult::Nodes(nodes) = roots.xpath("//li[8192]").unwrap() else {
+        panic!("expected node result");
+    };
+
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(doc.get(nodes[0]).text_content(), WIDTH.to_string());
+}
+
+#[cfg(feature = "xpath")]
+#[test]
+fn selection_xpath_positions_preserve_overlapping_root_semantics() {
+    let doc = parse(
+        "<div id='outer'>\
+           <div id='first'><div id='nested'></div></div>\
+           <div id='second'></div>\
+         </div>",
+    )
+    .unwrap();
+    let roots = doc.select("div").unwrap();
+
+    let XPathResult::Nodes(nodes) = roots.xpath("//div[1]").unwrap() else {
+        panic!("expected node result");
+    };
+    let ids: Vec<_> = nodes
+        .into_iter()
+        .map(|node| doc.get(node).attr("id").unwrap())
+        .collect();
+
+    // Descendant-or-self includes `outer`; nested selection roots do not
+    // duplicate `first` or `nested`, and results remain in document order.
+    assert_eq!(ids, ["outer", "first", "nested"]);
 }
