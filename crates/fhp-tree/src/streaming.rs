@@ -112,6 +112,14 @@ struct DecoderState {
     max_input_size: usize,
 }
 
+/// Strictly decoded text up to (but not including) the first malformed
+/// sequence. Early-stop parsing gets a chance to observe a match in `text`
+/// before the trailing decoding error is surfaced.
+struct DecodedPrefix {
+    text: String,
+    error: Option<EncodingError>,
+}
+
 impl DecoderState {
     fn detect(sample: &[u8], max_input_size: usize) -> (Self, usize) {
         let encoding = fhp_encoding::detect(sample);
@@ -174,6 +182,57 @@ impl DecoderState {
         }
         self.decoded_size = decoded_size;
         Ok(output)
+    }
+
+    /// Decode without replacement, retaining valid output before the first
+    /// malformed sequence. Unlike [`Self::decode`], decoded-size accounting is
+    /// committed by the caller after it has checked for an early match.
+    fn decode_prefix(&mut self, bytes: &[u8], last: bool) -> DecodedPrefix {
+        let max_len = self
+            .decoder
+            .max_utf8_buffer_length_without_replacement(bytes.len())
+            .unwrap_or_else(|| bytes.len().saturating_mul(4).saturating_add(4));
+        let mut output = String::with_capacity(max_len);
+        let mut pos = 0;
+
+        loop {
+            let (result, read) =
+                self.decoder
+                    .decode_to_string_without_replacement(&bytes[pos..], &mut output, last);
+            pos += read;
+            match result {
+                encoding_rs::DecoderResult::InputEmpty => {
+                    self.raw_offset = self.raw_offset.saturating_add(bytes.len());
+                    return DecodedPrefix {
+                        text: output,
+                        error: None,
+                    };
+                }
+                encoding_rs::DecoderResult::OutputFull => {
+                    let additional = self
+                        .decoder
+                        .max_utf8_buffer_length_without_replacement(bytes.len().saturating_sub(pos))
+                        .unwrap_or(16);
+                    output.reserve(additional.max(1));
+                }
+                encoding_rs::DecoderResult::Malformed(malformed_len, trailing_len) => {
+                    let malformed_before =
+                        usize::from(malformed_len).saturating_add(usize::from(trailing_len));
+                    let offset = self
+                        .raw_offset
+                        .saturating_add(pos)
+                        .saturating_sub(malformed_before);
+                    self.raw_offset = self.raw_offset.saturating_add(pos);
+                    return DecodedPrefix {
+                        text: output,
+                        error: Some(EncodingError::MalformedInput {
+                            encoding: self.encoding.name(),
+                            offset,
+                        }),
+                    };
+                }
+            }
+        }
     }
 }
 
@@ -343,6 +402,10 @@ pub struct EarlyStopParser {
     tokenizer: StreamTokenizer,
     builder: TreeBuilder,
     decoder: Option<DecoderState>,
+    initial_buf: Vec<u8>,
+    /// ASCII bytes from `initial_buf` already fed to the tokenizer before the
+    /// encoding decision. The selected decoder is later primed over them.
+    prescan_processed_ascii: usize,
     predicate: Box<NodePredicate>,
     mode: EarlyStopMode,
     pending_match: Option<NodeId>,
@@ -368,6 +431,8 @@ impl EarlyStopParser {
             tokenizer: StreamTokenizer::new(),
             builder: TreeBuilder::new(),
             decoder: None,
+            initial_buf: Vec::with_capacity(PRESCAN_LIMIT),
+            prescan_processed_ascii: 0,
             predicate: Box::new(predicate),
             mode,
             pending_match: None,
@@ -386,9 +451,9 @@ impl EarlyStopParser {
 
     /// Feed bytes and report whether a match is ready.
     ///
-    /// Encoding detection is intentionally eager: at most the first 1 KiB of
-    /// the first non-empty chunk is inspected so early termination is not
-    /// delayed until the prescan window fills.
+    /// Encoding detection uses the same first-1-KiB prescan regardless of how
+    /// callers divide the byte stream. Encoding-independent ASCII prefixes are
+    /// still processed eagerly so common tag predicates can stop immediately.
     pub fn feed(&mut self, chunk: &[u8]) -> Result<EarlyStopProgress, HtmlError> {
         if self.terminal {
             return Err(HtmlError::ParserTerminated);
@@ -401,44 +466,195 @@ impl EarlyStopParser {
         }
 
         let seen_input_size = self.seen_input_size.saturating_add(chunk.len());
-        if seen_input_size > self.max_input_size {
-            self.seen_input_size = seen_input_size;
-            self.terminal = true;
-            return Err(HtmlError::InputTooLarge {
-                size: seen_input_size,
-                max: self.max_input_size,
-            });
-        }
-        self.seen_input_size = seen_input_size;
+        let remaining = self.max_input_size.saturating_sub(self.seen_input_size);
+        let consumed = chunk.len().min(remaining);
+        let result = if consumed == 0 {
+            Ok(EarlyStopProgress::NeedMore)
+        } else {
+            self.feed_active(&chunk[..consumed])
+        };
 
-        let result = self.feed_active(chunk);
-        if result.is_err() {
-            self.terminal = true;
+        match result {
+            Ok(EarlyStopProgress::Matched) => {
+                // The unconsumed suffix is outside the early-stop result. In
+                // particular, it cannot trigger raw-size or decoding errors.
+                self.seen_input_size = self.seen_input_size.saturating_add(consumed);
+                Ok(EarlyStopProgress::Matched)
+            }
+            Ok(EarlyStopProgress::NeedMore) if consumed < chunk.len() => {
+                self.seen_input_size = seen_input_size;
+                self.terminal = true;
+                Err(HtmlError::InputTooLarge {
+                    size: seen_input_size,
+                    max: self.max_input_size,
+                })
+            }
+            Ok(EarlyStopProgress::NeedMore) => {
+                self.seen_input_size = seen_input_size;
+                Ok(EarlyStopProgress::NeedMore)
+            }
+            Err(error) => {
+                self.seen_input_size = self.seen_input_size.saturating_add(consumed);
+                self.terminal = true;
+                Err(error)
+            }
         }
-        result
     }
 
-    fn feed_active(&mut self, chunk: &[u8]) -> Result<EarlyStopProgress, HtmlError> {
-        let mut input = chunk;
+    fn feed_active(&mut self, mut chunk: &[u8]) -> Result<EarlyStopProgress, HtmlError> {
         if self.decoder.is_none() {
-            let sample = &chunk[..chunk.len().min(PRESCAN_LIMIT)];
-            let (decoder, bom_len) = DecoderState::detect(sample, self.max_input_size);
-            self.decoder = Some(decoder);
-            input = &chunk[bom_len.min(chunk.len())..];
+            let needed = PRESCAN_LIMIT.saturating_sub(self.initial_buf.len());
+            let take = needed.min(chunk.len());
+            self.initial_buf.extend_from_slice(&chunk[..take]);
+            chunk = &chunk[take..];
+
+            if explicit_bom_length(&self.initial_buf).is_some() {
+                self.flush_initial_buf()?;
+                if self.found.is_some() {
+                    return Ok(EarlyStopProgress::Matched);
+                }
+            }
+
+            if self.decoder.is_none() {
+                self.process_prescan_ascii()?;
+                if self.found.is_some() {
+                    // A replacement encoding reports malformed input from byte
+                    // zero, so even an ASCII node cannot be returned before the
+                    // consumed prefix has been validated by the selected decoder.
+                    // Do not decode bytes after the match: early-stop intentionally
+                    // leaves that suffix unobserved.
+                    self.validate_prescan_match()?;
+                    return Ok(EarlyStopProgress::Matched);
+                }
+                if self.initial_buf.len() < PRESCAN_LIMIT {
+                    return Ok(EarlyStopProgress::NeedMore);
+                }
+                self.flush_initial_buf()?;
+                if self.found.is_some() {
+                    return Ok(EarlyStopProgress::Matched);
+                }
+            }
+            // A BOM is an immediate, authoritative encoding decision. Once
+            // initialized, continue below with bytes beyond the initial buffer.
         }
 
-        for block in input.chunks(PROCESS_BLOCK_SIZE) {
-            let text = self
-                .decoder
-                .as_mut()
-                .expect("decoder initialized before processing")
-                .decode(block, false)?;
-            self.process_and_check(&text)?;
+        for block in chunk.chunks(PROCESS_BLOCK_SIZE) {
+            self.decode_segments_and_check(block, false)?;
             if self.found.is_some() {
                 return Ok(EarlyStopProgress::Matched);
             }
         }
         Ok(EarlyStopProgress::NeedMore)
+    }
+
+    /// Process the newly available ASCII prefix before encoding is known.
+    /// Every encoding selectable by an in-band HTML declaration preserves
+    /// these bytes; ESC is excluded because it can change stateful decoders.
+    fn process_prescan_ascii(&mut self) -> Result<(), HtmlError> {
+        while let Some(&byte) = self.initial_buf.get(self.prescan_processed_ascii) {
+            if !byte.is_ascii() || byte == 0x1B {
+                break;
+            }
+
+            // A token can complete at any ASCII byte. Advance one byte at a
+            // time within the bounded prescan so the encoding validator sees
+            // exactly through the match, never a later declaration.
+            let one_byte = [byte];
+            let text = core::str::from_utf8(&one_byte).expect("an ASCII byte is valid UTF-8");
+            self.process_and_check(text)?;
+            self.prescan_processed_ascii += 1;
+            if self.found.is_some() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_prescan_match(&self) -> Result<(), HtmlError> {
+        let consumed = &self.initial_buf[..self.prescan_processed_ascii];
+        let (mut decoder, bom_len) = DecoderState::detect(consumed, self.max_input_size);
+        if self.prescan_processed_ascii > bom_len {
+            let primed = decoder.decode(&consumed[bom_len..], false)?;
+            debug_assert_eq!(primed.as_bytes(), &consumed[bom_len..]);
+        }
+        Ok(())
+    }
+
+    fn flush_initial_buf(&mut self) -> Result<(), HtmlError> {
+        let buf = core::mem::take(&mut self.initial_buf);
+        let processed = self.prescan_processed_ascii;
+        let (mut decoder, bom_len) = DecoderState::detect(&buf, self.max_input_size);
+
+        if processed > bom_len {
+            let primed = decoder.decode(&buf[bom_len..processed], false)?;
+            debug_assert_eq!(primed.as_bytes(), &buf[bom_len..processed]);
+        }
+        self.decoder = Some(decoder);
+        self.decode_segments_and_check(&buf[processed.max(bom_len)..], false)
+    }
+
+    /// Decode one raw syntactic segment at a time. `>` is safe as a decoder
+    /// input boundary even when it is part of a multibyte/stateful sequence;
+    /// the decoder buffers incomplete state. This lets ordinary HTML tokens
+    /// become observable before errors from later raw input are surfaced. A
+    /// UTF-16 decoder may still need a following byte to complete the `>` code
+    /// unit, so strict prefix decoding remains the final ordering safeguard.
+    fn decode_segments_and_check(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
+        let mut start = 0;
+        while let Some(relative) = memchr::memchr(b'>', &bytes[start..]) {
+            let end = start + relative + 1;
+            self.decode_and_check(&bytes[start..end], last && end == bytes.len())?;
+            if self.found.is_some() {
+                return Ok(());
+            }
+            start = end;
+        }
+
+        if start < bytes.len() {
+            self.decode_and_check(&bytes[start..], last)?;
+        } else if last && bytes.is_empty() {
+            self.decode_and_check(bytes, true)?;
+        }
+        Ok(())
+    }
+
+    fn decode_and_check(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
+        let decoded = self
+            .decoder
+            .as_mut()
+            .expect("decoder initialized before processing")
+            .decode_prefix(bytes, last);
+        let decoded_before = self
+            .decoder
+            .as_ref()
+            .expect("decoder remains initialized")
+            .decoded_size;
+        let decoded_size = decoded_before.saturating_add(decoded.text.len());
+        let remaining = self.max_input_size.saturating_sub(decoded_before);
+        let mut process_len = decoded.text.len().min(remaining);
+        while !decoded.text.is_char_boundary(process_len) {
+            process_len -= 1;
+        }
+
+        self.process_and_check(&decoded.text[..process_len])?;
+        if self.found.is_some() {
+            return Ok(());
+        }
+        if decoded_size > self.max_input_size {
+            return Err(HtmlError::InputTooLarge {
+                size: decoded_size,
+                max: self.max_input_size,
+            });
+        }
+
+        self.decoder
+            .as_mut()
+            .expect("decoder remains initialized")
+            .decoded_size = decoded_size;
+        if let Some(error) = decoded.error {
+            return Err(HtmlError::Encoding(error));
+        }
+        Ok(())
     }
 
     /// Finish parsing and take ownership of the match or complete document.
@@ -448,19 +664,27 @@ impl EarlyStopParser {
         }
         if self.found.is_none() {
             if self.decoder.is_none() {
-                let (decoder, _) = DecoderState::detect(&[], self.max_input_size);
-                self.decoder = Some(decoder);
+                self.flush_initial_buf()?;
             }
-            let trailing = self
-                .decoder
-                .as_mut()
-                .expect("decoder initialized before finish")
-                .decode(&[], true)?;
-            self.process_and_check(&trailing)?;
+            if self.found.is_none() {
+                self.decode_segments_and_check(&[], true)?;
+            }
         }
 
         if self.found.is_none() {
             self.finish_tokenizer_and_check()?;
+        }
+
+        if self.found.is_none() {
+            let flushed = self.builder.finish_observed_text_run();
+            check_early_nodes(
+                &self.builder,
+                [flushed, None],
+                self.predicate.as_ref(),
+                self.mode,
+                &mut self.pending_match,
+                &mut self.found,
+            );
         }
 
         if self.found.is_none() && self.mode == EarlyStopMode::AfterElement {
@@ -554,9 +778,45 @@ fn process_early_token(
     pending_match: &mut Option<NodeId>,
     found: &mut Option<(NodeId, MatchCompleteness)>,
 ) -> Result<(), ParseError> {
+    if !matches!(token, Token::Text { .. } | Token::CData { .. }) {
+        let flushed = builder.finish_observed_text_run();
+        check_early_nodes(
+            builder,
+            [flushed, None],
+            predicate,
+            mode,
+            pending_match,
+            found,
+        );
+        if found.is_some() {
+            return Ok(());
+        }
+    }
+
+    let is_text = matches!(token, Token::Text { .. } | Token::CData { .. });
     let created = builder.process(token)?;
+    let flushed = builder.take_flushed_text_node();
+    check_early_nodes(
+        builder,
+        [flushed, (!is_text).then_some(created).flatten()],
+        predicate,
+        mode,
+        pending_match,
+        found,
+    );
+    Ok(())
+}
+
+fn check_early_nodes(
+    builder: &TreeBuilder,
+    created: [Option<NodeId>; 2],
+    predicate: &NodePredicate,
+    mode: EarlyStopMode,
+    pending_match: &mut Option<NodeId>,
+    found: &mut Option<(NodeId, MatchCompleteness)>,
+) {
     if pending_match.is_none() {
-        if let Some(node_id) = created {
+        for node_id in created.into_iter().flatten() {
             let node = NodeRef {
                 arena: &builder.arena,
                 id: node_id,
@@ -571,6 +831,9 @@ fn process_early_token(
                     }
                 }
             }
+            if found.is_some() || pending_match.is_some() {
+                break;
+            }
         }
     }
 
@@ -581,7 +844,6 @@ fn process_early_token(
             }
         }
     }
-    Ok(())
 }
 
 /// Parse byte chunks with the default input limit.
@@ -605,6 +867,16 @@ pub fn parse_stream_with_limit<'a>(
 
 fn effective_max(max_input_size: usize) -> usize {
     max_input_size.min(usize::try_from(u32::MAX).unwrap_or(usize::MAX))
+}
+
+fn explicit_bom_length(input: &[u8]) -> Option<usize> {
+    if input.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        Some(3)
+    } else if input.starts_with(&[0xFF, 0xFE]) || input.starts_with(&[0xFE, 0xFF]) {
+        Some(2)
+    } else {
+        None
+    }
 }
 
 fn bom_length(input: &[u8], encoding: &'static Encoding) -> usize {
@@ -695,5 +967,398 @@ mod tests {
         assert_eq!(found.completeness(), MatchCompleteness::SubtreeComplete);
         assert_eq!(found.node().text_content(), "complete");
         assert!(!found.document().to_html().contains("after"));
+    }
+
+    #[test]
+    fn early_stop_replacement_labels_error_before_ascii_match() {
+        const REPLACEMENT_LABELS: [&str; 6] = [
+            "csiso2022kr",
+            "hz-gb-2312",
+            "iso-2022-cn",
+            "iso-2022-cn-ext",
+            "iso-2022-kr",
+            "replacement",
+        ];
+
+        fn assert_replacement_error(result: Result<EarlyStopProgress, HtmlError>, case: &str) {
+            match result {
+                Err(HtmlError::Encoding(EncodingError::MalformedInput { encoding, offset })) => {
+                    assert_eq!(encoding, "replacement", "case={case}");
+                    assert_eq!(offset, 0, "case={case}");
+                }
+                other => panic!("expected replacement decoding error for {case}, got {other:?}"),
+            }
+        }
+
+        for label in REPLACEMENT_LABELS {
+            let input = format!("<meta charset={label}><p id=hit>x</p>");
+            for after_element in [false, true] {
+                let mode = if after_element {
+                    "after-element"
+                } else {
+                    "on-create"
+                };
+                let case = format!("label={label}, mode={mode}");
+
+                let mut whole = if after_element {
+                    EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+                } else {
+                    EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
+                };
+                assert_replacement_error(whole.feed(input.as_bytes()), &format!("{case}, whole"));
+
+                let mut bytewise = if after_element {
+                    EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+                } else {
+                    EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
+                };
+                let mut error = None;
+                for byte in input.as_bytes() {
+                    match bytewise.feed(core::slice::from_ref(byte)) {
+                        Ok(EarlyStopProgress::NeedMore) => {}
+                        Ok(EarlyStopProgress::Matched) => {
+                            panic!("matched before decoding replacement input: {case}, bytewise")
+                        }
+                        Err(found) => {
+                            error = Some(found);
+                            break;
+                        }
+                    }
+                }
+                assert_replacement_error(
+                    Err(error.unwrap_or_else(|| {
+                        panic!("missing replacement decoding error: {case}, bytewise")
+                    })),
+                    &format!("{case}, bytewise"),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn early_stop_on_create_does_not_decode_malformed_suffix_after_match() {
+        let mut parser = EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"));
+        assert_eq!(
+            parser.feed(b"<p id=hit>\xFF").unwrap(),
+            EarlyStopProgress::Matched
+        );
+
+        let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+            panic!("expected the start-tag match")
+        };
+        assert_eq!(found.node().attr("id"), Some("hit"));
+    }
+
+    #[test]
+    fn early_stop_active_decoder_ignores_same_feed_malformed_suffix() {
+        for after_element in [false, true] {
+            let mut parser = if after_element {
+                EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+            } else {
+                EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
+            };
+            assert_eq!(
+                parser.feed(&vec![b' '; PRESCAN_LIMIT]).unwrap(),
+                EarlyStopProgress::NeedMore
+            );
+
+            let input: &[u8] = if after_element {
+                b"<p id=hit>complete</p>\xFF"
+            } else {
+                b"<p id=hit>\xFF"
+            };
+            assert_eq!(
+                parser.feed(input).unwrap(),
+                EarlyStopProgress::Matched,
+                "after_element={after_element}"
+            );
+            let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+                panic!("expected match for after_element={after_element}")
+            };
+            assert_eq!(found.node().attr("id"), Some("hit"));
+        }
+    }
+
+    #[test]
+    fn early_stop_ignores_replacement_meta_after_exact_match() {
+        for after_element in [false, true] {
+            let mut parser = if after_element {
+                EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+            } else {
+                EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
+            };
+            let input: &[u8] = if after_element {
+                b"<p id=hit>complete</p><meta charset=replacement>"
+            } else {
+                b"<p id=hit><meta charset=replacement>"
+            };
+
+            assert_eq!(
+                parser.feed(input).unwrap(),
+                EarlyStopProgress::Matched,
+                "after_element={after_element}"
+            );
+            let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+                panic!("expected match for after_element={after_element}")
+            };
+            assert!(!found.document().to_html().contains("<meta"));
+        }
+    }
+
+    #[test]
+    fn early_stop_utf8_bom_ignores_same_feed_malformed_suffix() {
+        for after_element in [false, true] {
+            let body: &[u8] = if after_element {
+                b"<p id=hit>complete</p>\xFF"
+            } else {
+                b"<p id=hit>\xFF"
+            };
+            let mut input = b"\xEF\xBB\xBF".to_vec();
+            input.extend_from_slice(body);
+            let mut parser = if after_element {
+                EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+            } else {
+                EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
+            };
+
+            assert_eq!(
+                parser.feed(&input).unwrap(),
+                EarlyStopProgress::Matched,
+                "after_element={after_element}"
+            );
+            assert!(matches!(parser.finish(), Ok(EarlyStopOutcome::Matched(_))));
+        }
+    }
+
+    #[test]
+    fn early_stop_utf16_bom_ignores_odd_byte_suffix_after_match() {
+        for big_endian in [false, true] {
+            for after_element in [false, true] {
+                let html = if after_element {
+                    "<p id=hit>complete</p>"
+                } else {
+                    "<p id=hit>"
+                };
+                let mut input = if big_endian {
+                    vec![0xFE, 0xFF]
+                } else {
+                    vec![0xFF, 0xFE]
+                };
+                for unit in html.encode_utf16() {
+                    let bytes = if big_endian {
+                        unit.to_be_bytes()
+                    } else {
+                        unit.to_le_bytes()
+                    };
+                    input.extend_from_slice(&bytes);
+                }
+                input.push(b'x');
+
+                let mut parser = if after_element {
+                    EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+                } else {
+                    EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
+                };
+                assert_eq!(
+                    parser.feed(&input).unwrap(),
+                    EarlyStopProgress::Matched,
+                    "big_endian={big_endian}, after_element={after_element}"
+                );
+                assert!(matches!(parser.finish(), Ok(EarlyStopOutcome::Matched(_))));
+            }
+        }
+    }
+
+    #[test]
+    fn early_stop_ignores_same_feed_suffix_beyond_raw_limit() {
+        for after_element in [false, true] {
+            let matched: &[u8] = if after_element {
+                b"<p id=hit>complete</p>"
+            } else {
+                b"<p id=hit>"
+            };
+            let mut input = matched.to_vec();
+            input.extend_from_slice(b"suffix beyond the configured limit");
+            let mut parser = if after_element {
+                EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+            } else {
+                EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
+            }
+            .max_input_size(matched.len());
+
+            assert_eq!(
+                parser.feed(&input).unwrap(),
+                EarlyStopProgress::Matched,
+                "after_element={after_element}"
+            );
+            assert!(matches!(parser.finish(), Ok(EarlyStopOutcome::Matched(_))));
+        }
+    }
+
+    #[test]
+    fn early_stop_raw_limit_without_match_is_still_terminal() {
+        let mut parser = EarlyStopParser::stop_on_create(|_| false).max_input_size(4);
+        assert!(matches!(
+            parser.feed(b"12345"),
+            Err(HtmlError::InputTooLarge { size: 5, max: 4 })
+        ));
+        assert!(matches!(
+            parser.feed(b"ignored"),
+            Err(HtmlError::ParserTerminated)
+        ));
+        assert!(matches!(parser.finish(), Err(HtmlError::ParserTerminated)));
+    }
+
+    #[test]
+    fn early_stop_text_predicates_observe_only_stable_logical_runs() {
+        let input = format!("<p>{}</p>", "a".repeat(4_097));
+
+        // A bounded tokenizer flush produces a 4,017-byte prefix for small
+        // feeds. That transient size must not become predicate-visible.
+        for chunk_size in [input.len(), 1] {
+            let mut parser = EarlyStopParser::stop_on_create(|node| {
+                node.is_text() && node.text_content().len() == 4_017
+            });
+            for chunk in input.as_bytes().chunks(chunk_size) {
+                assert_eq!(
+                    parser.feed(chunk).unwrap(),
+                    EarlyStopProgress::NeedMore,
+                    "chunk_size={chunk_size}"
+                );
+            }
+            let EarlyStopOutcome::Done(document) = parser.finish().unwrap() else {
+                panic!("transient text prefix matched for chunk_size={chunk_size}")
+            };
+            assert_eq!(document.root().text_content().len(), 4_097);
+        }
+
+        // The complete logical text node remains observable in both modes.
+        for chunk_size in [input.len(), 1] {
+            let mut parser = EarlyStopParser::stop_on_create(|node| {
+                node.is_text() && node.text_content().len() == 4_097
+            });
+            let mut progress = EarlyStopProgress::NeedMore;
+            for chunk in input.as_bytes().chunks(chunk_size) {
+                progress = parser.feed(chunk).unwrap();
+                if progress == EarlyStopProgress::Matched {
+                    break;
+                }
+            }
+            assert_eq!(
+                progress,
+                EarlyStopProgress::Matched,
+                "chunk_size={chunk_size}"
+            );
+            let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+                panic!("stable text did not match for chunk_size={chunk_size}")
+            };
+            assert_eq!(found.node().text_content().len(), 4_097);
+        }
+    }
+
+    #[test]
+    fn early_stop_observes_deferred_table_whitespace_before_next_tag() {
+        let mut parser =
+            EarlyStopParser::stop_on_create(|node| node.is_text() && node.text_content() == "   ");
+        let _ = parser
+            .feed(b"<table>   <tr><td>x</td></tr></table>")
+            .unwrap();
+
+        let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+            panic!("expected the deferred table text to match")
+        };
+        assert_eq!(found.node().text_content(), "   ");
+        assert!(!found.document().to_html().contains("<tr"));
+    }
+
+    #[test]
+    fn streamed_bounded_text_matches_one_shot_node_cardinality() {
+        let html = format!("<p>{}&amp;{}</p>", "a".repeat(4090), "b".repeat(300));
+        let one_shot = crate::parse(&html).unwrap();
+        let mut parser = StreamParser::new();
+        for chunk in html.as_bytes().chunks(137) {
+            parser.feed(chunk).unwrap();
+        }
+        let streamed = parser.finish().unwrap();
+
+        assert_eq!(streamed.to_html(), one_shot.to_html());
+        assert_eq!(streamed.node_count(), one_shot.node_count());
+        let paragraph = streamed.root().children().next().unwrap();
+        let children: Vec<_> = streamed.get(paragraph).children().collect();
+        assert_eq!(children.len(), 1);
+        assert!(streamed.get(children[0]).is_text());
+    }
+
+    #[test]
+    fn fostered_text_node_cardinality_is_chunk_invariant() {
+        let long_mixed_run = format!("<table>{}x<tr><td>y</td></tr></table>", " ".repeat(4_200));
+        for html in [
+            "<table>before<tr><td>x</td></tr>after</table>",
+            "a<table>&amp;<tr></tr></table>",
+            &long_mixed_run,
+        ] {
+            let borrowed = crate::parse(html).unwrap();
+            let owned = crate::parse_owned(html.to_owned()).unwrap();
+            let mut parser = StreamParser::new();
+            for chunk in html.as_bytes().chunks(3) {
+                parser.feed(chunk).unwrap();
+            }
+            let streamed = parser.finish().unwrap();
+
+            assert_eq!(borrowed.to_html(), owned.to_html(), "html={html}");
+            assert_eq!(borrowed.to_html(), streamed.to_html(), "html={html}");
+            assert_eq!(borrowed.node_count(), owned.node_count(), "html={html}");
+            assert_eq!(borrowed.node_count(), streamed.node_count(), "html={html}");
+        }
+    }
+
+    #[test]
+    fn early_stop_split_utf16_bom_is_chunk_invariant() {
+        let mut input = vec![0xFF, 0xFE];
+        for unit in "<p>BOM text</p>".encode_utf16() {
+            input.extend_from_slice(&unit.to_le_bytes());
+        }
+
+        let mut bytewise = EarlyStopParser::stop_on_create(|_| false);
+        for chunk in input.chunks(1) {
+            assert_eq!(bytewise.feed(chunk).unwrap(), EarlyStopProgress::NeedMore);
+        }
+        let EarlyStopOutcome::Done(bytewise) = bytewise.finish().unwrap() else {
+            panic!("unexpected match")
+        };
+
+        let mut whole = EarlyStopParser::stop_on_create(|_| false);
+        whole.feed(&input).unwrap();
+        let EarlyStopOutcome::Done(whole) = whole.finish().unwrap() else {
+            panic!("unexpected match")
+        };
+
+        assert_eq!(bytewise.to_html(), whole.to_html());
+        assert_eq!(bytewise.root().text_content(), "BOM text");
+        assert!(!bytewise.root().text_content().contains('\u{FEFF}'));
+    }
+
+    #[test]
+    fn early_stop_split_meta_encoding_is_chunk_invariant() {
+        let mut input = b"<meta charset=\"windows-1254\"><p>".to_vec();
+        input.push(0xFE); // ş in Windows-1254
+        input.extend_from_slice(b"</p>");
+
+        let mut bytewise = EarlyStopParser::stop_on_create(|_| false);
+        for chunk in input.chunks(1) {
+            bytewise.feed(chunk).unwrap();
+        }
+        let EarlyStopOutcome::Done(bytewise) = bytewise.finish().unwrap() else {
+            panic!("unexpected match")
+        };
+
+        let mut whole = EarlyStopParser::stop_on_create(|_| false);
+        whole.feed(&input).unwrap();
+        let EarlyStopOutcome::Done(whole) = whole.finish().unwrap() else {
+            panic!("unexpected match")
+        };
+
+        assert_eq!(bytewise.to_html(), whole.to_html());
+        assert_eq!(bytewise.root().text_content(), "ş");
     }
 }

@@ -82,6 +82,12 @@ impl NodeFlags {
         self.0 |= flag;
     }
 
+    /// Clear a flag bit.
+    #[inline(always)]
+    pub fn clear(&mut self, flag: u8) {
+        self.0 &= !flag;
+    }
+
     /// Check if a flag bit is set.
     #[inline(always)]
     pub const fn has(self, flag: u8) -> bool {

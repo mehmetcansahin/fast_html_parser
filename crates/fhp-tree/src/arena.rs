@@ -32,6 +32,12 @@ const TAG_INDEX_SIZE: usize = 256;
 const INLINE_SEEN_ATTRIBUTES: usize = 8;
 const ASCII_CI_FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
+struct PendingSourceCopy {
+    source_offset: usize,
+    text_offset: usize,
+    len: usize,
+}
+
 #[derive(Clone, Copy)]
 struct SeenAttribute<'a> {
     fingerprint: u64,
@@ -191,7 +197,7 @@ fn update_selector_hashes(
     };
 
     if name.eq_ignore_ascii_case(b"class") {
-        for class in value.split(|byte| byte.is_ascii_whitespace()) {
+        for class in value.split(|byte| crate::is_html_space(*byte)) {
             if !class.is_empty() {
                 *class_hash |= class_bloom_bit(class);
             }
@@ -221,11 +227,15 @@ pub struct Arena {
     /// store offsets into this buffer via [`NodeFlags::IS_TEXT_FROM_SOURCE`].
     /// Empty for streaming parsers.
     pub(crate) source: Vec<u8>,
+    /// Source ranges promoted into the text slab before an owned source is
+    /// transferred to the arena.
+    pending_source_copies: Vec<PendingSourceCopy>,
     /// Pre-built tag → NodeId index, populated during tree construction.
     ///
     /// Indexed by `Tag as u8`. Each bucket contains NodeIds of elements with
-    /// that tag, in document order. Built inline during `open_tag` to avoid
-    /// a separate DFS pass.
+    /// that tag in allocation order. HTML foster parenting can make allocation
+    /// order differ from document order, so document-ordered consumers must
+    /// still traverse the tree links.
     pub(crate) tag_index: Option<Box<[Vec<NodeId>; TAG_INDEX_SIZE]>>,
 }
 
@@ -238,6 +248,7 @@ impl Arena {
             attr_slab: Vec::new(),
             attr_str_slab: Vec::new(),
             source: Vec::new(),
+            pending_source_copies: Vec::new(),
             tag_index: None,
         }
     }
@@ -250,6 +261,7 @@ impl Arena {
             attr_slab: Vec::with_capacity(attr_cap),
             attr_str_slab: Vec::with_capacity(attr_cap * 32),
             source: Vec::new(),
+            pending_source_copies: Vec::new(),
             tag_index: None,
         }
     }
@@ -266,7 +278,10 @@ impl Arena {
         }
     }
 
-    /// Get the pre-built tag index, if it was enabled during construction.
+    /// Get the pre-built allocation-order tag index, if enabled.
+    ///
+    /// Buckets are not guaranteed to be in document order because tree
+    /// construction can foster-parent an element before an earlier allocation.
     pub fn tag_index(&self) -> Option<&[Vec<NodeId>; TAG_INDEX_SIZE]> {
         self.tag_index.as_deref()
     }
@@ -322,6 +337,7 @@ impl Arena {
     /// Store an owned copy of the input source for source-backed text nodes.
     pub fn set_source(&mut self, input: &str) {
         self.source = input.as_bytes().to_vec();
+        self.resolve_pending_source_copies();
     }
 
     /// Transfer an already-owned `String` as the source buffer (zero copy).
@@ -330,6 +346,60 @@ impl Arena {
     /// this avoids the memcpy that [`set_source`](Arena::set_source) performs.
     pub fn set_source_owned(&mut self, source: String) {
         self.source = source.into_bytes();
+        self.resolve_pending_source_copies();
+    }
+
+    /// Promote source-backed text into the owned text slab and append a new
+    /// adjacent fragment. If the zero-copy owned source has not been
+    /// transferred yet, reserve its range and fill it in at transfer time.
+    pub(crate) fn promote_source_text(
+        &mut self,
+        source_offset: usize,
+        source_len: usize,
+        content: &str,
+    ) -> Option<u32> {
+        let source_end = source_offset.checked_add(source_len)?;
+        let new_offset = self.text_slab.len();
+        let promoted_end = new_offset.checked_add(source_len)?;
+        let new_offset_u32 = u32::try_from(new_offset).ok()?;
+        self.text_slab
+            .reserve(source_len.checked_add(content.len())?);
+
+        if self.source.is_empty() {
+            self.text_slab.resize(promoted_end, 0);
+            self.pending_source_copies.push(PendingSourceCopy {
+                source_offset,
+                text_offset: new_offset,
+                len: source_len,
+            });
+        } else {
+            let source_text = self.source.get(source_offset..source_end)?;
+            self.text_slab.extend_from_slice(source_text);
+        }
+        self.text_slab.extend_from_slice(content.as_bytes());
+        Some(new_offset_u32)
+    }
+
+    fn resolve_pending_source_copies(&mut self) {
+        for pending in std::mem::take(&mut self.pending_source_copies) {
+            let source_end = pending
+                .source_offset
+                .checked_add(pending.len)
+                .expect("pending source range overflow");
+            let text_end = pending
+                .text_offset
+                .checked_add(pending.len)
+                .expect("pending text range overflow");
+            let source = self
+                .source
+                .get(pending.source_offset..source_end)
+                .expect("owned source does not contain a pending text range");
+            let target = self
+                .text_slab
+                .get_mut(pending.text_offset..text_end)
+                .expect("text slab does not contain a pending source range");
+            target.copy_from_slice(source);
+        }
     }
 
     /// Allocate a new comment node, storing content in the text slab.
@@ -931,6 +1001,17 @@ impl Arena {
         if n.flags.has(NodeFlags::IS_TEXT) && n.flags.has(NodeFlags::IS_TEXT_FROM_SOURCE) {
             checked_text_slice(&self.source, n.text_offset, n.text_len)
         } else {
+            let text_start = n.text_offset as usize;
+            let text_end = text_start
+                .checked_add(n.text_len as usize)
+                .expect("text range overflow");
+            assert!(
+                !self.pending_source_copies.iter().any(|pending| {
+                    let pending_end = pending.text_offset.saturating_add(pending.len);
+                    pending.text_offset < text_end && pending_end > text_start
+                }),
+                "source-backed text promotion is not finalized; call Arena::set_source_owned first"
+            );
             checked_text_slice(&self.text_slab, n.text_offset, n.text_len)
         }
     }
@@ -1220,6 +1301,18 @@ mod tests {
             class_bloom_bit(b"one") | class_bloom_bit(b"two")
         );
         assert_eq!(arena.get(node).id_hash, selector_hash(b"main"));
+    }
+
+    #[test]
+    fn class_hash_uses_only_html_space_characters() {
+        let mut arena = Arena::new();
+        let node = arena.new_element(Tag::Div, 1);
+        arena.set_attrs_from_raw(node, "class='alpha\x0Bbeta'");
+
+        assert_eq!(
+            arena.get(node).class_hash,
+            class_bloom_bit(b"alpha\x0Bbeta")
+        );
     }
 
     #[test]

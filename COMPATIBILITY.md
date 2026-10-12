@@ -66,6 +66,13 @@ excluding the synthetic root. Attempting to create an element at depth 513 retur
 Encoding, depth, and size errors are terminal for a streaming parser. Iterator,
 Tokio, and async-std adapters stop pulling their source after the first error.
 
+The streaming tokenizer bounds unfinished raw-text/RCDATA closing-tag candidates
+by discarding oversized prefixes while retaining the original tag name, scanner
+state, and a bounded text tail. A completed closing tag still closes the element;
+if EOF arrives first, discarded bytes are not recovered. Candidates within the
+buffer limit retain their complete text, without decoding character references
+inside raw-text elements such as `script` and `style`.
+
 ## Selectors and XPath
 
 CSS selector evaluation memoizes `(NodeId, chain_index)` states instead of

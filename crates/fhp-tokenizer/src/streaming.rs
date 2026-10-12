@@ -27,6 +27,9 @@ const TEXT_TAIL: usize = 80;
 /// styles are far smaller than this. If a single comment, CDATA section,
 /// doctype, or quoted tag crosses the bound, its bytes are emitted as inert
 /// text while the scanner preserves syntax state through the real terminator.
+/// Oversized matching raw-text/RCDATA close-tag candidates instead discard
+/// their prefix, retaining only the tag identity and a bounded text tail.
+/// If EOF arrives before the terminator, discarded bytes are not recovered.
 pub const MAX_RAW_TEXT_RESIDUAL: usize = 2 * 1024 * 1024;
 
 /// A streaming tokenizer that processes input chunk by chunk.
@@ -65,9 +68,91 @@ pub struct StreamTokenizer {
     /// The scanner remains in its original mode until the real terminator so
     /// nested markup cannot escape and become active tokens.
     syntax_overflow: bool,
-    /// Matching raw-text/RCDATA close tag whose oversized attribute/whitespace
-    /// suffix is being discarded while its token identity is retained.
-    raw_close_overflow: Option<Tag>,
+    /// Identity of a matching raw-text/RCDATA close tag whose oversized source
+    /// has been discarded while its scanner state is retained.
+    raw_close_overflow: Option<RawCloseOverflow>,
+    /// An overlong numeric character reference compacted out of `residual`.
+    /// This prevents an unterminated digit run from defeating the buffer bound.
+    numeric_entity: Option<NumericEntityState>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct NumericEntityState {
+    is_hex: bool,
+    value: u32,
+    overflow: bool,
+}
+
+struct RawCloseOverflow {
+    tag: Tag,
+    /// Recognized text-element names are at most eight ASCII bytes.
+    name: [u8; 8],
+}
+
+impl RawCloseOverflow {
+    fn source_name(&self) -> &str {
+        let len = self.tag.as_str().expect("text-element tag is known").len();
+        std::str::from_utf8(&self.name[..len]).expect("text-element name is ASCII")
+    }
+}
+
+impl NumericEntityState {
+    fn new(is_hex: bool) -> Self {
+        Self {
+            is_hex,
+            value: 0,
+            overflow: false,
+        }
+    }
+
+    fn accepts(self, byte: u8) -> bool {
+        if self.is_hex {
+            byte.is_ascii_hexdigit()
+        } else {
+            byte.is_ascii_digit()
+        }
+    }
+
+    fn push(&mut self, byte: u8) {
+        if self.overflow {
+            return;
+        }
+        let digit = match byte {
+            b'0'..=b'9' => u32::from(byte - b'0'),
+            b'a'..=b'f' if self.is_hex => u32::from(byte - b'a') + 10,
+            b'A'..=b'F' if self.is_hex => u32::from(byte - b'A') + 10,
+            _ => return,
+        };
+        let radix = if self.is_hex { 16 } else { 10 };
+        match self
+            .value
+            .checked_mul(radix)
+            .and_then(|value| value.checked_add(digit))
+        {
+            Some(value) => self.value = value,
+            None => self.overflow = true,
+        }
+    }
+
+    fn decoded(self) -> char {
+        if self.overflow {
+            return '\u{FFFD}';
+        }
+        let digits = if self.is_hex {
+            format!("{:X}", self.value)
+        } else {
+            self.value.to_string()
+        };
+        fhp_core::entity::decode_numeric(&digits, self.is_hex).unwrap_or('\u{FFFD}')
+    }
+}
+
+enum TextFlushPlan {
+    Prefix(usize),
+    NumericOverflow {
+        amp: usize,
+        state: NumericEntityState,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -102,12 +187,15 @@ impl StreamTokenizer {
             scanner: SplitScanner::default(),
             syntax_overflow: false,
             raw_close_overflow: None,
+            numeric_entity: None,
         }
     }
 
-    /// Number of bytes currently buffered as residual (not yet processed).
+    /// Number of input bytes currently buffered and not yet resolved.
     ///
     /// Bounded by [`MAX_RAW_TEXT_RESIDUAL`] plus the size of one fed chunk.
+    /// Oversized matching close-tag prefixes are discarded; only their fixed-size
+    /// tag identity and scanner state are retained separately.
     pub fn buffered_len(&self) -> usize {
         self.residual.len()
     }
@@ -121,8 +209,12 @@ impl StreamTokenizer {
             return Vec::new();
         }
 
-        self.residual.extend_from_slice(chunk);
         let mut tokens = Vec::new();
+        let chunk = self.resume_numeric_entity(chunk, &mut tokens);
+        if chunk.is_empty() {
+            return tokens;
+        }
+        self.residual.extend_from_slice(chunk);
 
         loop {
             let scan = self.scanner.scan(&self.residual, self.syntax_overflow);
@@ -132,9 +224,12 @@ impl StreamTokenizer {
 
             let split = scan.split;
             let mut buffered = std::mem::take(&mut self.residual);
-            if let Some(tag) = self.raw_close_overflow.take() {
-                debug_assert_eq!(scan.text_close.map(|(_, close_tag)| close_tag), Some(tag));
-                tokens.push(owned_close_tag(tag));
+            if let Some(overflow) = self.raw_close_overflow.take() {
+                debug_assert_eq!(
+                    scan.text_close.map(|(_, close_tag)| close_tag),
+                    Some(overflow.tag)
+                );
+                tokens.push(owned_close_tag(overflow.tag, overflow.source_name()));
             } else if self.syntax_overflow {
                 tokens.push(owned_text_token(&buffered[..split], None));
                 self.syntax_overflow = false;
@@ -170,7 +265,11 @@ impl StreamTokenizer {
             return;
         }
 
-        self.residual.extend_from_slice(chunk.as_bytes());
+        let chunk = self.resume_numeric_entity_with(chunk.as_bytes(), &mut on_token);
+        if chunk.is_empty() {
+            return;
+        }
+        self.residual.extend_from_slice(chunk);
 
         loop {
             let scan = self.scanner.scan(&self.residual, self.syntax_overflow);
@@ -180,9 +279,12 @@ impl StreamTokenizer {
 
             let split = scan.split;
             let mut buffered = std::mem::take(&mut self.residual);
-            if let Some(tag) = self.raw_close_overflow.take() {
-                debug_assert_eq!(scan.text_close.map(|(_, close_tag)| close_tag), Some(tag));
-                emit_close_tag_with(tag, &mut on_token);
+            if let Some(overflow) = self.raw_close_overflow.take() {
+                debug_assert_eq!(
+                    scan.text_close.map(|(_, close_tag)| close_tag),
+                    Some(overflow.tag)
+                );
+                emit_close_tag_with(overflow.tag, overflow.source_name(), &mut on_token);
             } else if self.syntax_overflow {
                 emit_text_token_with(&buffered[..split], None, &mut on_token);
                 self.syntax_overflow = false;
@@ -210,11 +312,24 @@ impl StreamTokenizer {
 
     /// Signal end of input and flush any remaining buffered data.
     pub fn finish(&mut self) -> Vec<Token<'static>> {
-        if self.residual.is_empty() {
-            return Vec::new();
+        let mut prefix = Vec::new();
+        if let Some(state) = self.numeric_entity.take() {
+            prefix.push(owned_numeric_entity_token(state));
+        }
+        if self.residual.is_empty() && self.raw_close_overflow.is_none() {
+            if !prefix.is_empty() {
+                self.scanner.reset();
+                self.syntax_overflow = false;
+            }
+            return prefix;
         }
         let remaining = std::mem::take(&mut self.residual);
-        let tokens = if self.syntax_overflow {
+        let mut tokens = if let Some(overflow) = self.raw_close_overflow.take() {
+            vec![owned_text_token(
+                &remaining,
+                Some(TextContext::Element(overflow.tag)),
+            )]
+        } else if self.syntax_overflow {
             vec![owned_text_token(&remaining, None)]
         } else if let Some(context) = self.scanner.text_context() {
             vec![owned_text_token(&remaining, Some(context))]
@@ -223,17 +338,32 @@ impl StreamTokenizer {
         };
         self.scanner.reset();
         self.syntax_overflow = false;
-        self.raw_close_overflow = None;
-        tokens
+        prefix.append(&mut tokens);
+        prefix
     }
 
     /// Signal end of input and flush buffered tokens via callback without cloning.
     pub fn finish_with(&mut self, mut on_token: impl FnMut(&Token<'_>)) {
-        if self.residual.is_empty() {
+        let mut finished_numeric_entity = false;
+        if let Some(state) = self.numeric_entity.take() {
+            emit_numeric_entity_with(state, &mut on_token);
+            finished_numeric_entity = true;
+        }
+        if self.residual.is_empty() && self.raw_close_overflow.is_none() {
+            if finished_numeric_entity {
+                self.scanner.reset();
+                self.syntax_overflow = false;
+            }
             return;
         }
         let remaining = std::mem::take(&mut self.residual);
-        if self.syntax_overflow {
+        if let Some(overflow) = self.raw_close_overflow.take() {
+            emit_text_token_with(
+                &remaining,
+                Some(TextContext::Element(overflow.tag)),
+                &mut on_token,
+            );
+        } else if self.syntax_overflow {
             emit_text_token_with(&remaining, None, &mut on_token);
         } else if let Some(context) = self.scanner.text_context() {
             emit_text_token_with(&remaining, Some(context), &mut on_token);
@@ -242,7 +372,56 @@ impl StreamTokenizer {
         }
         self.scanner.reset();
         self.syntax_overflow = false;
-        self.raw_close_overflow = None;
+    }
+
+    fn resume_numeric_entity<'a>(
+        &mut self,
+        chunk: &'a [u8],
+        tokens: &mut Vec<Token<'static>>,
+    ) -> &'a [u8] {
+        let Some(mut state) = self.numeric_entity.take() else {
+            return chunk;
+        };
+        let mut consumed = 0;
+        while consumed < chunk.len() && state.accepts(chunk[consumed]) {
+            state.push(chunk[consumed]);
+            consumed += 1;
+        }
+        if consumed == chunk.len() {
+            self.numeric_entity = Some(state);
+            return &chunk[chunk.len()..];
+        }
+
+        tokens.push(owned_numeric_entity_token(state));
+        if chunk[consumed] == b';' {
+            consumed += 1;
+        }
+        &chunk[consumed..]
+    }
+
+    fn resume_numeric_entity_with<'a>(
+        &mut self,
+        chunk: &'a [u8],
+        on_token: &mut impl FnMut(&Token<'_>),
+    ) -> &'a [u8] {
+        let Some(mut state) = self.numeric_entity.take() else {
+            return chunk;
+        };
+        let mut consumed = 0;
+        while consumed < chunk.len() && state.accepts(chunk[consumed]) {
+            state.push(chunk[consumed]);
+            consumed += 1;
+        }
+        if consumed == chunk.len() {
+            self.numeric_entity = Some(state);
+            return &chunk[chunk.len()..];
+        }
+
+        emit_numeric_entity_with(state, on_token);
+        if chunk[consumed] == b';' {
+            consumed += 1;
+        }
+        &chunk[consumed..]
     }
 
     /// Process a complete chunk through the structural indexer + extractor.
@@ -314,16 +493,26 @@ impl StreamTokenizer {
                 let discard_len =
                     utf8_prefix_boundary(&self.residual, self.residual.len() - TEXT_TAIL);
                 if discard_len > 0 {
-                    discard_prefix(&mut self.residual, discard_len);
-                    self.scanner.discard_prefix(discard_len);
-                    self.raw_close_overflow = Some(close_tag);
+                    self.discard_raw_close_prefix(close_tag, discard_len);
                 }
             }
             return;
         }
 
         let desired = self.residual.len() - TEXT_TAIL;
-        let prefix_len = utf8_prefix_boundary(&self.residual, desired);
+        let prefix_len = match text_flush_plan(&self.residual, desired, context) {
+            TextFlushPlan::Prefix(prefix_len) => prefix_len,
+            TextFlushPlan::NumericOverflow { amp, state } => {
+                if amp > 0 {
+                    tokens.push(owned_text_token(&self.residual[..amp], context));
+                }
+                let consumed = self.residual.len();
+                self.residual.clear();
+                self.scanner.discard_prefix(consumed);
+                self.numeric_entity = Some(state);
+                return;
+            }
+        };
         if prefix_len == 0 {
             return;
         }
@@ -363,16 +552,26 @@ impl StreamTokenizer {
                 let discard_len =
                     utf8_prefix_boundary(&self.residual, self.residual.len() - TEXT_TAIL);
                 if discard_len > 0 {
-                    discard_prefix(&mut self.residual, discard_len);
-                    self.scanner.discard_prefix(discard_len);
-                    self.raw_close_overflow = Some(close_tag);
+                    self.discard_raw_close_prefix(close_tag, discard_len);
                 }
             }
             return;
         }
 
         let desired = self.residual.len() - TEXT_TAIL;
-        let prefix_len = utf8_prefix_boundary(&self.residual, desired);
+        let prefix_len = match text_flush_plan(&self.residual, desired, context) {
+            TextFlushPlan::Prefix(prefix_len) => prefix_len,
+            TextFlushPlan::NumericOverflow { amp, state } => {
+                if amp > 0 {
+                    emit_text_token_with(&self.residual[..amp], context, on_token);
+                }
+                let consumed = self.residual.len();
+                self.residual.clear();
+                self.scanner.discard_prefix(consumed);
+                self.numeric_entity = Some(state);
+                return;
+            }
+        };
         if prefix_len == 0 {
             return;
         }
@@ -380,6 +579,18 @@ impl StreamTokenizer {
         emit_text_token_with(&self.residual[..prefix_len], context, on_token);
         discard_prefix(&mut self.residual, prefix_len);
         self.scanner.discard_prefix(prefix_len);
+    }
+
+    fn discard_raw_close_prefix(&mut self, tag: Tag, len: usize) {
+        let overflow = self.raw_close_overflow.get_or_insert_with(|| {
+            let mut name = [0; 8];
+            let name_len = tag.as_str().expect("text-element tag is known").len();
+            name[..name_len].copy_from_slice(&self.residual[2..2 + name_len]);
+            RawCloseOverflow { tag, name }
+        });
+        debug_assert_eq!(overflow.tag, tag);
+        discard_prefix(&mut self.residual, len);
+        self.scanner.discard_prefix(len);
     }
 
     /// Bound an oversized comment/CDATA/doctype/quoted-tag token without
@@ -507,7 +718,9 @@ impl SplitScanner {
                         }
                         if i + 3 < data.len() && &data[i..i + 4] == b"<!--" {
                             self.mode = ScanMode::Comment;
-                            i += 4;
+                            // Revisit the opening dashes: the extractor accepts
+                            // their overlap with `>` in `<!-->` and `<!--->`.
+                            i += 2;
                             continue;
                         }
                         if i + 8 < data.len() && &data[i..i + 9] == b"<![CDATA[" {
@@ -522,11 +735,10 @@ impl SplitScanner {
                                 i += 2;
                                 continue;
                             }
-                            if next == b'/'
-                                || next.is_ascii_alphabetic()
-                                || next == b'_'
-                                || next == b'?'
-                            {
+                            if crate::extract::starts_markup_after_lt(
+                                Some(next),
+                                data.get(i + 2).copied(),
+                            ) {
                                 self.mode = ScanMode::Tag {
                                     quote: None,
                                     open: i,
@@ -742,6 +954,68 @@ fn utf8_prefix_boundary(data: &[u8], desired: usize) -> usize {
     boundary
 }
 
+/// Choose a bounded text flush without bisecting a character reference.
+/// Named references have a bounded name length; an unterminated numeric
+/// reference can have arbitrarily many digits and is therefore compacted into
+/// [`NumericEntityState`] once retaining it would exceed the tail allowance.
+fn text_flush_plan(data: &[u8], desired: usize, context: Option<TextContext>) -> TextFlushPlan {
+    let boundary = utf8_prefix_boundary(data, desired);
+    if boundary == 0
+        || !cfg!(feature = "entity-decode")
+        || !context.is_none_or(TextContext::decodes_entities)
+    {
+        return TextFlushPlan::Prefix(boundary);
+    }
+
+    let Some(amp) = data[..boundary].iter().rposition(|byte| *byte == b'&') else {
+        return TextFlushPlan::Prefix(boundary);
+    };
+
+    if let Some((state, digits_end)) = numeric_entity_prefix(data, amp) {
+        let has_semicolon = data.get(digits_end) == Some(&b';');
+        if digits_end > boundary || (digits_end == boundary && has_semicolon) {
+            if digits_end < data.len() {
+                let reference_end = digits_end + usize::from(has_semicolon);
+                return TextFlushPlan::Prefix(reference_end);
+            }
+            if boundary - amp > TEXT_TAIL {
+                return TextFlushPlan::NumericOverflow { amp, state };
+            }
+            return TextFlushPlan::Prefix(amp);
+        }
+    }
+
+    // This covers every named reference (the longest WHATWG name is 31
+    // bytes) and preserves the following-alphanumeric lookahead needed by
+    // legacy names. Farther ampersands have already reached a stable result.
+    if boundary - amp <= TEXT_TAIL {
+        TextFlushPlan::Prefix(amp)
+    } else {
+        TextFlushPlan::Prefix(boundary)
+    }
+}
+
+fn numeric_entity_prefix(data: &[u8], amp: usize) -> Option<(NumericEntityState, usize)> {
+    if data.get(amp + 1) != Some(&b'#') {
+        return None;
+    }
+    let mut cursor = amp + 2;
+    let is_hex = matches!(data.get(cursor), Some(b'x' | b'X'));
+    if is_hex {
+        cursor += 1;
+    }
+    let digits_start = cursor;
+    let mut state = NumericEntityState::new(is_hex);
+    while let Some(&byte) = data.get(cursor) {
+        if !state.accepts(byte) {
+            break;
+        }
+        state.push(byte);
+        cursor += 1;
+    }
+    (cursor > digits_start).then_some((state, cursor))
+}
+
 fn owned_text_token(data: &[u8], context: Option<TextContext>) -> Token<'static> {
     let text = String::from_utf8_lossy(data);
     let content = if context.is_none_or(TextContext::decodes_entities) {
@@ -754,17 +1028,30 @@ fn owned_text_token(data: &[u8], context: Option<TextContext>) -> Token<'static>
     }
 }
 
-fn owned_close_tag(tag: Tag) -> Token<'static> {
+fn owned_close_tag(tag: Tag, name: &str) -> Token<'static> {
     Token::CloseTag {
         tag,
-        name: std::borrow::Cow::Owned(tag.as_str().unwrap_or("").to_owned()),
+        name: std::borrow::Cow::Owned(name.to_owned()),
     }
 }
 
-fn emit_close_tag_with(tag: Tag, on_token: &mut impl FnMut(&Token<'_>)) {
+fn owned_numeric_entity_token(state: NumericEntityState) -> Token<'static> {
+    Token::Text {
+        content: std::borrow::Cow::Owned(state.decoded().to_string()),
+    }
+}
+
+fn emit_close_tag_with(tag: Tag, name: &str, on_token: &mut impl FnMut(&Token<'_>)) {
     on_token(&Token::CloseTag {
         tag,
-        name: std::borrow::Cow::Borrowed(tag.as_str().unwrap_or("")),
+        name: std::borrow::Cow::Borrowed(name),
+    });
+}
+
+fn emit_numeric_entity_with(state: NumericEntityState, on_token: &mut impl FnMut(&Token<'_>)) {
+    let content = state.decoded().to_string();
+    on_token(&Token::Text {
+        content: std::borrow::Cow::Borrowed(&content),
     });
 }
 
@@ -1008,6 +1295,40 @@ mod tests {
     }
 
     #[test]
+    fn malformed_close_tag_prefix_matches_one_shot_across_chunk_sizes() {
+        let html = b"</\"<Y\">\"\0>";
+        let expected = crate::tokenize(std::str::from_utf8(html).unwrap());
+
+        for chunk_size in [1, 9, html.len()] {
+            let mut tokenizer = StreamTokenizer::new();
+            let mut actual = Vec::new();
+            for chunk in html.chunks(chunk_size) {
+                actual.extend(tokenizer.feed(chunk));
+            }
+            actual.extend(tokenizer.finish());
+
+            assert_eq!(actual, expected, "chunk_size={chunk_size}");
+        }
+    }
+
+    #[test]
+    fn overlapping_comment_terminator_matches_one_shot_across_chunk_sizes() {
+        let html = b"<!--><!'-->'>";
+        let expected = crate::tokenize(std::str::from_utf8(html).unwrap());
+
+        for chunk_size in 1..=html.len() {
+            let mut tokenizer = StreamTokenizer::new();
+            let mut actual = Vec::new();
+            for chunk in html.chunks(chunk_size) {
+                actual.extend(tokenizer.feed(chunk));
+            }
+            actual.extend(tokenizer.finish());
+
+            assert_eq!(actual, expected, "chunk_size={chunk_size}");
+        }
+    }
+
+    #[test]
     fn find_safe_split_basic() {
         assert_eq!(scan_safe_split(b"<div>hello</div>").split, 16);
         assert_eq!(scan_safe_split(b"<div>hello").split, 5);
@@ -1057,6 +1378,94 @@ mod tests {
         assert_eq!(open_tags, vec![Tag::Script]);
         assert_eq!(close_tags, vec![Tag::Script]);
         assert_eq!(text, vec!["if(a<b){x()}"]);
+    }
+
+    #[test]
+    fn unfinished_raw_close_keeps_text_context_at_eof() {
+        for (tag, decodes_entities) in [
+            ("ScRiPt", false),
+            ("StYlE", false),
+            ("IfRaMe", false),
+            ("TiTlE", true),
+            ("TeXtArEa", true),
+        ] {
+            let html = format!("<{tag}>x</{tag} &amp;");
+            let reference = if decodes_entities && cfg!(feature = "entity-decode") {
+                "&"
+            } else {
+                "&amp;"
+            };
+            let expected = format!("x</{tag} {reference}");
+            let check_tokens = |tokens: &[Token<'_>]| {
+                let text: String = tokens
+                    .iter()
+                    .filter_map(|token| match token {
+                        Token::Text { content } => Some(content.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(text, expected, "tag={tag}");
+                assert!(
+                    !tokens
+                        .iter()
+                        .any(|token| matches!(token, Token::CloseTag { .. }))
+                );
+            };
+            check_tokens(&crate::tokenize(&html));
+            let mut one_shot_callback = Vec::new();
+            crate::tokenize_with(&html, |token| one_shot_callback.push(token));
+            check_tokens(&one_shot_callback);
+            for chunk_size in [1, 7, html.len()] {
+                let mut owned = StreamTokenizer::new();
+                let mut owned_tokens = Vec::new();
+                let mut callback = StreamTokenizer::new();
+                let mut callback_tokens = Vec::new();
+                for chunk in html.as_bytes().chunks(chunk_size) {
+                    owned_tokens.extend(owned.feed(chunk));
+                    callback.feed_str_with(std::str::from_utf8(chunk).unwrap(), |token| {
+                        callback_tokens.push(to_owned_token(token.clone()));
+                    });
+                }
+                owned_tokens.extend(owned.finish());
+                callback.finish_with(|token| {
+                    callback_tokens.push(to_owned_token(token.clone()));
+                });
+
+                for tokens in [owned_tokens, callback_tokens] {
+                    check_tokens(&tokens);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn completed_raw_close_restores_entity_decoding_for_later_markup() {
+        let html = "<script></script>outside</script &amp;";
+        let expected = if cfg!(feature = "entity-decode") {
+            "outside</script &"
+        } else {
+            "outside</script &amp;"
+        };
+        let one_shot = crate::tokenize(html);
+        let mut one_shot_callback = Vec::new();
+        crate::tokenize_with(html, |token| one_shot_callback.push(token));
+        let mut tokenizer = StreamTokenizer::new();
+        let mut streamed = Vec::new();
+        for byte in html.as_bytes() {
+            streamed.extend(tokenizer.feed(std::slice::from_ref(byte)));
+        }
+        streamed.extend(tokenizer.finish());
+
+        for tokens in [one_shot, one_shot_callback, streamed] {
+            let text: String = tokens
+                .iter()
+                .filter_map(|token| match token {
+                    Token::Text { content } => Some(content.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(text, expected);
+        }
     }
 
     #[test]
@@ -1174,61 +1583,135 @@ mod tests {
 
     #[test]
     fn oversized_raw_close_suffix_retains_close_token_identity() {
-        let html = format!(
-            "<script>x</script{}><p>ok</p>",
+        let first = format!(
+            "<ScRiPt>x</ScRiPt{}",
             " ".repeat(MAX_RAW_TEXT_RESIDUAL + 1024)
         );
+        let suffix = "><p>ok</p>";
+        let html = format!("{first}{suffix}");
+        let expected: Vec<_> = crate::tokenize(&html)
+            .into_iter()
+            .map(to_owned_token)
+            .collect();
 
         let mut owned = StreamTokenizer::new();
-        let mut owned_tokens = Vec::new();
-        for chunk in html.as_bytes().chunks(64 * 1024) {
-            owned_tokens.extend(owned.feed(chunk));
-        }
+        let mut owned_tokens = owned.feed(first.as_bytes());
+        assert!(owned.buffered_len() <= MAX_RAW_TEXT_RESIDUAL);
+        owned_tokens.extend(owned.feed(suffix.as_bytes()));
         owned_tokens.extend(owned.finish());
 
         let mut callback = StreamTokenizer::new();
-        let mut callback_open = Vec::new();
-        let mut callback_close = Vec::new();
-        for chunk in html.as_bytes().chunks(64 * 1024) {
-            let text = std::str::from_utf8(chunk).unwrap();
-            callback.feed_str_with(text, |token| match token {
-                Token::OpenTag { tag, .. } => callback_open.push(*tag),
-                Token::CloseTag { tag, .. } => callback_close.push(*tag),
-                _ => {}
-            });
-        }
-        callback.finish_with(|token| match token {
-            Token::OpenTag { tag, .. } => callback_open.push(*tag),
-            Token::CloseTag { tag, .. } => callback_close.push(*tag),
-            _ => {}
+        let mut callback_tokens = Vec::new();
+        callback.feed_str_with(&first, |token| {
+            callback_tokens.push(to_owned_token(token.clone()));
         });
-
-        let owned_open: Vec<_> = owned_tokens
-            .iter()
-            .filter_map(|token| match token {
-                Token::OpenTag { tag, .. } => Some(*tag),
-                _ => None,
-            })
-            .collect();
-        let owned_close: Vec<_> = owned_tokens
-            .iter()
-            .filter_map(|token| match token {
-                Token::CloseTag { tag, .. } => Some(*tag),
-                _ => None,
-            })
-            .collect();
-
-        assert_eq!(owned_open, [Tag::Script, Tag::P]);
-        assert_eq!(owned_close, [Tag::Script, Tag::P]);
-        assert_eq!(callback_open, owned_open);
-        assert_eq!(callback_close, owned_close);
-        assert!(owned.buffered_len() <= MAX_RAW_TEXT_RESIDUAL);
         assert!(callback.buffered_len() <= MAX_RAW_TEXT_RESIDUAL);
+        callback.feed_str_with(suffix, |token| {
+            callback_tokens.push(to_owned_token(token.clone()));
+        });
+        callback.finish_with(|token| callback_tokens.push(to_owned_token(token.clone())));
+
+        assert_eq!(owned_tokens, expected);
+        assert_eq!(callback_tokens, expected);
+        assert_eq!(owned.buffered_len(), 0);
+        assert_eq!(callback.buffered_len(), 0);
     }
 
     #[test]
-    fn bounded_plain_text_callback_matches_owned_and_respects_entity_feature() {
-        let input = format!("{}&amp;{}", "a".repeat(100), "b".repeat(MAX_RESIDUAL));
+    fn oversized_raw_close_stays_bounded_and_preserves_quote_state() {
+        let mut owned = StreamTokenizer::new();
+        let mut owned_tokens = owned.feed(b"<ScRiPt>x</ScRiPt \"");
+        let mut callback = StreamTokenizer::new();
+        let mut callback_tokens = Vec::new();
+        callback.feed_str_with("<ScRiPt>x</ScRiPt \"", |token| {
+            callback_tokens.push(to_owned_token(token.clone()));
+        });
+        let chunk = format!("{}<img src=x>", " ".repeat(64 * 1024));
+        for _ in 0..128 {
+            owned_tokens.extend(owned.feed(chunk.as_bytes()));
+            callback.feed_str_with(&chunk, |token| {
+                callback_tokens.push(to_owned_token(token.clone()));
+            });
+            assert!(owned.buffered_len() <= MAX_RAW_TEXT_RESIDUAL);
+            assert!(callback.buffered_len() <= MAX_RAW_TEXT_RESIDUAL);
+        }
+        let suffix = "\"><p>ok</p>";
+        owned_tokens.extend(owned.feed(suffix.as_bytes()));
+        owned_tokens.extend(owned.finish());
+        callback.feed_str_with(suffix, |token| {
+            callback_tokens.push(to_owned_token(token.clone()));
+        });
+        callback.finish_with(|token| callback_tokens.push(to_owned_token(token.clone())));
+
+        let expected: Vec<_> = crate::tokenize("<ScRiPt>x</ScRiPt><p>ok</p>")
+            .into_iter()
+            .map(to_owned_token)
+            .collect();
+        assert_eq!(owned_tokens, expected);
+        assert_eq!(callback_tokens, expected);
+        assert_eq!(owned.buffered_len(), 0);
+        assert_eq!(callback.buffered_len(), 0);
+    }
+
+    #[test]
+    fn oversized_unfinished_raw_close_keeps_its_tail_in_text_context() {
+        for (tag, decodes_entities) in [("script", false), ("title", true)] {
+            let first = format!(
+                "<{tag}>x</{tag} \"{}",
+                "a".repeat(MAX_RAW_TEXT_RESIDUAL + 1)
+            );
+            let tail = "&amp;<b>EOF</b>";
+            let expected_tail = if decodes_entities && cfg!(feature = "entity-decode") {
+                "&<b>EOF</b>"
+            } else {
+                tail
+            };
+            let mut owned = StreamTokenizer::new();
+            let mut owned_tokens = owned.feed(first.as_bytes());
+            owned_tokens.extend(owned.feed(tail.as_bytes()));
+            assert!(owned.buffered_len() <= MAX_RAW_TEXT_RESIDUAL);
+            owned_tokens.extend(owned.finish());
+
+            let mut callback = StreamTokenizer::new();
+            let mut callback_tokens = Vec::new();
+            for chunk in [&first[..], tail] {
+                callback.feed_str_with(chunk, |token| {
+                    callback_tokens.push(to_owned_token(token.clone()));
+                });
+            }
+            assert!(callback.buffered_len() <= MAX_RAW_TEXT_RESIDUAL);
+            callback.finish_with(|token| callback_tokens.push(to_owned_token(token.clone())));
+
+            for tokens in [owned_tokens, callback_tokens] {
+                let text: String = tokens
+                    .iter()
+                    .filter_map(|token| match token {
+                        Token::Text { content } => Some(content.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(text.ends_with(expected_tail), "tag={tag}");
+                let open_tags: Vec<_> = tokens
+                    .iter()
+                    .filter_map(|token| match token {
+                        Token::OpenTag { name, .. } => Some(name.as_ref()),
+                        _ => None,
+                    })
+                    .collect();
+                assert_eq!(open_tags, [tag]);
+                assert!(
+                    !tokens
+                        .iter()
+                        .any(|token| matches!(token, Token::CloseTag { .. }))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bounded_plain_text_flush_does_not_split_an_entity() {
+        // The desired bounded-flush point falls inside `&amp;` (after `&a`).
+        let input = format!("{}&amp;{}", "a".repeat(4090), "b".repeat(77));
 
         let mut owned_tokenizer = StreamTokenizer::new();
         let mut owned_tokens = owned_tokenizer.feed(input.as_bytes());
@@ -1261,6 +1744,108 @@ mod tests {
         };
         assert_eq!(owned_text, expected);
         assert_eq!(callback_text, expected);
+        assert!(owned_tokenizer.buffered_len() <= TEXT_TAIL * 2);
+        assert!(callback_tokenizer.buffered_len() <= TEXT_TAIL * 2);
+    }
+
+    #[cfg(feature = "entity-decode")]
+    #[test]
+    fn bounded_flush_preserves_named_and_legacy_entity_lookahead() {
+        for reference in ["&notin;", "&notit;", "&copyx"] {
+            let input = format!("{}{reference}{}", "a".repeat(4090), "b".repeat(80));
+            let expected: String = crate::tokenize(&input)
+                .iter()
+                .filter_map(|token| match token {
+                    Token::Text { content } => Some(content.as_ref()),
+                    _ => None,
+                })
+                .collect();
+
+            let mut tokenizer = StreamTokenizer::new();
+            let mut tokens = tokenizer.feed(input.as_bytes());
+            tokens.extend(tokenizer.finish());
+            let actual: String = tokens
+                .iter()
+                .filter_map(|token| match token {
+                    Token::Text { content } => Some(content.as_ref()),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(actual, expected, "reference={reference}");
+        }
+    }
+
+    #[cfg(feature = "entity-decode")]
+    #[test]
+    fn overlong_numeric_entity_is_compacted_without_changing_value() {
+        let first = format!("&#{}", "0".repeat(MAX_RESIDUAL + 256));
+        let second = "60;tail";
+        let complete = format!("{first}{second}");
+        let expected = crate::entity::decode_entities(&complete);
+
+        let mut owned = StreamTokenizer::new();
+        let mut tokens = owned.feed(first.as_bytes());
+        assert_eq!(owned.buffered_len(), 0);
+        assert!(owned.numeric_entity.is_some());
+        tokens.extend(owned.feed(second.as_bytes()));
+        tokens.extend(owned.finish());
+        let owned_text: String = tokens
+            .iter()
+            .filter_map(|token| match token {
+                Token::Text { content } => Some(content.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        let mut callback = StreamTokenizer::new();
+        let mut callback_text = String::new();
+        callback.feed_str_with(&first, |token| {
+            if let Token::Text { content } = token {
+                callback_text.push_str(content);
+            }
+        });
+        callback.feed_str_with(second, |token| {
+            if let Token::Text { content } = token {
+                callback_text.push_str(content);
+            }
+        });
+        callback.finish_with(|token| {
+            if let Token::Text { content } = token {
+                callback_text.push_str(content);
+            }
+        });
+
+        assert_eq!(owned_text, expected);
+        assert_eq!(callback_text, expected);
+        assert_eq!(owned_text, "<tail");
+    }
+
+    #[cfg(feature = "entity-decode")]
+    #[test]
+    fn numeric_semicolon_exactly_at_flush_boundary_is_consumed() {
+        let reference = format!("&#{}60;", "0".repeat(98));
+        let input = format!(
+            "{}{reference}{}",
+            "a".repeat(4090),
+            "b".repeat(TEXT_TAIL - 1)
+        );
+        let semicolon = input.find(';').unwrap();
+        assert_eq!(semicolon, input.len() - TEXT_TAIL);
+        let expected = crate::entity::decode_entities(&input);
+
+        let mut tokenizer = StreamTokenizer::new();
+        let mut tokens = tokenizer.feed(input.as_bytes());
+        tokens.extend(tokenizer.finish());
+        let actual: String = tokens
+            .iter()
+            .filter_map(|token| match token {
+                Token::Text { content } => Some(content.as_ref()),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(actual, expected);
+        assert!(!actual.contains("<;"));
     }
 
     #[test]

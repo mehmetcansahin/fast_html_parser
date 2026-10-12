@@ -43,6 +43,16 @@ use fhp_simd::dispatch::ops;
 /// can build their output structure in a single pass without intermediate
 /// `Token` enum or `Vec<Attribute>` allocations.
 pub trait TreeSink {
+    /// Whether tokenization should continue delivering events.
+    ///
+    /// The default keeps existing sinks source-compatible. A sink that enters
+    /// a terminal error state can return `false` to stop scanning immediately
+    /// and suppress the trailing-text flush.
+    #[inline]
+    fn should_continue(&self) -> bool {
+        true
+    }
+
     /// An opening tag was encountered.
     ///
     /// `attr_raw` is the raw attribute region between the tag name and `>`.
@@ -199,7 +209,7 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
     let bytes = input.as_bytes();
     let len = bytes.len();
 
-    if len == 0 {
+    if len == 0 || !sink.should_continue() {
         return;
     }
 
@@ -239,13 +249,18 @@ pub fn tokenize_into<S: TreeSink>(input: &str, sink: &mut S) {
             let abs_pos = block_start + bit_pos;
             let byte = bytes[abs_pos];
             parser.on_delimiter_sink(abs_pos, byte, sink);
+            if !sink.should_continue() {
+                return;
+            }
         }
 
         block_start = block_end;
     }
 
     // Flush trailing text.
-    parser.flush_trailing_sink(sink);
+    if sink.should_continue() {
+        parser.flush_trailing_sink(sink);
+    }
 }
 
 #[cfg(test)]
@@ -365,5 +380,49 @@ mod tokenize_with_tests {
             "<!DOCTYPE html><!-- comment --><div id=\"main\" class='header' disabled>\
              <p>Hello &amp; world</p><br/><script>if(a<b){}</script></div>",
         );
+    }
+
+    #[test]
+    fn tokenize_into_stops_without_flushing_after_sink_is_terminal() {
+        #[derive(Default)]
+        struct StopSink {
+            events: Vec<&'static str>,
+            terminal: bool,
+        }
+
+        impl TreeSink for StopSink {
+            fn should_continue(&self) -> bool {
+                !self.terminal
+            }
+
+            fn open_tag(&mut self, _: Tag, _: &str, _: &str, _: bool) {
+                self.events.push("open");
+                self.terminal = true;
+            }
+
+            fn close_tag(&mut self, _: Tag, _: &str) {
+                self.events.push("close");
+            }
+
+            fn text(&mut self, _: &str) {
+                self.events.push("text");
+            }
+
+            fn comment(&mut self, _: &str) {
+                self.events.push("comment");
+            }
+
+            fn doctype(&mut self, _: &str) {
+                self.events.push("doctype");
+            }
+
+            fn cdata(&mut self, _: &str) {
+                self.events.push("cdata");
+            }
+        }
+
+        let mut sink = StopSink::default();
+        tokenize_into("<div></div>must not be flushed", &mut sink);
+        assert_eq!(sink.events, ["open"]);
     }
 }

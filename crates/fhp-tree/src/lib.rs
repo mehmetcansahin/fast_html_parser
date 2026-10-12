@@ -41,6 +41,12 @@ use builder::TreeBuilder;
 use node::{NodeFlags, NodeId};
 use traverse::{Ancestors, BreadthFirst, Children, DepthFirst, Siblings};
 
+/// Whether a byte is one of HTML's five space characters.
+#[inline(always)]
+pub(crate) const fn is_html_space(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
+}
+
 /// Error type for HTML parsing.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -48,7 +54,10 @@ pub enum HtmlError {
     /// Input was too large to parse.
     #[error("input too large: {size} bytes (max {max})")]
     InputTooLarge {
-        /// Actual input size.
+        /// Observed raw or decoded size when the limit was exceeded.
+        ///
+        /// Incremental and bounded decoders may report a lower bound rather
+        /// than scanning the rest of an already-rejected input.
         size: usize,
         /// Maximum allowed.
         max: usize,
@@ -204,8 +213,84 @@ pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
 pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Document, HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
-    let (text, _encoding) = fhp_encoding::decode_or_detect(input)?;
-    parse_with_limit(&text, max_input_size)
+    let effective_max = max_input_size.min(MAX_REPRESENTABLE_INPUT_SIZE);
+    let text = decode_with_limit(input, effective_max)?;
+    parse_owned_with_limit(text, effective_max)
+}
+
+/// Decode a complete byte input without ever retaining more than `max` bytes
+/// of decoded UTF-8. This keeps the byte-entry-point limit useful as a memory
+/// bound instead of allocating the decoder's worst-case expansion first.
+#[cfg(feature = "encoding")]
+fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
+    let encoding = fhp_encoding::detect(input);
+    let input = strip_matching_bom(input, encoding);
+    let mut decoder = encoding.new_decoder_without_bom_handling();
+    let mut decoded = String::with_capacity(input.len().min(max));
+    let mut offset = 0usize;
+    let mut buffer = [0u8; 8 * 1024];
+
+    loop {
+        let (result, read, written) =
+            decoder.decode_to_utf8_without_replacement(&input[offset..], &mut buffer, true);
+
+        if let encoding_rs::DecoderResult::Malformed(malformed_len, trailing_len) = result {
+            let malformed_offset = offset
+                .saturating_add(read)
+                .saturating_sub(malformed_len as usize)
+                .saturating_sub(trailing_len as usize);
+            return Err(HtmlError::Encoding(
+                fhp_core::error::EncodingError::MalformedInput {
+                    encoding: encoding.name(),
+                    offset: malformed_offset,
+                },
+            ));
+        }
+
+        let next_size = decoded.len().saturating_add(written);
+        if next_size > max {
+            return Err(HtmlError::InputTooLarge {
+                size: next_size,
+                max,
+            });
+        }
+        if written != 0 {
+            if next_size > decoded.capacity() {
+                // Grow geometrically to avoid repeated exact reallocations for
+                // encodings whose UTF-8 output is larger than their raw input.
+                // The requested capacity never exceeds the caller's limit.
+                let target_capacity = decoded.capacity().saturating_mul(2).max(next_size).min(max);
+                decoded.reserve_exact(target_capacity - decoded.len());
+            }
+            let chunk = std::str::from_utf8(&buffer[..written])
+                .expect("encoding_rs always emits valid UTF-8");
+            decoded.push_str(chunk);
+        }
+
+        offset = offset.saturating_add(read);
+        match result {
+            encoding_rs::DecoderResult::InputEmpty => break,
+            encoding_rs::DecoderResult::OutputFull => {
+                debug_assert!(read != 0 || written != 0);
+            }
+            encoding_rs::DecoderResult::Malformed(_, _) => unreachable!(),
+        }
+    }
+
+    Ok(decoded)
+}
+
+#[cfg(feature = "encoding")]
+fn strip_matching_bom<'a>(input: &'a [u8], encoding: &'static encoding_rs::Encoding) -> &'a [u8] {
+    if encoding == encoding_rs::UTF_8 && input.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        &input[3..]
+    } else if (encoding == encoding_rs::UTF_16LE && input.starts_with(&[0xFF, 0xFE]))
+        || (encoding == encoding_rs::UTF_16BE && input.starts_with(&[0xFE, 0xFF]))
+    {
+        &input[2..]
+    } else {
+        input
+    }
 }
 
 fn ensure_input_size(size: usize, max: usize) -> Result<(), HtmlError> {
@@ -326,7 +411,8 @@ impl<'a> NodeRef<'a> {
 
     /// Whether this is a void element.
     pub fn is_void(&self) -> bool {
-        self.arena.get(self.id).flags.has(NodeFlags::IS_VOID)
+        let node = self.arena.get(self.id);
+        !node.flags.has(NodeFlags::IS_TEXT) && node.flags.has(NodeFlags::IS_VOID)
     }
 
     /// Whether this node has any children.
@@ -500,11 +586,15 @@ impl<'a> NodeRef<'a> {
 
     /// Check if the node has a given CSS class.
     ///
-    /// Splits the `class` attribute on whitespace and checks if any
-    /// segment matches.
+    /// Splits the `class` attribute on HTML space characters and checks if any
+    /// token matches.
     pub fn has_class(&self, class_name: &str) -> bool {
         if let Some(classes) = self.attr("class") {
-            classes.split_whitespace().any(|c| c == class_name)
+            !class_name.is_empty()
+                && classes
+                    .as_bytes()
+                    .split(|byte| is_html_space(*byte))
+                    .any(|class| class == class_name.as_bytes())
         } else {
             false
         }
@@ -692,6 +782,15 @@ mod tests {
     }
 
     #[test]
+    fn source_backed_text_is_not_a_void_element() {
+        let doc = parse("<p>plain</p>").unwrap();
+        let text = doc.root().first_child().unwrap().first_child().unwrap();
+
+        assert!(text.is_text());
+        assert!(!text.is_void());
+    }
+
+    #[test]
     fn parse_depth_first() {
         let doc = parse("<div><span>a</span><p>b</p></div>").unwrap();
         let root = doc.root();
@@ -866,6 +965,60 @@ mod tests {
     fn parse_bytes_empty() {
         let doc = parse_bytes(b"").unwrap();
         assert!(!doc.root().has_children());
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn parse_bytes_rejects_decoded_expansion_at_the_limit() {
+        let mut html = b"<meta charset=windows-1252><p>".to_vec();
+        html.extend(std::iter::repeat_n(0x80, 4_096));
+        html.extend_from_slice(b"</p>");
+        let raw_size = html.len();
+
+        assert!(matches!(
+            parse_bytes_with_limit(&html, raw_size),
+            Err(HtmlError::InputTooLarge { size, max })
+                if size > max && max == raw_size
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn parse_bytes_transfers_successfully_decoded_input() {
+        let html = b"<meta charset=windows-1252><p>price: \x80</p>";
+        let doc = parse_bytes_with_limit(html, 1_024).unwrap();
+
+        assert_eq!(doc.root().text_content(), "price: €");
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn parse_bytes_handles_multi_buffer_decoded_expansion() {
+        const WINDOWS_1252_BYTES: usize = 40_000;
+        let mut html = b"<meta charset=windows-1252><p>".to_vec();
+        html.extend(std::iter::repeat_n(0x80, WINDOWS_1252_BYTES));
+        html.extend_from_slice(b"</p>");
+
+        let doc = parse_bytes_with_limit(&html, 128 * 1024).unwrap();
+        let text = doc.root().text_content();
+        assert_eq!(text.chars().count(), WINDOWS_1252_BYTES);
+        assert_eq!(text.len(), WINDOWS_1252_BYTES * '€'.len_utf8());
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn parse_bytes_preserves_malformed_input_errors() {
+        let html = b"<p>\xFF</p>";
+
+        assert!(matches!(
+            parse_bytes_with_limit(html, 1_024),
+            Err(HtmlError::Encoding(
+                fhp_core::error::EncodingError::MalformedInput {
+                    encoding: "UTF-8",
+                    ..
+                }
+            ))
+        ));
     }
 
     #[test]

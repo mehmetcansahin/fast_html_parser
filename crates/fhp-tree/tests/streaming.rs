@@ -186,6 +186,47 @@ fn one_shot_owned_sink_and_streaming_build_the_same_dom() {
 }
 
 #[test]
+fn unfinished_raw_close_keeps_dom_text_context_at_eof() {
+    for (tag, decodes_entities) in [
+        ("script", false),
+        ("style", false),
+        ("iframe", false),
+        ("title", true),
+        ("textarea", true),
+    ] {
+        let html = format!("<{tag}>x</{tag} &amp;");
+        let reference = if decodes_entities && cfg!(feature = "entity-decode") {
+            "&"
+        } else {
+            "&amp;"
+        };
+        let expected_text = format!("x</{tag} {reference}");
+        let one_shot = parse(&html).unwrap();
+        assert_eq!(one_shot.root().text_content(), expected_text);
+        let expected = canonical_arena(one_shot.arena(), one_shot.root().id());
+
+        for chunk_size in [1, 7, html.len()] {
+            let streamed = parse_stream(html.as_bytes().chunks(chunk_size)).unwrap();
+            assert_eq!(
+                canonical_arena(streamed.arena(), streamed.root().id()),
+                expected,
+                "tag={tag}, chunk_size={chunk_size}"
+            );
+
+            let tag_id = Tag::from_bytes(tag.as_bytes());
+            let mut early = EarlyStopParser::stop_after_element(move |node| node.tag() == tag_id);
+            for chunk in html.as_bytes().chunks(chunk_size) {
+                assert_eq!(early.feed(chunk).unwrap(), EarlyStopProgress::NeedMore);
+            }
+            let EarlyStopOutcome::Matched(found) = early.finish().unwrap() else {
+                panic!("EOF must complete the matched element");
+            };
+            assert_eq!(found.node().text_content(), expected_text);
+        }
+    }
+}
+
+#[test]
 fn depth_error_is_identical_for_one_shot_owned_sink_and_streaming() {
     let html = format!("{}x", "<div>".repeat(513));
     let is_depth_error = |result: Result<fhp_tree::Document, fhp_tree::HtmlError>| {

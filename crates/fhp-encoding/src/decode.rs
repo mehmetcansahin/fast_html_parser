@@ -7,8 +7,8 @@ use fhp_core::error::EncodingError;
 
 /// Decode raw bytes using a known encoding.
 ///
-/// Returns the decoded UTF-8 string. If the input is already valid UTF-8 and
-/// `encoding` is UTF-8, this avoids copying via [`Cow`](std::borrow::Cow).
+/// Returns an owned decoded UTF-8 string. Valid UTF-8 is still copied because
+/// the return type owns its storage.
 ///
 /// # Errors
 ///

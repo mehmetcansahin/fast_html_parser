@@ -8,7 +8,7 @@ use fhp_core::{error::ParseError, tag::Tag};
 use fhp_tokenizer::token::{Attribute as TokenAttribute, Token};
 
 use crate::arena::Arena;
-use crate::node::NodeId;
+use crate::node::{NodeFlags, NodeId};
 
 /// Maximum nesting depth to prevent stack overflow on pathological input.
 const MAX_DEPTH: u16 = 512;
@@ -136,6 +136,11 @@ fn matches_ascii_name(name: &str, expected: &[&str]) -> bool {
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
+#[inline]
+fn is_html_whitespace(byte: u8) -> bool {
+    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
+}
+
 /// Known block-level starts that imply the end of an open `<p>` element.
 ///
 /// This covers every such element represented by the compact [`Tag`] enum;
@@ -192,6 +197,19 @@ pub struct TreeBuilder {
     /// Terminal construction error. The infallible `TreeSink` path records it
     /// here and [`TreeBuilder::finish`] surfaces it.
     error: Option<ParseError>,
+    /// Text node emitted by the current uninterrupted character-token run.
+    /// Non-text tokens clear it so coalescing is independent of storage mode.
+    last_text_node: NodeId,
+    /// Whitespace-only fragments of a table character-token run. HTML decides
+    /// whether to foster the whole run only after a non-space character or the
+    /// terminating non-text token is seen.
+    pending_table_text: String,
+    /// Whether the current table character-token run is known to require
+    /// foster parenting.
+    table_text_run_foster: bool,
+    /// Text node flushed immediately before the most recently processed
+    /// non-text token.
+    flushed_text_node: Option<NodeId>,
 }
 
 impl TreeBuilder {
@@ -233,14 +251,18 @@ impl TreeBuilder {
             source_base: 0,
             source_len: 0,
             error: None,
+            last_text_node: NodeId::NULL,
+            pending_table_text: String::new(),
+            table_text_run_foster: false,
+            flushed_text_node: None,
         }
     }
 
     /// Enable the inline tag index for O(1) tag lookups after parsing.
     ///
-    /// When enabled, each element's tag is indexed during tree construction,
-    /// eliminating the need for a separate DFS pass in
-    /// [`DocumentIndex::build`](crate::arena::Arena::tag_index).
+    /// When enabled, each element's tag is indexed during tree construction.
+    /// Buckets follow allocation order, which can differ from document order
+    /// after foster parenting; see [`Arena::tag_index`].
     pub fn enable_tag_index(&mut self) {
         self.arena.enable_tag_index();
     }
@@ -272,6 +294,7 @@ impl TreeBuilder {
     #[inline]
     pub fn process(&mut self, token: &Token<'_>) -> Result<Option<NodeId>, ParseError> {
         self.ensure_active()?;
+        self.flushed_text_node = None;
         match token {
             Token::OpenTag {
                 tag,
@@ -296,12 +319,23 @@ impl TreeBuilder {
     }
 
     /// Finish building and return the root node id and arena.
-    pub fn finish(self) -> Result<(Arena, NodeId), ParseError> {
+    pub fn finish(mut self) -> Result<(Arena, NodeId), ParseError> {
         if let Some(error) = self.error {
             Err(error)
         } else {
+            let _ = self.flush_pending_table_text();
             Ok((self.arena, self.root))
         }
+    }
+
+    /// Take a table-whitespace text node that was flushed immediately before
+    /// the most recently processed non-text token.
+    ///
+    /// This is primarily useful to incremental observers that need to inspect
+    /// every node creation. Ordinary DOM builders can ignore it.
+    #[cfg(feature = "encoding")]
+    pub(crate) fn take_flushed_text_node(&mut self) -> Option<NodeId> {
+        self.flushed_text_node.take()
     }
 
     /// Whether a node is still present on the open-elements stack.
@@ -375,6 +409,7 @@ impl TreeBuilder {
         attributes: PendingAttrs<'slice, 'input>,
         source_self_closing: bool,
     ) -> Result<Option<NodeId>, ParseError> {
+        self.end_text_run();
         let kind = ElementKind::classify(tag, name);
 
         if self.insertion_mode == InsertionMode::InSelect {
@@ -541,6 +576,7 @@ impl TreeBuilder {
     }
 
     fn handle_close_tag(&mut self, tag: Tag, name: &str) {
+        self.end_text_run();
         if tag.is_void() {
             return;
         }
@@ -828,10 +864,33 @@ impl TreeBuilder {
         if content.is_empty() {
             return None;
         }
-        let foster = matches!(
+
+        let in_table_text_mode = matches!(
             self.insertion_mode,
             InsertionMode::InTable | InsertionMode::InTableBody | InsertionMode::InRow
-        ) && !content.bytes().all(|byte| byte.is_ascii_whitespace());
+        );
+        if in_table_text_mode {
+            if self.table_text_run_foster {
+                return self.insert_text(content, true);
+            }
+            if content.bytes().all(is_html_whitespace) {
+                self.pending_table_text.push_str(content);
+                return None;
+            }
+
+            self.table_text_run_foster = true;
+            if !self.pending_table_text.is_empty() {
+                let mut run = std::mem::take(&mut self.pending_table_text);
+                run.push_str(content);
+                return self.insert_text(&run, true);
+            }
+            return self.insert_text(content, true);
+        }
+
+        self.insert_text(content, false)
+    }
+
+    fn insert_text(&mut self, content: &str, foster: bool) -> Option<NodeId> {
         let location = if foster {
             self.foster_location()
         } else {
@@ -841,10 +900,41 @@ impl TreeBuilder {
             InsertionLocation::Append(parent) => parent,
             InsertionLocation::Before { parent, .. } => parent,
         };
+        if let Some(node) = self.coalesce_text(location, content) {
+            self.last_text_node = node;
+            return Some(node);
+        }
         let depth = self.arena.get(parent).depth.saturating_add(1);
         let node = self.try_source_ref(depth, content);
         self.insert_non_element(location, node);
+        self.last_text_node = node;
         Some(node)
+    }
+
+    fn flush_pending_table_text(&mut self) -> Option<NodeId> {
+        if self.pending_table_text.is_empty() {
+            return None;
+        }
+        let content = std::mem::take(&mut self.pending_table_text);
+        self.insert_text(&content, false)
+    }
+
+    fn end_text_run(&mut self) {
+        if let Some(node) = self.flush_pending_table_text() {
+            self.flushed_text_node = Some(node);
+        }
+        self.last_text_node = NodeId::NULL;
+        self.table_text_run_foster = false;
+    }
+
+    #[cfg(feature = "encoding")]
+    /// End the current logical character-token run and return its stable text
+    /// node, including table whitespace that only becomes insertable now.
+    pub(crate) fn finish_observed_text_run(&mut self) -> Option<NodeId> {
+        self.flushed_text_node = None;
+        let stable_text = (!self.last_text_node.is_null()).then_some(self.last_text_node);
+        self.end_text_run();
+        self.take_flushed_text_node().or(stable_text)
     }
 
     /// Handle raw text from TreeSink (not entity-decoded).
@@ -852,44 +942,86 @@ impl TreeBuilder {
         if raw.is_empty() {
             return None;
         }
-        let foster = matches!(
-            self.insertion_mode,
-            InsertionMode::InTable | InsertionMode::InTableBody | InsertionMode::InRow
-        ) && !raw.bytes().all(|byte| byte.is_ascii_whitespace());
-        let location = if foster {
-            self.foster_location()
-        } else {
-            InsertionLocation::Append(self.current_parent())
-        };
-        let parent = match location {
-            InsertionLocation::Append(parent) => parent,
-            InsertionLocation::Before { parent, .. } => parent,
-        };
-        let depth = self.arena.get(parent).depth.saturating_add(1);
 
         #[cfg(feature = "entity-decode")]
-        let node = {
+        {
+            let parent = self.current_parent();
             let parent_is_raw_text = self.arena.get(parent).tag.is_raw_text()
                 || self
                     .open_elements
                     .last()
                     .is_some_and(|entry| entry.kind == ElementKind::Plaintext);
             if parent_is_raw_text {
-                self.try_source_ref(depth, raw)
+                self.handle_text(raw)
             } else {
                 let decoded = fhp_tokenizer::entity::decode_entities(raw);
-                match decoded {
-                    std::borrow::Cow::Borrowed(value) => self.try_source_ref(depth, value),
-                    std::borrow::Cow::Owned(value) => self.arena.new_text(depth, &value),
-                }
+                self.handle_text(decoded.as_ref())
             }
-        };
+        }
 
         #[cfg(not(feature = "entity-decode"))]
-        let node = self.try_source_ref(depth, raw);
+        {
+            self.handle_text(raw)
+        }
+    }
 
-        self.insert_non_element(location, node);
-        Some(node)
+    /// Append to an immediately preceding text sibling when its storage can be
+    /// extended safely. Streaming token boundaries are an implementation
+    /// detail and must not change the DOM's text-node cardinality.
+    fn coalesce_text(&mut self, location: InsertionLocation, content: &str) -> Option<NodeId> {
+        let previous = match location {
+            InsertionLocation::Append(parent) => self.arena.get(parent).last_child,
+            InsertionLocation::Before { reference, .. } => self.arena.get(reference).prev_sibling,
+        };
+        if previous.is_null() || !self.arena.get(previous).flags.has(NodeFlags::IS_TEXT) {
+            return None;
+        }
+        if previous != self.last_text_node {
+            return None;
+        }
+
+        let previous_node = self.arena.get(previous);
+        let old_offset = previous_node.text_offset as usize;
+        let old_len = previous_node.text_len as usize;
+        let old_end = old_offset.checked_add(old_len)?;
+        let new_len = old_len.checked_add(content.len())?;
+        let new_len = u32::try_from(new_len).ok()?;
+
+        if previous_node.flags.has(NodeFlags::IS_TEXT_FROM_SOURCE) {
+            let ptr = content.as_ptr() as usize;
+            let source_end = self.source_base.checked_add(self.source_len)?;
+            let contiguous = self.source_len != 0
+                && ptr >= self.source_base
+                && ptr.checked_add(content.len())? <= source_end
+                && old_end == ptr - self.source_base;
+            if contiguous {
+                self.arena.get_mut(previous).text_len = new_len;
+                return Some(previous);
+            }
+
+            // A decoded fragment no longer points into the original source.
+            // Promote the preceding source-backed node into the slab once;
+            // subsequent fragments can then use the tail-append path below.
+            let new_offset = self
+                .arena
+                .promote_source_text(old_offset, old_len, content)?;
+            let previous_node = self.arena.get_mut(previous);
+            previous_node.text_offset = new_offset;
+            previous_node.text_len = new_len;
+            previous_node.flags.clear(NodeFlags::IS_TEXT_FROM_SOURCE);
+            return Some(previous);
+        }
+
+        // Relocating a non-tail string on every foster-parented character run
+        // would make adversarial table input quadratic. Streaming fragments of
+        // one character run are tail-contiguous, which is the case that needs
+        // coalescing for chunk-invariant DOM construction.
+        if old_end != self.arena.text_slab.len() {
+            return None;
+        }
+        self.arena.text_slab.extend_from_slice(content.as_bytes());
+        self.arena.get_mut(previous).text_len = new_len;
+        Some(previous)
     }
 
     fn insert_non_element(&mut self, location: InsertionLocation, node: NodeId) {
@@ -920,6 +1052,7 @@ impl TreeBuilder {
 
     /// Handle a comment.
     fn handle_comment(&mut self, content: &str) -> Option<NodeId> {
+        self.end_text_run();
         let parent = self.current_parent();
         let depth = self.arena.get(parent).depth.saturating_add(1);
         let node = self.arena.new_comment(depth, content);
@@ -929,6 +1062,7 @@ impl TreeBuilder {
 
     /// Handle a doctype declaration.
     fn handle_doctype(&mut self, content: &str) -> Option<NodeId> {
+        self.end_text_run();
         let parent = self.current_parent();
         let depth = self.arena.get(parent).depth.saturating_add(1);
         let node = self.arena.new_doctype(depth, content);
@@ -963,6 +1097,10 @@ const fn table_kind_index(kind: ElementKind) -> Option<usize> {
 }
 
 impl fhp_tokenizer::TreeSink for TreeBuilder {
+    fn should_continue(&self) -> bool {
+        self.error.is_none()
+    }
+
     fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool) {
         if self.error.is_none() {
             let _ = self.handle_open_tag(tag, name, PendingAttrs::Raw(attr_raw), self_closing);
@@ -1260,6 +1398,89 @@ mod tests {
     }
 
     #[test]
+    fn vertical_tab_is_foster_parented_as_non_html_whitespace() {
+        let (arena, root) = parse("<table>\x0B<tr><td>x</td></tr></table>").unwrap();
+        let text = arena.get(root).first_child;
+        assert!(arena.get(text).flags.has(NodeFlags::IS_TEXT));
+        assert_eq!(arena.text(text), "\x0B");
+        assert_eq!(arena.get(arena.get(text).next_sibling).tag, Tag::Table);
+    }
+
+    #[test]
+    fn adjacent_character_tokens_share_one_text_node() {
+        let mut builder = TreeBuilder::new();
+        process(&mut builder, &make_text("first"));
+        let node = process(&mut builder, &make_text("second")).unwrap();
+        let (arena, root) = finish(builder);
+
+        assert_eq!(arena.text(node), "firstsecond");
+        assert_eq!(arena.get(root).first_child, node);
+        assert_eq!(arena.get(node).next_sibling, NodeId::NULL);
+    }
+
+    #[test]
+    fn source_backed_text_coalesces_with_owned_text() {
+        let source = String::from("first");
+        let mut builder = TreeBuilder::new();
+        builder.set_source(&source);
+        let first = Token::Text {
+            content: Cow::Borrowed(&source),
+        };
+        process(&mut builder, &first);
+        let second = Token::Text {
+            content: Cow::Owned(String::from("second")),
+        };
+        let node = process(&mut builder, &second).unwrap();
+        let (arena, root) = finish(builder);
+
+        assert_eq!(arena.text(node), "firstsecond");
+        assert!(!arena.get(node).flags.has(NodeFlags::IS_TEXT_FROM_SOURCE));
+        assert_eq!(arena.get(root).first_child, node);
+        assert_eq!(arena.get(node).next_sibling, NodeId::NULL);
+    }
+
+    #[test]
+    fn zero_copy_source_text_resolves_promoted_ranges() {
+        let source = String::from("first");
+        let mut builder = TreeBuilder::new();
+        builder.set_source_ptr(&source);
+        let first = Token::Text {
+            content: Cow::Borrowed(&source),
+        };
+        process(&mut builder, &first);
+        let second = Token::Text {
+            content: Cow::Owned(String::from("second")),
+        };
+        let node = process(&mut builder, &second).unwrap();
+        let (mut arena, root) = builder.finish().unwrap();
+        arena.set_source_owned(source);
+
+        assert_eq!(arena.text(node), "firstsecond");
+        assert!(!arena.get(node).flags.has(NodeFlags::IS_TEXT_FROM_SOURCE));
+        assert_eq!(arena.get(root).first_child, node);
+        assert_eq!(arena.get(node).next_sibling, NodeId::NULL);
+    }
+
+    #[test]
+    #[should_panic(expected = "source-backed text promotion is not finalized")]
+    fn unresolved_zero_copy_promotion_cannot_be_read() {
+        let source = String::from("first");
+        let mut builder = TreeBuilder::new();
+        builder.set_source_ptr(&source);
+        let first = Token::Text {
+            content: Cow::Borrowed(&source),
+        };
+        process(&mut builder, &first);
+        let second = Token::Text {
+            content: Cow::Owned(String::from("second")),
+        };
+        let node = process(&mut builder, &second).unwrap();
+        let (arena, _) = builder.finish().unwrap();
+
+        let _ = arena.text(node);
+    }
+
+    #[test]
     fn foster_text_stays_a_sibling_when_table_has_a_previous_element() {
         let (arena, root) = parse("<p>before</p><table>foster<tr><td>x</td></tr></table>").unwrap();
         let paragraph = arena.get(root).first_child;
@@ -1498,6 +1719,7 @@ mod tests {
                 limit: 512,
             }
         );
+        assert!(!fhp_tokenizer::TreeSink::should_continue(&builder));
         match builder.finish() {
             Err(finish_error) => assert_eq!(finish_error, error),
             Ok(_) => panic!("terminal builder unexpectedly returned a document"),

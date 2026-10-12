@@ -310,7 +310,7 @@ pub(crate) struct Parser<'a> {
     tag_open_pos: usize,
     /// Position of the `<!` or `<!--` that opened special content.
     special_open_pos: usize,
-    /// Tag we're inside for raw text mode.
+    /// Current text-element tag, or `Unknown` after its closing tag completes.
     raw_text_tag: Tag,
     /// While inside a tag, the quote char (`"` or `'`) of the attribute value
     /// we are currently within, or `None` when not inside a quoted value. Used
@@ -536,6 +536,7 @@ impl<'a> Parser<'a> {
             }
             let name = self.str_slice(name_start, pos);
             let tag = Tag::from_bytes(&self.input[name_start..pos]);
+            self.raw_text_tag = Tag::Unknown;
             emit(Token::CloseTag {
                 tag,
                 name: Cow::Borrowed(name),
@@ -897,6 +898,7 @@ impl<'a> Parser<'a> {
             }
             let name = self.str_slice(name_start, pos);
             let tag = Tag::from_bytes(&self.input[name_start..pos]);
+            self.raw_text_tag = Tag::Unknown;
             sink.close_tag(tag, name);
             return;
         }
@@ -964,7 +966,9 @@ impl<'a> Parser<'a> {
         if end > self.cursor {
             let raw = self.str_slice(self.cursor, end);
             if !raw.is_empty() {
-                let content = if matches!(self.mode, Mode::InRawText | Mode::InPlainText) {
+                let content = if matches!(self.mode, Mode::InRawText | Mode::InPlainText)
+                    || (self.mode == Mode::InTag && self.raw_text_tag.is_raw_text())
+                {
                     Cow::Borrowed(raw)
                 } else {
                     maybe_decode_entities(raw)
@@ -1035,7 +1039,7 @@ fn is_whitespace(b: u8) -> bool {
 }
 
 #[inline(always)]
-fn starts_markup_after_lt(after: Option<u8>, after2: Option<u8>) -> bool {
+pub(crate) fn starts_markup_after_lt(after: Option<u8>, after2: Option<u8>) -> bool {
     match after {
         Some(b'!') | Some(b'?') => true,
         Some(b'/') => after2.is_some_and(is_tag_name_start),
