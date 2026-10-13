@@ -412,6 +412,7 @@ dependencies = [
  "fhp-core",
  "fhp-simd",
  "memchr",
+ "serde_json",
 ]
 
 [[package]]

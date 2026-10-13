@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   round-trips serialized tokens.
 - An HTML fuzzing dictionary and committed tokenizer seeds, both used by the
   release gate.
+- The html5lib-tests tokenizer suite, vendored at a pinned commit and run by
+  `cargo test` against a categorized expected-failures list.
 
 ### Fixed
 

@@ -94,6 +94,16 @@ cargo +nightly fuzz run tokenizer_differential \
 When the fuzzer reports a failure, add the minimized input to the oracle's
 edge cases in `crates/fhp-tokenizer/tests/differential.rs`.
 
+`cargo test -p fhp-tokenizer --test html5lib` checks the tokenizer against the
+vendored html5lib-tests suite. It fails when a run starts or stops failing
+relative to `crates/fhp-tokenizer/tests/html5lib/expected-failures.txt`, and
+when a failure matches none of the documented divergence categories. After an
+intended behavior change, rewrite the list and review its diff:
+
+```bash
+FHP_HTML5LIB_BLESS=1 cargo test -p fhp-tokenizer --test html5lib
+```
+
 ## Code Quality
 
 The local gate runs the following checks; use these commands when narrowing a

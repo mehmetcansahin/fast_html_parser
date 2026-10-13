@@ -50,6 +50,27 @@ These behaviors are regression-tested against canonical DOM output. They are a
 bounded compatibility contract, not a claim that every HTML parsing algorithm
 from the WHATWG specification is implemented.
 
+## Tokenizer conformance
+
+The tokenizer runs the vendored
+[html5lib-tests](vendor/html5lib-tests/README.md) tokenizer suite on every
+`cargo test`. At the pinned commit, 6,905 runs pass and 82 are skipped: the
+CDATA section state, initial states that no start tag enters exactly, and four
+inputs with lone surrogates. The remaining 62 fail for these documented
+reasons:
+
+- U+0000 is kept where the specification emits U+FFFD (in tag and attribute
+  names and values, comments, doctypes, and raw-text, RCDATA, and plaintext
+  content);
+- `<?` starts a bogus comment rather than a processing instruction; and
+- `<![CDATA[` starts a CDATA section in all content, not only in foreign
+  content.
+
+The tokenizer does not normalize CR and CRLF newlines to LF; the specification
+does this while preprocessing the input stream, and the suite assumes it has
+happened. Doctype content is exposed as a single string, so only the doctype
+name is compared.
+
 ## Intentionally unsupported in 0.2
 
 - browser `html`/`head`/`body` wrapper synthesis;
