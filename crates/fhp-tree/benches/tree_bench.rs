@@ -3,10 +3,7 @@
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 
 fn load_testdata(name: &str) -> String {
-    let path = format!(
-        "{}/testdata/{name}",
-        env!("CARGO_MANIFEST_DIR").trim_end_matches("crates/fhp-tree")
-    );
+    let path = format!("{}/../../testdata/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
 }
 

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Resolve benchmark fixture paths on Windows.
 - Preserve Rust 1.85 support for multi-root positioned XPath evaluation.
 - Bound oversized raw-text/RCDATA closing-tag candidates without accumulating
   their discarded source; preserve the original tag name and quote state.

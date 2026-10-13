@@ -12,12 +12,7 @@ use contract_support::{fhp_bench_order, fixture_contract, validate_lol_html_pass
 use criterion::{Criterion, criterion_group, criterion_main};
 
 fn load_testdata(name: &str) -> String {
-    let path = format!(
-        "{}/testdata/{name}",
-        env!("CARGO_MANIFEST_DIR")
-            .trim_end_matches("crates/fast-html-parser")
-            .trim_end_matches('/')
-    );
+    let path = format!("{}/../../testdata/{name}", env!("CARGO_MANIFEST_DIR"));
     std::fs::read_to_string(&path).unwrap_or_else(|error| panic!("failed to read {path}: {error}"))
 }
 
