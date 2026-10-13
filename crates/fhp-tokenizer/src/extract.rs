@@ -789,11 +789,15 @@ impl<'a> Parser<'a> {
         byte == b'>' && self.input[pos - 2..pos] == *b"]]"
     }
 
-    /// Doctype content between `<!` and `end`, without the `DOCTYPE` keyword.
+    /// Doctype content between `<!` and `end`, without the `DOCTYPE` keyword
+    /// or surrounding HTML whitespace.
     fn doctype_content(&self, end: usize) -> &'a str {
-        let content = self.str_slice(self.special_open_pos + 2, end).trim();
+        let is_html_space = |ch: char| ch.is_ascii() && is_html_whitespace(ch as u8);
+        let content = self
+            .str_slice(self.special_open_pos + 2, end)
+            .trim_matches(is_html_space);
         if content.len() >= 7 && content.as_bytes()[..7].eq_ignore_ascii_case(b"DOCTYPE") {
-            content[7..].trim_start()
+            content[7..].trim_start_matches(is_html_space)
         } else {
             content
         }
@@ -1226,6 +1230,22 @@ mod tests {
                 assert_eq!(content.as_ref(), "html");
             }
             other => panic!("expected Doctype, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn doctype_content_trims_only_html_whitespace() {
+        // Vertical tab, NBSP, and U+3000 are not HTML whitespace.
+        for (input, expected) in [
+            ("<!DOCTYPE\u{b}>", "\u{b}"),
+            ("<!DOCTYPE html\u{a0}>", "html\u{a0}"),
+            ("<!DOCTYPE\u{3000}html>", "\u{3000}html"),
+            ("<!DOCTYPE \t\n\x0c\rhtml \t\n\x0c\r>", "html"),
+        ] {
+            match tokenize(input).as_slice() {
+                [Token::Doctype { content }] => assert_eq!(content, expected, "{input:?}"),
+                other => panic!("expected one Doctype for {input:?}, got {other:?}"),
+            }
         }
     }
 }
