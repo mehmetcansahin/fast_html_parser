@@ -82,7 +82,7 @@ pub(crate) mod differential {
     ///
     /// The CPU must support the target features `compute` was compiled for.
     pub(crate) unsafe fn assert_delimiter_runs_match_scalar(compute: ComputeAllMasks) {
-        for delimiter in [b'<', b'>', b'"', b'\''] {
+        for delimiter in *b"<>\"'" {
             let block = [delimiter; MAX_LEN];
             for len in 0..=MAX_LEN {
                 // SAFETY: forwarded from this function's contract.

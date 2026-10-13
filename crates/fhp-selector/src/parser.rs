@@ -326,7 +326,7 @@ impl<'a> Parser<'a> {
         // → subject = compounds[last], chain = [(comb[n-1], compounds[n-1]), ..., (comb[0], compounds[0])]
         let subject = compounds.pop().unwrap();
         let mut chain = Vec::new();
-        for (compound, combinator) in compounds.into_iter().zip(combinators.into_iter()).rev() {
+        for (compound, combinator) in compounds.into_iter().zip(combinators).rev() {
             chain.push((combinator, compound));
         }
 
