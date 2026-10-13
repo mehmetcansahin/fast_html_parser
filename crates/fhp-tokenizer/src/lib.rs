@@ -273,24 +273,14 @@ mod tokenize_with_tests {
         tokens
     }
 
-    /// Compare `tokenize` and `tokenize_with` for equivalence.
+    /// Compare `tokenize` and `tokenize_with` token for token, payloads
+    /// included.
     fn assert_equivalent(html: &str) {
-        let vec_tokens = tokenize(html);
-        let cb_tokens = collect_with(html);
         assert_eq!(
-            vec_tokens.len(),
-            cb_tokens.len(),
-            "token count mismatch for {:?}",
-            html
+            tokenize(html),
+            collect_with(html),
+            "token mismatch for {html:?}"
         );
-        for (i, (a, b)) in vec_tokens.iter().zip(cb_tokens.iter()).enumerate() {
-            assert_eq!(
-                std::mem::discriminant(a),
-                std::mem::discriminant(b),
-                "token type mismatch at index {i} for {:?}: {a:?} vs {b:?}",
-                html
-            );
-        }
     }
 
     #[test]

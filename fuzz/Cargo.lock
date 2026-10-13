@@ -39,6 +39,7 @@ dependencies = [
 name = "fast-html-parser-fuzz"
 version = "0.0.0"
 dependencies = [
+ "fhp-core",
  "fhp-selector",
  "fhp-tokenizer",
  "fhp-tree",

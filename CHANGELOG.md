@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A tokenizer oracle shared by `cargo test` and the new
+  `tokenizer_differential` fuzz target, which replaces `tokenizer_equivalence`.
+  It compares all five tokenizer entry points under arbitrary chunking,
+  checks span and token invariants, shifts input across SIMD blocks, and
+  round-trips serialized tokens.
+- An HTML fuzzing dictionary and committed tokenizer seeds, both used by the
+  release gate.
+
 ### Fixed
 
 - Trim only HTML whitespace around doctype content; vertical tab, NBSP, and

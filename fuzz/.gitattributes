@@ -1,0 +1,2 @@
+# Seed inputs are raw bytes, including their two-byte control header.
+seeds/** -text

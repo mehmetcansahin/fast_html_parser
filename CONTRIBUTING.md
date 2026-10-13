@@ -77,6 +77,23 @@ Rosetta 2 executes AVX2 and SSE4.2 instructions but hides them from CPUID, so
 the backend tests skip themselves unless these overrides are set. Set them only
 where the instructions actually execute.
 
+Tokenizer changes are checked by a shared oracle
+(`crates/fhp-tokenizer/tests/oracle/mod.rs`). It compares every entry point
+(`tokenize`, `tokenize_with`, `tokenize_into`, and both `StreamTokenizer`
+feeds), checks span and token invariants, shifts the input across SIMD blocks,
+and re-tokenizes serialized output. `cargo test -p fhp-tokenizer --test
+differential` runs it on edge cases, generated documents, and `testdata/`; the
+`tokenizer_differential` fuzz target runs it on arbitrary input:
+
+```bash
+cargo +nightly fuzz run tokenizer_differential \
+  fuzz/corpus/tokenizer_differential fuzz/seeds/tokenizer_differential \
+  -- -dict=fuzz/dict/html.dict
+```
+
+When the fuzzer reports a failure, add the minimized input to the oracle's
+edge cases in `crates/fhp-tokenizer/tests/differential.rs`.
+
 ## Code Quality
 
 The local gate runs the following checks; use these commands when narrowing a

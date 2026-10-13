@@ -22,6 +22,38 @@ class ReleaseScriptTests(unittest.TestCase):
         parsed = parser.parse_args(["release", "--version", "0.2.0"])
         self.assertEqual(parsed.version, "0.2.0")
 
+    def test_fuzz_command_adds_seeds_and_html_dictionary(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            fuzz_dir = Path(temporary)
+            (fuzz_dir / "seeds" / "tokenizer_differential").mkdir(parents=True)
+
+            command = release.fuzz_command("tokenizer_differential", fuzz_dir)
+            self.assertEqual(
+                command,
+                [
+                    "cargo",
+                    "+nightly",
+                    "fuzz",
+                    "run",
+                    "tokenizer_differential",
+                    str(fuzz_dir / "corpus" / "tokenizer_differential"),
+                    str(fuzz_dir / "seeds" / "tokenizer_differential"),
+                    "--",
+                    f"-dict={fuzz_dir / 'dict' / 'html.dict'}",
+                    "-max_total_time=60",
+                ],
+            )
+            self.assertEqual(
+                release.fuzz_command("selector", fuzz_dir),
+                ["cargo", "+nightly", "fuzz", "run", "selector", "--", "-max_total_time=60"],
+            )
+
+    def test_fuzz_targets_exist(self):
+        manifest = (release.FUZZ_DIR / "Cargo.toml").read_text(encoding="utf-8")
+        for target in release.FUZZ_TARGETS:
+            self.assertIn(f'name = "{target}"', manifest)
+        self.assertTrue((release.FUZZ_DIR / "dict" / "html.dict").is_file())
+
     def test_version_validation_checks_internal_requirements(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

@@ -10,13 +10,14 @@ cargo-fuzz = true
 
 [dependencies]
 libfuzzer-sys = "0.4"
+fhp-core = { path = "../crates/fhp-core" }
 fhp-tokenizer = { path = "../crates/fhp-tokenizer", features = ["entity-decode", "simd"] }
 fhp-tree = { path = "../crates/fhp-tree", features = ["encoding", "entity-decode", "simd"] }
 fhp-selector = { path = "../crates/fhp-selector" }
 
 [[bin]]
-name = "tokenizer_equivalence"
-path = "fuzz_targets/tokenizer_equivalence.rs"
+name = "tokenizer_differential"
+path = "fuzz_targets/tokenizer_differential.rs"
 test = false
 doc = false
 bench = false

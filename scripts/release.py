@@ -34,11 +34,14 @@ CRATES = (
     "fast-html-parser",
 )
 FUZZ_TARGETS = (
-    "tokenizer_equivalence",
+    "tokenizer_differential",
     "tree_equivalence",
     "entity_decode",
     "selector",
 )
+FUZZ_DIR = ROOT / "fuzz"
+# Targets whose input is HTML and therefore benefit from the HTML dictionary.
+HTML_FUZZ_TARGETS = frozenset({"tokenizer_differential", "tree_equivalence"})
 CROSS_TARGETS = (
     "x86_64-unknown-linux-gnu",
     "x86_64-pc-windows-msvc",
@@ -265,6 +268,23 @@ def command_check() -> None:
     run(["python3", "scripts/bench.py", "verify"])
 
 
+def fuzz_command(target: str, fuzz_dir: Path = FUZZ_DIR) -> list[str]:
+    """Run `target` for 60 seconds from its corpus plus any committed seeds.
+
+    libFuzzer writes new inputs to the first corpus directory only, so the
+    committed seed directory stays read-only.
+    """
+    command = ["cargo", "+nightly", "fuzz", "run", target]
+    seeds = fuzz_dir / "seeds" / target
+    if seeds.is_dir():
+        command += [str(fuzz_dir / "corpus" / target), str(seeds)]
+    command.append("--")
+    if target in HTML_FUZZ_TARGETS:
+        command.append(f"-dict={fuzz_dir / 'dict' / 'html.dict'}")
+    command.append("-max_total_time=60")
+    return command
+
+
 def command_release(version: str) -> None:
     ensure_clean_worktree()
     validate_versions(version)
@@ -286,7 +306,8 @@ def command_release(version: str) -> None:
             env={"FHP_SIMD_FORCE_AVX2": "1", "FHP_SIMD_FORCE_SSE42": "1"},
         )
     for target in FUZZ_TARGETS:
-        run(["cargo", "+nightly", "fuzz", "run", target, "--", "-max_total_time=60"])
+        (FUZZ_DIR / "corpus" / target).mkdir(parents=True, exist_ok=True)
+        run(fuzz_command(target))
     run(["cargo", "package", "--workspace", "--locked", "--no-verify"])
     audit_package_archives(version)
     validate_clean_benchmark_report()
