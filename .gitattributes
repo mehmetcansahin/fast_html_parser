@@ -1,0 +1,9 @@
+# Check out text files with LF on every platform, regardless of
+# core.autocrlf. Benchmark provenance hashes raw source bytes (Rust sources,
+# Cargo files, scripts/bench.py, benchmarks/contracts.json), so a checkout must
+# match the committed blobs byte for byte.
+* text=auto eol=lf
+
+# Byte-exact inputs pinned by length and SHA-256: never convert line endings.
+/testdata/*.html -text
+/vendor/whatwg/entities.json -text
