@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   release gate.
 - The html5lib-tests tokenizer suite, vendored at a pinned commit and run by
   `cargo test` against a categorized expected-failures list.
+- A test that one-shot and streaming tokenization time grows linearly on
+  adversarial input, such as unterminated comments, tags, and raw text.
 
 ### Fixed
 
