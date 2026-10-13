@@ -12,15 +12,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Preserve Rust 1.85 support for multi-root positioned XPath evaluation.
 - Bound oversized raw-text/RCDATA closing-tag candidates without accumulating
   their discarded source; preserve the original tag name and quote state.
-- Preserve raw-text character references at EOF in unfinished closing-tag
-  candidates across one-shot, callback, streaming, and early-stop parsing.
+- Drop a raw-text/RCDATA closing tag interrupted by EOF identically across
+  one-shot, callback, streaming, and early-stop parsing.
 
 ## [0.2.0] - 2026-07-16
 
 ### Added
 
 - `StreamParser::with_max_input_size` and `parse_stream_with_limit`, with raw
-  and decoded-byte enforcement capped at `u32::MAX`.
+  and decoded-byte enforcement capped at 2 GiB.
 - Explicit `stop_on_create` and `stop_after_element` early-stop modes, plus
   owned `EarlyStopMatch`, `EarlyStopOutcome`, `EarlyStopProgress`, and
   `MatchCompleteness` results.
@@ -43,6 +43,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   benchmark comparisons.
 - A full Apple M1 benchmark report and a same-source local-baseline
   repeatability report documenting when regression candidates require reruns.
+- `Tag::Xmp`, `Tag::Noembed`, `Tag::Noframes`, and `Tag::Plaintext`; `xmp`,
+  `noembed`, and `noframes` content is tokenized as raw text.
+- `fhp_core::attr`, the single start-tag attribute grammar shared by the
+  tokenizer, tree arena, and encoding prescan.
+- `fast_html_parser::selector` and `fast_html_parser::encoding` re-export the
+  complete `fhp-selector` and `fhp-encoding` crates (including
+  `DecodingReader`).
+- docs.rs metadata for every library crate; the release gate builds nightly
+  rustdoc with `--cfg docsrs` and checks Rust 1.85 against a freshly resolved
+  lockfile.
 
 ### Changed
 
@@ -75,6 +85,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   official v0.2 result.
 - Clarify in the benchmark and contribution guides that a single local
   threshold failure must be confirmed before it is described as a regression.
+- **Breaking:** decoding is lossy. Malformed byte sequences become U+FFFD in
+  byte, streaming, and async entry points; `fhp_encoding::decode` and
+  `decode_or_detect` return the decoded `String` directly. `HtmlError::Encoding`
+  and `EncodingError` are removed. An explicit `decode` encoding is honored
+  rather than overridden by a different BOM.
+- **Breaking:** XPath APIs require the `xpath` feature; 0.1.2 compiled them
+  with `css-selector`.
+- **Breaking:** the effective input ceiling is `min(configured_limit, 2 GiB)`,
+  so named-reference expansion (at most 6/5) cannot overflow `u32` arena
+  offsets.
+- **Breaking:** `TreeBuilder::set_source` and `set_source_ptr` are crate-private.
+- **Breaking:** `Tag` gained four variants; those names no longer appear as
+  `Tag::Unknown`.
+- **Breaking:** `fhp-simd` exposes only `compute_all_masks` and `level`;
+  `find_delimiters`, `classify_bytes`, `skip_whitespace`, `compute_byte_mask`,
+  `DelimiterResult`, and the byte-class API are removed.
+- Formatting end tags are still repaired, but formatting elements closed
+  implicitly by another start tag are no longer reconstructed; the write-only
+  active-formatting list is removed.
+- A doctype ends at its first `>`, even inside quotes, as in browsers.
+- `cargo deny` audits the all-features graph, including Windows. RUSTSEC-2025-0052
+  (async-std is discontinued) is acknowledged; the optional `async-async-std`
+  feature remains for existing users.
 
 ### Fixed
 
@@ -86,6 +119,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   views consistent.
 - Decode the complete named entity set with distinct text and attribute
   legacy-semicolon rules.
+- Tokenizer: quotes inside attribute names and unquoted values are literal, so
+  `<img alt=it's>` no longer swallows the following markup; a `/` inside an
+  unquoted value is kept and does not mark the tag self-closing; an end tag's
+  name ends at its first `>` even when it contains `=` or a quote.
+- Tokenizer: `<?…>`, unknown `<!…>` declarations, and `</` plus a non-letter
+  become comments; `</>` is ignored; `<_x>` is text; `--!>` closes a comment;
+  unterminated comments, CDATA, doctypes, and bogus comments are emitted at EOF,
+  while an unterminated tag is dropped.
+- Tokenizer: script data honors the `<!--` escape and double-escape states.
+- Streaming tokenizer matches the one-shot tokenizer for every case above,
+  compacts its residual once per feed, and keeps oversized tags, close-tag
+  candidates, and invalid UTF-8 tails bounded without splitting valid
+  characters.
+- Tree: nested lists, nested tables, captions, column groups, and in-table
+  `script`, `style`, `form`, and hidden `input` keep their structure instead of
+  being flattened or fostered out; foster parenting depends on the current
+  node; `p`, `li`, `dt`/`dd`, heading, and table-part closes respect element
+  scopes; `</dd>`/`</dt>` close only an element with the same name; `</br>` and
+  stray `</p>` follow the HTML rules; the leading newline after `pre`,
+  `textarea`, and `listing` is dropped.
+- Tree: table end tags inside a `select` in a table are ignored unless that
+  element is in table scope, other end tags close an open column group, and
+  formatting elements reopened by end-tag repair are foster-parented out of a
+  table.
+- Tree: `descendants()` of a leaf yields only the leaf, `plaintext` content
+  serializes literally, and CDATA text, as well as the content of a raw-text
+  start tag the builder ignores (such as `<xmp>` inside `<select>`), is
+  identical across one-shot and streaming parsers.
+- Encoding prescan: `<!-->` and `<!--->` are complete comments, tag ends use the
+  shared attribute grammar, and `x-user-defined` maps to windows-1252.
+- Selector: selecting within a `Selection` matches ancestors outside the
+  selected roots, multi-root selections no longer drop matches, and `:not(...)`
+  never matches the synthetic root.
+- SIMD: AVX2 masks no longer sign-extend bit 31 into the upper 32 bits.
+- `fhp-tree` documentation builds on docs.rs.
+
+### Security
+
+- Remove quadratic paths reachable from untrusted input: repeated duplicate
+  attributes, crafted duplicate-name hash collisions (now randomly keyed),
+  foster-parented insertions before a table, `~` sibling chains, sub-selection
+  over many roots, positioned XPath text over many roots, and per-split
+  residual copying in the streaming tokenizer.
 
 ### Performance
 

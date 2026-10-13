@@ -170,6 +170,38 @@ fn assert_oracle_case(name: &str, html: &str) {
 #[test]
 fn supported_recovery_subset_matches_html5ever() {
     let mut cases = vec![
+        // Tokenizer: WHATWG attribute grammar, bogus comments, EOF handling,
+        // legacy raw-text elements, and script-data escapes.
+        (
+            "apostrophe in unquoted attribute value",
+            "<img alt=it's><p>visible</p><p>it's done</p>",
+        ),
+        ("quote in attribute name", "<div a\"b>x</div><p>y</p>"),
+        (
+            "processing instruction is a bogus comment",
+            "<?xml version=\"1.0\"?><p>hi</p>",
+        ),
+        (
+            "slash ending an unquoted value",
+            "<a href=http://example.com/>x</a>",
+        ),
+        ("unquoted slash value", "<a b=/>x</a>"),
+        ("comment closed by --!>", "<!-- c --!><p>after</p>"),
+        (
+            "conditional comment markers are bogus comments",
+            "<![if !IE]><p>a</p><![endif]><p>b</p>",
+        ),
+        ("end tag open before space", "<p>a</ b>c</p>"),
+        ("empty end tag", "<p>a</>c</p>"),
+        ("lt before underscore is text", "<_foo>x</_foo>"),
+        ("unterminated comment at EOF", "<p>x</p><!-- unterminated"),
+        ("unterminated tag at EOF", "<p>x</p><div class=\"a"),
+        ("xmp is raw text", "<xmp><b>x</b></xmp>"),
+        ("noembed is raw text", "<noembed><b>x</b></noembed>"),
+        (
+            "escaped script end tag",
+            "<script><!--<script>x</script>y--></script><p>z</p>",
+        ),
         ("non-void trailing slash", "<div/>after"),
         ("paragraph implicit close", "<p>a<div>b</div>c"),
         ("list item implicit close", "<ul><li>a<li>b</ul>"),
@@ -212,6 +244,155 @@ fn supported_recovery_subset_matches_html5ever() {
         (
             "duplicate attributes are first-wins",
             "<div ID=first id=second class=a CLASS=b>x</div>",
+        ),
+        (
+            "nested list in list item",
+            "<ul><li>a<ul><li>b</li></ul></li></ul>",
+        ),
+        (
+            "list item start stops at nested list",
+            "<ul><li>a<ol><li>b<li>c</ol><li>d</ul>",
+        ),
+        (
+            "definition item start stops at nested dl",
+            "<dl><dt>a<dd><dl><dt>b</dl></dl>",
+        ),
+        (
+            "list item start stops at table cell",
+            "<ul><li>a<table><tr><td><li>b</td></tr></table></li></ul>",
+        ),
+        (
+            "nested table in cell",
+            "<table><tr><td><table><tr><td>inner</td></tr></table></td><td>x</td></tr></table>",
+        ),
+        (
+            "nested table inside div in cell",
+            "<table><tr><td><div><table><tr><td>i</td></tr></table></div></td></tr></table>",
+        ),
+        (
+            "table caption",
+            "<table><caption>cap</caption><tr><td>x</td></tr></table>",
+        ),
+        (
+            "table colgroup",
+            "<table><colgroup><col><col></colgroup><tr><td>x</td></tr></table>",
+        ),
+        (
+            "table col implies colgroup",
+            "<table><col><tr><td>x</td></tr></table>",
+        ),
+        (
+            "script inside table",
+            "<table><script>var a=1;</script><tr><td>x</td></tr></table>",
+        ),
+        (
+            "style inside table",
+            "<table><style>td{}</style><tr><td>x</td></tr></table>",
+        ),
+        (
+            "form inside table",
+            "<table><form><tr><td>x</td></tr></form></table>",
+        ),
+        (
+            "hidden input inside table",
+            "<table><input type=hidden name=a><tr><td>x</td></tr></table>",
+        ),
+        (
+            "text input fostered out of table",
+            "<table><input type=text><tr><td>x</td></tr></table>",
+        ),
+        (
+            "fostered element keeps its content",
+            "<table><div>hello<span>w</span></div><tr><td>x</td></tr></table>",
+        ),
+        (
+            "fostered paragraph",
+            "<table><p>para</p><tr><td>x</td></tr></table>",
+        ),
+        (
+            "table row start closes fostered element",
+            "<table><div>x<tr><td>y</td></tr></table>",
+        ),
+        (
+            "div end tag ignored inside cell",
+            "<div><table><tr><td>cell</div>after</td></tr></table>",
+        ),
+        (
+            "anchor inside cell is not repaired across the cell",
+            "<a href=o><table><tr><td><a href=i>x</a></td><td>y</td></tr></table></a>",
+        ),
+        (
+            "cell end tag closes select in table",
+            "<table><tr><td><select><option>a</td><td>b</td></tr></table>",
+        ),
+        (
+            "table start closes select in table",
+            "<table><tr><td><select><option>a<table><tr><td>b</td></tr></table></td></tr></table>",
+        ),
+        (
+            "heading start does not pop a non-heading",
+            "<h1>a<span>b<h2>c</h2></span></h1>",
+        ),
+        (
+            "option start only closes a current option",
+            "<option>a<div>b<option>c",
+        ),
+        ("list item start closes paragraph", "<p>a<li>b"),
+        (
+            "paragraph end tag without open paragraph",
+            "<div>a</p>b</div>",
+        ),
+        ("br end tag is a br start tag", "<p>a</br>b</p>"),
+        ("orphan cell is ignored", "<td>x</td>"),
+        (
+            "cell after table is ignored",
+            "<table><tr><td>a</td></tr></table><td>b</td>",
+        ),
+        (
+            "script inside select",
+            "<select><option>a</option><script>s</script></select>",
+        ),
+        (
+            "leading newline after pre and textarea",
+            "<pre>\ncode</pre><textarea>\ntext</textarea>",
+        ),
+        (
+            "end tag name with equals and quote",
+            "<div>a</div=\"x>b<p>visible</p>",
+        ),
+        (
+            "end tag name with quote before content",
+            "<p>a</p=\"><b>bold</b> rest",
+        ),
+        (
+            "end tag attribute name starting with equals",
+            "<div>a</div ='x>b<p>visible</p>",
+        ),
+        ("dt end tag does not close dd", "<dd>a</dt>b"),
+        ("dd end tag does not close dt", "<dt>a</dd>b"),
+        (
+            "select in table ignores caption end tag outside scope",
+            "<table><tr><td><select><option>a</caption>b</td></tr></table>",
+        ),
+        (
+            "select in table ignores th end tag in td",
+            "<table><tr><td><select><option>a</th>b</td></tr></table>",
+        ),
+        (
+            "reopened formatting element is fostered from table",
+            "<table><b>x<i>y</b>z<tr><td>c</td></tr></table>",
+        ),
+        (
+            "reopened formatting element is fostered from tbody",
+            "<table><tbody><b>x<i>y</b>z<tr><td>c</td></tr></table>",
+        ),
+        (
+            "reopened formatting element is fostered from tr",
+            "<table><tr><b>x<i>y</b>z<td>c</td></tr></table>",
+        ),
+        (
+            "end tag in column group closes it",
+            "<table><colgroup></p><col></colgroup></table>",
         ),
     ];
 

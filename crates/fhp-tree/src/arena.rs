@@ -4,11 +4,9 @@
 //! traversal. Text content and attributes are stored in separate slabs,
 //! referenced by offset+length from each [`Node`](crate::node::Node).
 
-use std::collections::HashSet;
-use std::hash::{BuildHasherDefault, Hasher};
-use std::mem::MaybeUninit;
-
+use fhp_core::attr::{SeenAttributes, ascii_ci_fingerprint, iter_raw_attrs};
 use fhp_core::hash::{class_bloom_bit, selector_hash};
+use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
 use crate::node::{Node, NodeFlags, NodeId};
@@ -29,160 +27,11 @@ pub struct Attribute {
 
 /// Number of tag index buckets (Tag is `repr(u8)`, 256 possible values).
 const TAG_INDEX_SIZE: usize = 256;
-const INLINE_SEEN_ATTRIBUTES: usize = 8;
-const ASCII_CI_FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
 
 struct PendingSourceCopy {
     source_offset: usize,
     text_offset: usize,
     len: usize,
-}
-
-#[derive(Clone, Copy)]
-struct SeenAttribute<'a> {
-    fingerprint: u64,
-    name: &'a [u8],
-}
-
-/// A no-op hasher for the already-hashed attribute fingerprints.
-#[derive(Default)]
-struct FingerprintHasher(u64);
-
-impl Hasher for FingerprintHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for &byte in bytes {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        self.0 = hash;
-    }
-
-    #[inline]
-    fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
-}
-
-type SeenAttributeSet = HashSet<u64, BuildHasherDefault<FingerprintHasher>>;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InsertResult {
-    New,
-    Duplicate,
-    FingerprintCollision,
-}
-
-struct SeenAttributes<'a> {
-    bloom: u64,
-    // `MaybeUninit` avoids zeroing 192 bytes for the overwhelmingly common
-    // one-to-three-attribute case. The initialized prefix is tracked by
-    // `inline_len` and `SeenAttribute` is `Copy`, so no drop work is needed.
-    inline: [MaybeUninit<SeenAttribute<'a>>; INLINE_SEEN_ATTRIBUTES],
-    inline_len: usize,
-    heap: Option<SeenAttributeSet>,
-}
-
-impl<'a> SeenAttributes<'a> {
-    #[inline]
-    fn with_first(name: &'a [u8]) -> Self {
-        let fingerprint = ascii_ci_fingerprint(name);
-        let mut inline = [MaybeUninit::uninit(); INLINE_SEEN_ATTRIBUTES];
-        inline[0].write(SeenAttribute { fingerprint, name });
-        Self {
-            bloom: fingerprint_bloom(fingerprint),
-            inline,
-            inline_len: 1,
-            heap: None,
-        }
-    }
-
-    #[inline]
-    fn insert(&mut self, name: &'a [u8]) -> InsertResult {
-        let fingerprint = ascii_ci_fingerprint(name);
-        self.insert_hashed(name, fingerprint)
-    }
-
-    /// Variant for callers that already visited every name byte while parsing.
-    #[inline]
-    fn insert_hashed(&mut self, name: &'a [u8], fingerprint: u64) -> InsertResult {
-        let candidate = SeenAttribute { fingerprint, name };
-
-        if let Some(heap) = &mut self.heap {
-            return if heap.insert(fingerprint) {
-                InsertResult::New
-            } else {
-                InsertResult::FingerprintCollision
-            };
-        }
-
-        let bloom = fingerprint_bloom(fingerprint);
-        if self.bloom & bloom == bloom
-            && self
-                .inline_entries()
-                .iter()
-                .any(|seen| seen.fingerprint == fingerprint && seen.name.eq_ignore_ascii_case(name))
-        {
-            return InsertResult::Duplicate;
-        }
-
-        self.bloom |= bloom;
-        if self.inline_len < INLINE_SEEN_ATTRIBUTES {
-            self.inline[self.inline_len].write(candidate);
-            self.inline_len += 1;
-        } else {
-            let mut heap = SeenAttributeSet::with_capacity_and_hasher(
-                INLINE_SEEN_ATTRIBUTES * 2,
-                BuildHasherDefault::default(),
-            );
-            for &seen in self.inline_entries() {
-                heap.insert(seen.fingerprint);
-            }
-            let fingerprint_was_new = heap.insert(fingerprint);
-            self.heap = Some(heap);
-            if !fingerprint_was_new {
-                return InsertResult::FingerprintCollision;
-            }
-        }
-        InsertResult::New
-    }
-
-    #[inline]
-    fn inline_entries(&self) -> &[SeenAttribute<'a>] {
-        // SAFETY: only the prefix `[..inline_len]` is exposed, and every entry
-        // in that prefix is initialized immediately before `inline_len` grows.
-        unsafe {
-            std::slice::from_raw_parts(
-                self.inline.as_ptr().cast::<SeenAttribute<'a>>(),
-                self.inline_len,
-            )
-        }
-    }
-}
-
-#[inline]
-fn ascii_ci_fingerprint(name: &[u8]) -> u64 {
-    let mut hash = ASCII_CI_FINGERPRINT_OFFSET;
-    for &byte in name {
-        hash = ascii_ci_fingerprint_step(hash, byte);
-    }
-    hash
-}
-
-#[inline(always)]
-fn ascii_ci_fingerprint_step(hash: u64, byte: u8) -> u64 {
-    (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(0x0000_0100_0000_01b3)
-}
-
-#[inline]
-fn fingerprint_bloom(fingerprint: u64) -> u64 {
-    (1u64 << (fingerprint & 63)) | (1u64 << ((fingerprint >> 32) & 63))
 }
 
 #[inline]
@@ -197,7 +46,7 @@ fn update_selector_hashes(
     };
 
     if name.eq_ignore_ascii_case(b"class") {
-        for class in value.split(|byte| crate::is_html_space(*byte)) {
+        for class in value.split(|byte| is_html_whitespace(*byte)) {
             if !class.is_empty() {
                 *class_hash |= class_bloom_bit(class);
             }
@@ -422,60 +271,33 @@ impl Arena {
         id
     }
 
-    #[inline]
-    fn attr_name_exists(&self, offset: u32, count: u16, name: &[u8]) -> bool {
-        let start = offset as usize;
-        let end = start + usize::from(count);
-        self.attr_slab[start..end].iter().any(|attr| {
-            let name_start = attr.name_offset as usize;
-            let name_end = name_start + attr.name_len as usize;
-            self.attr_str_slab[name_start..name_end].eq_ignore_ascii_case(name)
-        })
-    }
-
     /// Set attributes for a node from tokenizer attributes.
+    ///
+    /// Names are compared ASCII case-insensitively; the first occurrence of a
+    /// name wins and later duplicates are dropped.
     pub fn set_attrs(&mut self, node: NodeId, attrs: &[fhp_tokenizer::token::Attribute<'_>]) {
         if attrs.is_empty() {
             return;
         }
         let offset = self.attr_slab.len() as u32;
         let mut count = 0u16;
-        let mut seen: Option<SeenAttributes<'_>> = None;
-        let mut first_name: Option<&[u8]> = None;
+        let mut seen = SeenAttributes::new();
         let mut class_hash = 0u64;
         let mut id_hash = 0u32;
 
         for attr in attrs {
-            let name = attr.name.as_bytes();
             if count == u16::MAX {
+                break;
+            }
+            let name = attr.name.as_bytes();
+            if seen.duplicate_or_insert(name, ascii_ci_fingerprint(name)) {
                 continue;
             }
-            let insert_result = if let Some(seen) = &mut seen {
-                seen.insert(name)
-            } else if count == 0 {
-                InsertResult::New
-            } else if self.attr_name_exists(offset, count, name) {
-                InsertResult::Duplicate
-            } else {
-                let tracker = seen.insert(SeenAttributes::with_first(
-                    first_name.expect("the first accepted attribute name must be tracked"),
-                ));
-                tracker.insert(name)
-            };
-            let duplicate = match insert_result {
-                InsertResult::New => false,
-                InsertResult::Duplicate => true,
-                InsertResult::FingerprintCollision => self.attr_name_exists(offset, count, name),
-            };
-            if duplicate {
-                continue;
-            }
-            first_name.get_or_insert(name);
             let name_offset = self.attr_str_slab.len() as u32;
             self.attr_str_slab.extend_from_slice(name);
             let name_len = attr.name.len() as u32;
 
-            let (value_offset, value_len, has_value) = if let Some(ref v) = attr.value {
+            let (value_offset, value_len, has_value) = if let Some(v) = &attr.value {
                 update_selector_hashes(name, Some(v.as_bytes()), &mut class_hash, &mut id_hash);
                 let vo = self.attr_str_slab.len() as u32;
                 self.attr_str_slab.extend_from_slice(v.as_bytes());
@@ -510,10 +332,10 @@ impl Arena {
     ///
     /// Skips all intermediate `Vec<Attribute>` allocation — names and values
     /// are written directly to `attr_str_slab` and compact `Attribute` structs
-    /// are pushed to `attr_slab` in a single pass.
+    /// are pushed to `attr_slab` in a single pass. Duplicate names (ASCII
+    /// case-insensitive) keep the first occurrence.
     pub fn set_attrs_from_raw(&mut self, node: NodeId, attr_raw: &str) {
-        let bytes = attr_raw.as_bytes();
-        let end = bytes.len();
+        let end = attr_raw.len();
         if end == 0 {
             return;
         }
@@ -529,162 +351,44 @@ impl Arena {
 
         let slab_offset = self.attr_slab.len() as u32;
         let mut count: u16 = 0;
-        let mut seen: Option<SeenAttributes<'_>> = None;
-        let mut first_name: Option<&[u8]> = None;
+        let mut seen = SeenAttributes::new();
         let mut class_hash = 0u64;
         let mut id_hash = 0u32;
-        let mut pos = 0;
 
-        loop {
-            // Skip whitespace using fast byte scan.
-            pos += bytes[pos..end]
-                .iter()
-                .position(|&b| !is_attr_whitespace(b))
-                .unwrap_or(end - pos);
-            if pos >= end || count == u16::MAX {
+        for attr in iter_raw_attrs(attr_raw) {
+            if count == u16::MAX {
                 break;
             }
-
-            // Attribute name.
-            let name_start = pos;
-            let hash_during_parse = seen.is_some();
-            let mut fingerprint = ASCII_CI_FINGERPRINT_OFFSET;
-            if hash_during_parse {
-                while pos < end && !is_attr_name_end(bytes[pos]) {
-                    fingerprint = ascii_ci_fingerprint_step(fingerprint, bytes[pos]);
-                    pos += 1;
-                }
-            } else {
-                while pos < end && !is_attr_name_end(bytes[pos]) {
-                    pos += 1;
-                }
-            }
-            if name_start == pos {
-                // Not a valid name char — skip it.
-                pos += 1;
+            let name = attr.name.as_bytes();
+            if seen.duplicate_or_insert(name, attr.fingerprint) {
                 continue;
             }
+            let name_offset = self.attr_str_slab.len() as u32;
+            self.attr_str_slab.extend_from_slice(name);
 
-            let name = &bytes[name_start..pos];
-            let insert_result = if let Some(seen) = &mut seen {
-                debug_assert!(hash_during_parse);
-                seen.insert_hashed(name, fingerprint)
-            } else if count == 0 {
-                InsertResult::New
-            } else if self.attr_name_exists(slab_offset, count, name) {
-                InsertResult::Duplicate
-            } else {
-                let tracker = seen.insert(SeenAttributes::with_first(
-                    first_name.expect("the first accepted attribute name must be tracked"),
-                ));
-                tracker.insert(name)
-            };
-            let duplicate = match insert_result {
-                InsertResult::New => false,
-                InsertResult::Duplicate => true,
-                InsertResult::FingerprintCollision => {
-                    self.attr_name_exists(slab_offset, count, name)
+            let (value_offset, value_len, has_value) = match attr.value {
+                Some(raw_value) => {
+                    let (value_offset, value_len) = self.push_attr_value(raw_value);
+                    let value_start = value_offset as usize;
+                    update_selector_hashes(
+                        name,
+                        Some(&self.attr_str_slab[value_start..value_start + value_len as usize]),
+                        &mut class_hash,
+                        &mut id_hash,
+                    );
+                    (value_offset, value_len, true)
                 }
+                None => (0, 0, false),
             };
-            let name_slab_offset = self.attr_str_slab.len() as u32;
-            let name_len = (pos - name_start) as u32;
-            if !duplicate {
-                first_name.get_or_insert(name);
-                self.attr_str_slab.extend_from_slice(name);
-            }
 
-            // Skip whitespace using fast byte scan.
-            pos += bytes[pos..end]
-                .iter()
-                .position(|&b| !is_attr_whitespace(b))
-                .unwrap_or(end - pos);
-
-            // Check for `=`.
-            if pos < end && bytes[pos] == b'=' {
-                pos += 1;
-
-                // Skip whitespace using fast byte scan.
-                pos += bytes[pos..end]
-                    .iter()
-                    .position(|&b| !is_attr_whitespace(b))
-                    .unwrap_or(end - pos);
-
-                // Parse value.
-                if pos < end && (bytes[pos] == b'"' || bytes[pos] == b'\'') {
-                    // Quoted value — use memchr for SIMD-accelerated scan.
-                    let quote = bytes[pos];
-                    pos += 1;
-                    let val_start = pos;
-                    if let Some(found) = memchr::memchr(quote, &bytes[pos..end]) {
-                        pos += found;
-                    } else {
-                        pos = end;
-                    }
-                    let val_end = pos;
-                    if pos < end {
-                        pos += 1; // skip closing quote
-                    }
-                    if !duplicate {
-                        let raw_value = &attr_raw[val_start..val_end];
-                        let (value_offset, value_len) = self.push_attr_value(raw_value);
-                        update_selector_hashes(
-                            name,
-                            Some(
-                                &self.attr_str_slab[value_offset as usize
-                                    ..value_offset as usize + value_len as usize],
-                            ),
-                            &mut class_hash,
-                            &mut id_hash,
-                        );
-                        self.attr_slab.push(Attribute {
-                            name_offset: name_slab_offset,
-                            name_len,
-                            value_offset,
-                            value_len,
-                            has_value: true,
-                        });
-                    }
-                } else {
-                    // Unquoted value.
-                    let val_start = pos;
-                    while pos < end && !is_attr_whitespace(bytes[pos]) && bytes[pos] != b'>' {
-                        pos += 1;
-                    }
-                    if !duplicate {
-                        let raw_value = &attr_raw[val_start..pos];
-                        let (value_offset, value_len) = self.push_attr_value(raw_value);
-                        update_selector_hashes(
-                            name,
-                            Some(
-                                &self.attr_str_slab[value_offset as usize
-                                    ..value_offset as usize + value_len as usize],
-                            ),
-                            &mut class_hash,
-                            &mut id_hash,
-                        );
-                        self.attr_slab.push(Attribute {
-                            name_offset: name_slab_offset,
-                            name_len,
-                            value_offset,
-                            value_len,
-                            has_value: true,
-                        });
-                    }
-                }
-            } else if !duplicate {
-                // Boolean attribute (no value).
-                self.attr_slab.push(Attribute {
-                    name_offset: name_slab_offset,
-                    name_len,
-                    value_offset: 0,
-                    value_len: 0,
-                    has_value: false,
-                });
-            }
-
-            if !duplicate {
-                count += 1;
-            }
+            self.attr_slab.push(Attribute {
+                name_offset,
+                name_len: name.len() as u32,
+                value_offset,
+                value_len,
+                has_value,
+            });
+            count += 1;
         }
 
         if count > 0 {
@@ -714,14 +418,19 @@ impl Arena {
         (offset, raw_value.len() as u32)
     }
 
-    /// Set the 1-based element sibling index for a node.
-    ///
-    /// Called by [`TreeBuilder`](crate::builder::TreeBuilder) after appending an element child.
+    /// The full 1-based element sibling index of a node.
     #[inline]
-    pub fn set_element_index(&mut self, node: NodeId, index: u16) {
-        let target = &mut self.nodes[node.index()];
-        target.attr_raw_offset = u32::from(index);
-        target.element_index = index;
+    pub(crate) fn full_element_index(&self, node: NodeId) -> u32 {
+        self.nodes[node.index()].attr_raw_offset
+    }
+
+    /// Whether a node is an element (not text, comment, or doctype).
+    #[inline]
+    pub(crate) fn is_element(&self, node: NodeId) -> bool {
+        let flags = self.nodes[node.index()].flags;
+        !flags.has(NodeFlags::IS_TEXT)
+            && !flags.has(NodeFlags::IS_COMMENT)
+            && !flags.has(NodeFlags::IS_DOCTYPE)
     }
 
     /// Set the full sibling index while maintaining the compact public field.
@@ -898,18 +607,14 @@ impl Arena {
         self.nodes[parent_index].flags.set(NodeFlags::HAS_CHILDREN);
     }
 
-    /// Recompute element sibling indices after an insertion before an existing
-    /// child. Returns the total number of element children.
+    /// Recompute the element sibling indices of every child of `parent`.
+    /// Returns the total number of element children.
     pub(crate) fn recompute_element_indices(&mut self, parent: NodeId) -> u32 {
         let mut count = 0u32;
         let mut child = self.nodes[parent.index()].first_child;
         while !child.is_null() {
             let next = self.nodes[child.index()].next_sibling;
-            let flags = self.nodes[child.index()].flags;
-            if !flags.has(NodeFlags::IS_TEXT)
-                && !flags.has(NodeFlags::IS_COMMENT)
-                && !flags.has(NodeFlags::IS_DOCTYPE)
-            {
+            if self.is_element(child) {
                 count = count.saturating_add(1);
                 self.set_full_element_index(child, count);
             }
@@ -918,7 +623,7 @@ impl Arena {
         count
     }
 
-    /// Clone an element without children for formatting-element reconstruction.
+    /// Clone an element without children for the adoption-agency reopen path.
     pub(crate) fn clone_element_shallow(&mut self, source: NodeId, depth: u16) -> NodeId {
         let original = &self.nodes[source.index()];
         let tag = original.tag;
@@ -1059,21 +764,6 @@ impl Default for Arena {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// Check if a byte is ASCII whitespace (for attribute parsing).
-#[inline(always)]
-fn is_attr_whitespace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
-}
-
-/// Check if a byte terminates an attribute name.
-#[inline(always)]
-fn is_attr_name_end(b: u8) -> bool {
-    matches!(
-        b,
-        b' ' | b'\t' | b'\n' | b'\x0C' | b'\r' | b'=' | b'/' | b'>'
-    )
 }
 
 /// Resolve arena-owned text metadata without trusting mutable `Node` fields.
@@ -1326,57 +1016,6 @@ mod tests {
         assert_eq!(arena.attr_name(&attrs[0]), "title");
         assert_eq!(arena.attr_value(&attrs[0]), Some("first"));
         assert_eq!(arena.attr_str_slab.len(), "titlefirst".len());
-    }
-
-    #[test]
-    fn seen_attribute_fingerprint_collision_is_not_a_false_duplicate() {
-        let candidate = b"beta";
-        let fingerprint = ascii_ci_fingerprint(candidate);
-        let mut seen = SeenAttributes::with_first(b"alpha");
-        seen.bloom = fingerprint_bloom(fingerprint);
-        seen.inline[0].write(SeenAttribute {
-            fingerprint,
-            name: b"alpha",
-        });
-
-        assert_eq!(seen.insert(candidate), InsertResult::New);
-        assert_eq!(seen.insert(b"BETA"), InsertResult::Duplicate);
-
-        let mut heap_seen = SeenAttributes::with_first(b"alpha");
-        heap_seen.bloom = fingerprint_bloom(fingerprint);
-        heap_seen.inline[0].write(SeenAttribute {
-            fingerprint,
-            name: b"alpha",
-        });
-        for (index, name) in [
-            b"bravo".as_slice(),
-            b"charlie".as_slice(),
-            b"delta".as_slice(),
-            b"echo".as_slice(),
-            b"foxtrot".as_slice(),
-            b"golf".as_slice(),
-            b"hotel".as_slice(),
-            b"india".as_slice(),
-        ]
-        .into_iter()
-        .enumerate()
-        {
-            let expected = if index + 1 < INLINE_SEEN_ATTRIBUTES {
-                InsertResult::New
-            } else {
-                InsertResult::FingerprintCollision
-            };
-            assert_eq!(heap_seen.insert_hashed(name, fingerprint), expected);
-        }
-        assert!(heap_seen.heap.is_some());
-        assert_eq!(
-            heap_seen.insert_hashed(candidate, fingerprint),
-            InsertResult::FingerprintCollision
-        );
-        assert_eq!(
-            heap_seen.insert_hashed(b"BETA", fingerprint),
-            InsertResult::FingerprintCollision
-        );
     }
 
     #[test]

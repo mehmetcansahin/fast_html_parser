@@ -75,17 +75,72 @@ pub fn hash_str(s: &str) -> u32 {
     selector_hash(s.as_bytes())
 }
 
-/// Build ancestor bloom filters for every node in the arena.
+/// Build ancestor bloom filters for `root` and every node below it.
 ///
 /// Each node's bloom contains hashes for all tags, class names, and ids
-/// found in its ancestor chain (not including itself). This is computed
-/// in a single depth-first walk.
+/// found in its ancestor chain (not including itself), including the
+/// ancestors above `root`: selector matching walks real ancestors, so a
+/// subtree root must not start from an empty filter. This is computed in a
+/// single depth-first walk seeded by the ancestors of `root`.
 ///
-/// The returned `Vec` is indexed by `NodeId::index()`.
+/// The returned `Vec` is indexed by `NodeId::index()`; entries outside the
+/// subtree of `root` stay empty.
 pub fn build_ancestor_blooms(arena: &Arena, root: NodeId) -> Vec<AncestorBloom> {
     let mut blooms = vec![AncestorBloom::new(); arena.len()];
-    build_recursive(arena, root, &AncestorBloom::new(), &mut blooms);
+    fill_ancestor_blooms(arena, root, &mut blooms);
     blooms
+}
+
+/// Fill the ancestor blooms of `root` and its subtree into a caller-owned
+/// table indexed by `NodeId::index()` (see [`build_ancestor_blooms`]).
+///
+/// Entries outside the subtree are left untouched, so one table can be
+/// filled for several roots.
+pub(crate) fn fill_ancestor_blooms(arena: &Arena, root: NodeId, blooms: &mut [AncestorBloom]) {
+    if root.is_null() {
+        return;
+    }
+
+    let mut seed = AncestorBloom::new();
+    let mut ancestor = arena.get(root).parent;
+    while !ancestor.is_null() {
+        insert_node_hashes(arena, ancestor, &mut seed);
+        ancestor = arena.get(ancestor).parent;
+    }
+    build_recursive(arena, root, &seed, blooms);
+}
+
+/// Add the hashes a node contributes to its descendants' blooms: its tag,
+/// class names, and id. Text, comment, and doctype nodes contribute nothing.
+fn insert_node_hashes(arena: &Arena, node: NodeId, bloom: &mut AncestorBloom) {
+    let n = arena.get(node);
+    if n.flags.has(NodeFlags::IS_TEXT)
+        || n.flags.has(NodeFlags::IS_COMMENT)
+        || n.flags.has(NodeFlags::IS_DOCTYPE)
+    {
+        return;
+    }
+
+    bloom.insert(hash_tag(n.tag));
+
+    for attr in arena.attrs(node) {
+        let name = arena.attr_name(attr);
+        // Attribute names are not lowercased during parsing, and the matcher
+        // compares them case-insensitively, so the bloom must too (the values
+        // stay case-sensitive, matching CSS semantics).
+        if name.eq_ignore_ascii_case("class") {
+            if let Some(val) = arena.attr_value(attr) {
+                for class in split_html_space(val) {
+                    bloom.insert(hash_str(class));
+                }
+            }
+        }
+        if name.eq_ignore_ascii_case("id") {
+            if let Some(val) = arena.attr_value(attr) {
+                bloom.insert(hash_str(val));
+            }
+        }
+    }
 }
 
 /// Recursive DFS to build ancestor blooms.
@@ -103,42 +158,12 @@ fn build_recursive(
     // (what's above this node, not including itself).
     blooms[node.index()] = *ancestor_bloom;
 
-    let n = arena.get(node);
-
     // Build the bloom that children will inherit: ancestor_bloom + this node.
     let mut child_bloom = *ancestor_bloom;
-
-    // Add this node's tag.
-    if !n.flags.has(NodeFlags::IS_TEXT)
-        && !n.flags.has(NodeFlags::IS_COMMENT)
-        && !n.flags.has(NodeFlags::IS_DOCTYPE)
-    {
-        child_bloom.insert(hash_tag(n.tag));
-
-        // Add class names and id.
-        let attrs = arena.attrs(node);
-        for attr in attrs {
-            let name = arena.attr_name(attr);
-            // Attribute names are not lowercased during parsing, and the matcher
-            // compares them case-insensitively, so the bloom must too (the values
-            // stay case-sensitive, matching CSS semantics).
-            if name.eq_ignore_ascii_case("class") {
-                if let Some(val) = arena.attr_value(attr) {
-                    for class in split_html_space(val) {
-                        child_bloom.insert(hash_str(class));
-                    }
-                }
-            }
-            if name.eq_ignore_ascii_case("id") {
-                if let Some(val) = arena.attr_value(attr) {
-                    child_bloom.insert(hash_str(val));
-                }
-            }
-        }
-    }
+    insert_node_hashes(arena, node, &mut child_bloom);
 
     // Recurse into children.
-    let mut child = n.first_child;
+    let mut child = arena.get(node).first_child;
     while !child.is_null() {
         build_recursive(arena, child, &child_bloom, blooms);
         child = arena.get(child).next_sibling;
@@ -215,5 +240,26 @@ mod tests {
         // Span's ancestors: root, div.
         assert!(blooms[span.index()].may_contain(hash_tag(Tag::Div)));
         assert!(blooms[span.index()].may_contain(hash_tag(Tag::Unknown)));
+    }
+
+    #[test]
+    fn subtree_blooms_include_ancestors_above_the_root() {
+        let mut arena = Arena::new();
+        let root = arena.new_element(Tag::Unknown, 0);
+        let div = arena.new_element(Tag::Div, 1);
+        arena.append_child(root, div);
+        let section = arena.new_element(Tag::Section, 2);
+        arena.append_child(div, section);
+        let p = arena.new_element(Tag::P, 3);
+        arena.append_child(section, p);
+
+        let blooms = build_ancestor_blooms(&arena, section);
+
+        assert!(blooms[section.index()].may_contain(hash_tag(Tag::Div)));
+        assert!(!blooms[section.index()].may_contain(hash_tag(Tag::Section)));
+        assert!(blooms[p.index()].may_contain(hash_tag(Tag::Div)));
+        assert!(blooms[p.index()].may_contain(hash_tag(Tag::Section)));
+        // Nodes outside the subtree are not filled.
+        assert!(!blooms[div.index()].may_contain(hash_tag(Tag::Unknown)));
     }
 }

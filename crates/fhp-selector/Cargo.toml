@@ -31,3 +31,7 @@ harness = false
 name = "xpath_bench"
 harness = false
 required-features = ["xpath"]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

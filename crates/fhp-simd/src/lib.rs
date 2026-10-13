@@ -15,63 +15,11 @@ pub mod avx2;
 /// ARM NEON accelerated operations (128-bit, aarch64).
 pub mod neon;
 
-/// The set of delimiters scanned by [`find_delimiters`](dispatch::SimdOps).
-///
-/// These are the bytes that have structural significance in HTML:
-/// `<`, `>`, `&`, `"`, `'`, `=`, `/`.
-pub const DELIMITERS: [u8; 7] = [b'<', b'>', b'&', b'"', b'\'', b'=', b'/'];
-
-/// Result of a multi-delimiter scan over a byte slice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DelimiterResult {
-    /// A delimiter was found at the given position.
-    Found {
-        /// Byte offset within the searched slice.
-        pos: usize,
-        /// The delimiter byte that was matched.
-        byte: u8,
-    },
-    /// No delimiter was found in the slice.
-    NotFound,
-}
-
-impl DelimiterResult {
-    /// Shift the position by `offset`, used when falling back to scalar for
-    /// a tail slice.
-    #[inline]
-    pub fn offset_by(self, offset: usize) -> DelimiterResult {
-        match self {
-            DelimiterResult::Found { pos, byte } => DelimiterResult::Found {
-                pos: pos + offset,
-                byte,
-            },
-            DelimiterResult::NotFound => DelimiterResult::NotFound,
-        }
-    }
-}
-
-/// Byte classification categories produced by [`classify_bytes`](dispatch::SimdOps).
-///
-/// Each bit represents a category. A byte may belong to multiple categories
-/// (e.g. `<` is both `DELIMITER` and `OTHER` is absent).
-pub mod class {
-    /// HTML ASCII whitespace: space, tab, newline, form feed, carriage return.
-    pub const WHITESPACE: u8 = 0b0000_0001;
-    /// ASCII alphabetic: `a-z`, `A-Z`.
-    pub const ALPHA: u8 = 0b0000_0010;
-    /// ASCII digit: `0-9`.
-    pub const DIGIT: u8 = 0b0000_0100;
-    /// HTML structural delimiter: `<`, `>`, `&`, `"`, `'`, `=`, `/`.
-    pub const DELIMITER: u8 = 0b0000_1000;
-    /// None of the above.
-    pub const OTHER: u8 = 0b0000_0000;
-}
-
 /// Delimiter bitmasks for a block of up to 64 bytes.
 ///
-/// Produced by [`compute_all_masks`](dispatch::SimdOps) which loads each
-/// 16-byte chunk only once, computing all masks in a single pass.
-/// Only the four masks actually consumed by the fused tokenizer are computed.
+/// Produced by [`compute_all_masks`](dispatch::SimdOps), which loads each
+/// chunk only once and computes all masks in a single pass. Only the four
+/// delimiters the tokenizer dispatches on are tracked.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct AllMasks {
     /// `<` positions.
@@ -84,20 +32,92 @@ pub struct AllMasks {
     pub apos: u64,
 }
 
-/// Classify a single byte into one of the [`class`] categories.
-#[inline(always)]
-pub fn classify_byte(b: u8) -> u8 {
-    match b {
-        b' ' | b'\t' | b'\n' | b'\x0C' | b'\r' => class::WHITESPACE,
-        b'a'..=b'z' | b'A'..=b'Z' => class::ALPHA,
-        b'0'..=b'9' => class::DIGIT,
-        b'<' | b'>' | b'&' | b'"' | b'\'' | b'=' | b'/' => class::DELIMITER,
-        _ => class::OTHER,
-    }
-}
+/// Differential checks shared by every backend's unit tests. The scalar
+/// implementation is the oracle.
+#[cfg(test)]
+pub(crate) mod differential {
+    use std::fmt;
 
-/// Return whether a byte is one of the five HTML ASCII whitespace characters.
-#[inline(always)]
-pub(crate) fn is_html_whitespace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
+    use crate::AllMasks;
+    use crate::scalar::compute_all_masks_safe;
+
+    /// Signature shared by every backend's `compute_all_masks`.
+    pub(crate) type ComputeAllMasks = unsafe fn(&[u8]) -> AllMasks;
+
+    /// Longest block exercised: one full 64-byte block plus trailing bytes the
+    /// masks must ignore.
+    const MAX_LEN: usize = 72;
+
+    /// Assert that `compute` agrees with the scalar oracle on every block of
+    /// length `0..=72` that is all `a` except for one byte, for every position
+    /// and every byte value.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support the target features `compute` was compiled for.
+    pub(crate) unsafe fn assert_single_byte_blocks_match_scalar(compute: ComputeAllMasks) {
+        let mut block = [b'a'; MAX_LEN];
+        for len in 0..=MAX_LEN {
+            for pos in 0..len {
+                for byte in 0..=u8::MAX {
+                    block[pos] = byte;
+                    // SAFETY: forwarded from this function's contract.
+                    unsafe {
+                        assert_matches_scalar(
+                            compute,
+                            &block[..len],
+                            format_args!("len={len} pos={pos} byte={byte:#04x}"),
+                        );
+                    }
+                }
+                block[pos] = b'a';
+            }
+        }
+    }
+
+    /// Assert that `compute` agrees with the scalar oracle on blocks of length
+    /// `0..=72` made entirely of one delimiter.
+    ///
+    /// # Safety
+    ///
+    /// The CPU must support the target features `compute` was compiled for.
+    pub(crate) unsafe fn assert_delimiter_runs_match_scalar(compute: ComputeAllMasks) {
+        for delimiter in [b'<', b'>', b'"', b'\''] {
+            let block = [delimiter; MAX_LEN];
+            for len in 0..=MAX_LEN {
+                // SAFETY: forwarded from this function's contract.
+                unsafe {
+                    assert_matches_scalar(
+                        compute,
+                        &block[..len],
+                        format_args!("len={len} all {:?}", delimiter as char),
+                    );
+                }
+            }
+        }
+    }
+
+    /// # Safety
+    ///
+    /// The CPU must support the target features `compute` was compiled for.
+    unsafe fn assert_matches_scalar(
+        compute: ComputeAllMasks,
+        block: &[u8],
+        case: fmt::Arguments<'_>,
+    ) {
+        // SAFETY: forwarded from this function's contract.
+        let actual = unsafe { compute(block) };
+        let expected = compute_all_masks_safe(block);
+        for (field, got, want) in [
+            ("lt", actual.lt, expected.lt),
+            ("gt", actual.gt, expected.gt),
+            ("quot", actual.quot, expected.quot),
+            ("apos", actual.apos, expected.apos),
+        ] {
+            assert_eq!(
+                got, want,
+                "{case}: `{field}` mask {got:#018x} differs from scalar {want:#018x}"
+            );
+        }
+    }
 }

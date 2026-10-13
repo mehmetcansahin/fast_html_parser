@@ -12,7 +12,7 @@ fn utf8_no_bom() {
     let html = b"<html><body>Hello, world!</body></html>";
     let enc = detect(html);
     assert_eq!(enc.name(), "UTF-8");
-    let text = decode(html, enc).unwrap();
+    let text = decode(html, enc);
     assert!(text.contains("Hello, world!"));
 }
 
@@ -21,7 +21,7 @@ fn utf8_with_bom() {
     let html = b"\xEF\xBB\xBF<html><body>BOM present</body></html>";
     let enc = detect(html);
     assert_eq!(enc.name(), "UTF-8");
-    let text = decode(html, enc).unwrap();
+    let text = decode(html, enc);
     assert!(text.contains("BOM present"));
     // BOM itself should be stripped.
     assert!(!text.starts_with('\u{FEFF}'));
@@ -32,7 +32,7 @@ fn utf8_multibyte_characters() {
     let html = "<html><body>Merhaba dünya! 你好世界 🌍</body></html>".as_bytes();
     let enc = detect(html);
     assert_eq!(enc.name(), "UTF-8");
-    let text = decode(html, enc).unwrap();
+    let text = decode(html, enc);
     assert!(text.contains("dünya"));
     assert!(text.contains("你好世界"));
     assert!(text.contains("🌍"));
@@ -50,7 +50,7 @@ fn latin1_cafe() {
     let enc = detect(&html);
     // encoding_rs maps iso-8859-1 → windows-1252.
     assert_eq!(enc.name(), "windows-1252");
-    let text = decode(&html, enc).unwrap();
+    let text = decode(&html, enc);
     assert!(text.contains("café"));
 }
 
@@ -59,7 +59,7 @@ fn latin1_accented_chars() {
     // German umlauts: ä=0xE4, ö=0xF6, ü=0xFC, ß=0xDF
     let mut html = b"<meta charset=\"iso-8859-1\">".to_vec();
     html.extend_from_slice(&[0xE4, 0xF6, 0xFC, 0xDF]);
-    let (text, enc) = decode_or_detect(&html).unwrap();
+    let (text, enc) = decode_or_detect(&html);
     assert_eq!(enc.name(), "windows-1252");
     assert!(text.contains("äöüß"));
 }
@@ -73,7 +73,7 @@ fn windows_1252_smart_quotes() {
     // Windows-1252 "smart quotes": 0x93 = ", 0x94 = "
     let mut html = b"<meta charset=\"windows-1252\">".to_vec();
     html.extend_from_slice(&[0x93, b'H', b'e', b'l', b'l', b'o', 0x94]);
-    let (text, enc) = decode_or_detect(&html).unwrap();
+    let (text, enc) = decode_or_detect(&html);
     assert_eq!(enc.name(), "windows-1252");
     assert!(text.contains('\u{201C}')); // "
     assert!(text.contains('\u{201D}')); // "
@@ -89,7 +89,7 @@ fn windows_1254_turkish_chars() {
     let mut html = b"<meta charset=\"windows-1254\"><body>".to_vec();
     html.extend_from_slice(&[0xFE, 0xF0, 0xFD, 0xF6, 0xFC, 0xE7]); // şğıöüç
     html.extend_from_slice(b"</body>");
-    let (text, enc) = decode_or_detect(&html).unwrap();
+    let (text, enc) = decode_or_detect(&html);
     assert_eq!(enc.name(), "windows-1254");
     assert!(text.contains('ş'));
     assert!(text.contains('ğ'));
@@ -104,7 +104,7 @@ fn windows_1254_via_http_equiv() {
     let mut html =
         b"<meta http-equiv=\"Content-Type\" content=\"text/html; charset=windows-1254\">".to_vec();
     html.extend_from_slice(&[0xFE]); // ş
-    let (text, enc) = decode_or_detect(&html).unwrap();
+    let (text, enc) = decode_or_detect(&html);
     assert_eq!(enc.name(), "windows-1254");
     assert!(text.contains('ş'));
 }
@@ -123,7 +123,7 @@ fn utf16le_bom() {
     }
     let enc = detect(&bytes);
     assert_eq!(enc.name(), "UTF-16LE");
-    let text = decode(&bytes, enc).unwrap();
+    let text = decode(&bytes, enc);
     assert!(text.contains("Hi"), "text: {text}");
 }
 
@@ -137,7 +137,7 @@ fn utf16be_bom() {
     }
     let enc = detect(&bytes);
     assert_eq!(enc.name(), "UTF-16BE");
-    let text = decode(&bytes, enc).unwrap();
+    let text = decode(&bytes, enc);
     assert!(text.contains("Hi"), "text: {text}");
 }
 
@@ -155,7 +155,7 @@ fn utf16le_turkish_no_ascii_content() {
     }
     let enc = detect(&bytes);
     assert_eq!(enc.name(), "UTF-16LE");
-    let text = decode(&bytes, enc).unwrap();
+    let text = decode(&bytes, enc);
     assert!(text.contains('ş'));
     assert!(text.contains('ğ'));
 }
@@ -185,10 +185,55 @@ fn meta_charset_with_other_attrs() {
 #[test]
 fn commented_meta_does_not_corrupt_utf8() {
     let html = "<!-- <meta charset=windows-1252> --><p>€</p>".as_bytes();
-    let (text, encoding) = decode_or_detect(html).unwrap();
+    let (text, encoding) = decode_or_detect(html);
 
     assert_eq!(encoding.name(), "UTF-8");
     assert!(text.contains('€'));
+}
+
+#[test]
+fn unquoted_apostrophe_does_not_hide_a_later_meta() {
+    let html = b"<p title=Tom's>x</p><meta charset=windows-1254>";
+    assert_eq!(detect(html).name(), "windows-1254");
+}
+
+#[test]
+fn unquoted_slash_and_apostrophe_do_not_hide_a_later_meta() {
+    let html = b"<a href=/x title=it's><meta charset=windows-1254>";
+    assert_eq!(detect(html).name(), "windows-1254");
+}
+
+#[test]
+fn doctype_quote_does_not_hide_a_later_meta() {
+    let html = b"<!DOCTYPE html \"unbalanced><meta charset=windows-1254>";
+    assert_eq!(detect(html).name(), "windows-1254");
+}
+
+#[test]
+fn end_tag_name_quote_does_not_hide_a_later_meta() {
+    let html = b"</x=\"><meta charset=windows-1254>";
+    assert_eq!(detect(html).name(), "windows-1254");
+}
+
+#[test]
+fn abrupt_empty_comment_does_not_hide_a_later_meta() {
+    assert_eq!(
+        detect(b"<!--><meta charset=windows-1254>").name(),
+        "windows-1254"
+    );
+    assert_eq!(
+        detect(b"<!---><meta charset=windows-1254>").name(),
+        "windows-1254"
+    );
+}
+
+#[test]
+fn meta_x_user_defined_maps_to_windows_1252() {
+    let html = b"<meta charset=x-user-defined><p>\x80\xe9</p>";
+    assert_eq!(detect(html).name(), "windows-1252");
+    let (text, encoding) = decode_or_detect(html);
+    assert_eq!(encoding.name(), "windows-1252");
+    assert_eq!(text, "<meta charset=x-user-defined><p>€é</p>");
 }
 
 // ---------------------------------------------------------------------------
@@ -204,7 +249,7 @@ fn no_encoding_info_fallback_utf8() {
 #[test]
 fn empty_input_fallback() {
     assert_eq!(detect(b"").name(), "UTF-8");
-    let (text, enc) = decode_or_detect(b"").unwrap();
+    let (text, enc) = decode_or_detect(b"");
     assert_eq!(text, "");
     assert_eq!(enc.name(), "UTF-8");
 }
@@ -214,8 +259,21 @@ fn just_bom_no_content() {
     let html = b"\xEF\xBB\xBF";
     let enc = detect(html);
     assert_eq!(enc.name(), "UTF-8");
-    let text = decode(html, enc).unwrap();
+    let text = decode(html, enc);
     assert_eq!(text, "");
+}
+
+#[test]
+fn malformed_utf8_is_replaced() {
+    assert_eq!(
+        decode(b"<p>caf\xe9</p>", encoding_rs::UTF_8),
+        "<p>caf\u{FFFD}</p>"
+    );
+}
+
+#[test]
+fn explicit_encoding_does_not_strip_a_foreign_bom() {
+    assert_eq!(decode(b"\xEF\xBB\xBFa", encoding_rs::WINDOWS_1252), "ï»¿a");
 }
 
 // ---------------------------------------------------------------------------

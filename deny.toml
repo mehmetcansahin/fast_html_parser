@@ -1,7 +1,9 @@
 [graph]
+all-features = true
 targets = [
     "x86_64-unknown-linux-gnu",
     "x86_64-apple-darwin",
+    "x86_64-pc-windows-msvc",
     "aarch64-unknown-linux-gnu",
     "aarch64-apple-darwin",
 ]
@@ -9,6 +11,9 @@ targets = [
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
+ignore = [
+    { id = "RUSTSEC-2025-0052", reason = "async-std is discontinued upstream; the optional async-async-std feature is retained for existing users" },
+]
 
 [licenses]
 allow = [
@@ -23,7 +28,7 @@ allow = [
 
 [[licenses.clarify]]
 crate = "encoding_rs"
-expression = "BSD-3-Clause OR Apache-2.0"
+expression = "(Apache-2.0 OR MIT) AND BSD-3-Clause"
 license-files = [
     { path = "COPYRIGHT", hash = 0x39f8ad31 },
 ]

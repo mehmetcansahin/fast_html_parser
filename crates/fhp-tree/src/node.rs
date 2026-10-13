@@ -61,8 +61,6 @@ impl NodeFlags {
     pub const IS_COMMENT: u8 = 1 << 5;
     /// This node is a doctype node.
     pub const IS_DOCTYPE: u8 = 1 << 6;
-    /// This node is a CDATA section.
-    pub const IS_CDATA: u8 = 1 << 7;
 
     /// Text node reads from `Arena::source` instead of `text_slab`.
     ///

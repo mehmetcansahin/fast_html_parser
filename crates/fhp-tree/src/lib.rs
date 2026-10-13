@@ -1,3 +1,4 @@
+#![cfg_attr(docsrs, feature(doc_cfg))]
 //! Arena-based DOM tree with cache-line aligned nodes.
 //!
 //! This crate builds on `fhp-tokenizer` to construct an in-memory DOM tree
@@ -34,18 +35,13 @@ pub mod streaming;
 /// Allocation-free traversal iterators (uses [`VecDeque`](std::collections::VecDeque) for BFS).
 pub mod traverse;
 
+use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
 use arena::{Arena, Attribute};
 use builder::TreeBuilder;
 use node::{NodeFlags, NodeId};
 use traverse::{Ancestors, BreadthFirst, Children, DepthFirst, Siblings};
-
-/// Whether a byte is one of HTML's five space characters.
-#[inline(always)]
-pub(crate) const fn is_html_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
-}
 
 /// Error type for HTML parsing.
 #[derive(Debug, thiserror::Error)]
@@ -62,10 +58,6 @@ pub enum HtmlError {
         /// Maximum allowed.
         max: usize,
     },
-
-    /// Encoding detection or conversion failed.
-    #[error("encoding error: {0}")]
-    Encoding(#[from] fhp_core::error::EncodingError),
 
     /// Tokenization or tree construction failed.
     #[error("parse error: {0}")]
@@ -85,10 +77,12 @@ pub enum HtmlError {
 /// Maximum input size (256 MiB).
 pub(crate) const MAX_INPUT_SIZE: usize = 256 * 1024 * 1024;
 
-/// Arena offsets and lengths are stored as `u32`; inputs larger than this
-/// cannot be represented without truncation even when a caller raises the
-/// normal safety limit.
-const MAX_REPRESENTABLE_INPUT_SIZE: usize = u32::MAX as usize;
+/// Arena offsets and lengths are stored as `u32`. Named-reference decoding
+/// expands text by at most 6/5 (`&nGt;` → U+226B U+20D2: 5 source bytes, 6
+/// decoded bytes), so the text and attribute slabs stay below `u32::MAX` for
+/// any input of at most 2 GiB, even when a caller raises the normal safety
+/// limit.
+pub(crate) const MAX_REPRESENTABLE_INPUT_SIZE: usize = 1 << 31;
 
 /// Parse an HTML string into a [`Document`].
 ///
@@ -116,7 +110,7 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
 /// # Errors
 ///
 /// Returns [`HtmlError::InputTooLarge`] if the input exceeds `max_input_size`
-/// or the arena's `u32` representation limit.
+/// or the 2 GiB arena representation limit.
 pub fn parse_with_limit(input: &str, max_input_size: usize) -> Result<Document, HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
@@ -157,7 +151,7 @@ pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
 /// # Errors
 ///
 /// Returns [`HtmlError::InputTooLarge`] if the input exceeds `max_input_size`
-/// or the arena's `u32` representation limit.
+/// or the 2 GiB arena representation limit.
 pub fn parse_owned_with_limit(input: String, max_input_size: usize) -> Result<Document, HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
@@ -180,10 +174,11 @@ pub fn parse_owned_with_limit(input: String, max_input_size: usize) -> Result<Do
 /// 3. `<meta http-equiv="Content-Type" content="...charset=...">` prescan
 /// 4. Fallback to UTF-8
 ///
+/// Malformed byte sequences are replaced with U+FFFD REPLACEMENT CHARACTER.
+///
 /// # Errors
 ///
-/// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB, or
-/// [`HtmlError::Encoding`] if the detected encoding cannot decode the input.
+/// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
 ///
 /// # Example
 ///
@@ -201,13 +196,12 @@ pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
 }
 
 /// Parse raw bytes with a caller-provided maximum input size, auto-detecting
-/// the encoding.
+/// the encoding. Malformed byte sequences are replaced with U+FFFD.
 ///
 /// # Errors
 ///
 /// Returns [`HtmlError::InputTooLarge`] if either the raw or decoded input
-/// exceeds `max_input_size` or the arena's `u32` representation limit, or
-/// [`HtmlError::Encoding`] if decoding fails.
+/// exceeds `max_input_size` or the 2 GiB arena representation limit.
 #[cfg(feature = "encoding")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Document, HtmlError> {
@@ -231,21 +225,8 @@ fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
     let mut buffer = [0u8; 8 * 1024];
 
     loop {
-        let (result, read, written) =
-            decoder.decode_to_utf8_without_replacement(&input[offset..], &mut buffer, true);
-
-        if let encoding_rs::DecoderResult::Malformed(malformed_len, trailing_len) = result {
-            let malformed_offset = offset
-                .saturating_add(read)
-                .saturating_sub(malformed_len as usize)
-                .saturating_sub(trailing_len as usize);
-            return Err(HtmlError::Encoding(
-                fhp_core::error::EncodingError::MalformedInput {
-                    encoding: encoding.name(),
-                    offset: malformed_offset,
-                },
-            ));
-        }
+        let (result, read, written, _had_errors) =
+            decoder.decode_to_utf8(&input[offset..], &mut buffer, true);
 
         let next_size = decoded.len().saturating_add(written);
         if next_size > max {
@@ -269,11 +250,10 @@ fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
 
         offset = offset.saturating_add(read);
         match result {
-            encoding_rs::DecoderResult::InputEmpty => break,
-            encoding_rs::DecoderResult::OutputFull => {
+            encoding_rs::CoderResult::InputEmpty => break,
+            encoding_rs::CoderResult::OutputFull => {
                 debug_assert!(read != 0 || written != 0);
             }
-            encoding_rs::DecoderResult::Malformed(_, _) => unreachable!(),
         }
     }
 
@@ -497,9 +477,13 @@ impl<'a> NodeRef<'a> {
 
         if node.flags.has(NodeFlags::IS_TEXT) {
             let text = self.arena.text(self.id);
-            // Raw text elements (script/style) must not be escaped per HTML spec.
+            // Raw text elements (script/style/plaintext/...) must not be
+            // escaped per HTML spec.
             let parent_id = node.parent;
-            let is_raw_text = !parent_id.is_null() && self.arena.get(parent_id).tag.is_raw_text();
+            let is_raw_text = !parent_id.is_null() && {
+                let parent_tag = self.arena.get(parent_id).tag;
+                parent_tag.is_raw_text() || parent_tag == Tag::Plaintext
+            };
             if is_raw_text {
                 out.push_str(text);
             } else {
@@ -593,7 +577,7 @@ impl<'a> NodeRef<'a> {
             !class_name.is_empty()
                 && classes
                     .as_bytes()
-                    .split(|byte| is_html_space(*byte))
+                    .split(|byte| is_html_whitespace(*byte))
                     .any(|class| class == class_name.as_bytes())
         } else {
             false
@@ -1007,18 +991,18 @@ mod tests {
 
     #[test]
     #[cfg(feature = "encoding")]
-    fn parse_bytes_preserves_malformed_input_errors() {
-        let html = b"<p>\xFF</p>";
+    fn parse_bytes_replaces_malformed_input() {
+        let doc = parse_bytes_with_limit(b"<p>\xFF</p>", 1_024).unwrap();
 
-        assert!(matches!(
-            parse_bytes_with_limit(html, 1_024),
-            Err(HtmlError::Encoding(
-                fhp_core::error::EncodingError::MalformedInput {
-                    encoding: "UTF-8",
-                    ..
-                }
-            ))
-        ));
+        assert_eq!(doc.root().text_content(), "\u{FFFD}");
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn parse_bytes_maps_meta_x_user_defined_to_windows_1252() {
+        let doc = parse_bytes(b"<meta charset=x-user-defined><p>\x80\xe9</p>").unwrap();
+
+        assert_eq!(doc.root().text_content(), "€é");
     }
 
     #[test]

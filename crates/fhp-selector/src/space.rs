@@ -1,14 +1,6 @@
 //! HTML space-character helpers used by class-token matching and indexing.
 
-/// Return whether `byte` is one of HTML's five ASCII space characters.
-///
-/// This intentionally excludes vertical tab (`U+000B`), which Rust's
-/// [`u8::is_ascii_whitespace`] includes but HTML's space-separated token
-/// definition does not.
-#[inline(always)]
-pub(crate) const fn is_html_space(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
-}
+use fhp_core::is_html_whitespace;
 
 /// Iterate over the non-empty HTML space-separated tokens in `value`.
 #[inline]
@@ -27,7 +19,7 @@ impl<'a> Iterator for HtmlSpaceTokens<'a> {
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         let bytes = self.value.as_bytes();
-        while self.position < bytes.len() && is_html_space(bytes[self.position]) {
+        while self.position < bytes.len() && is_html_whitespace(bytes[self.position]) {
             self.position += 1;
         }
         if self.position == bytes.len() {
@@ -35,7 +27,7 @@ impl<'a> Iterator for HtmlSpaceTokens<'a> {
         }
 
         let start = self.position;
-        while self.position < bytes.len() && !is_html_space(bytes[self.position]) {
+        while self.position < bytes.len() && !is_html_whitespace(bytes[self.position]) {
             self.position += 1;
         }
         Some(&self.value[start..self.position])

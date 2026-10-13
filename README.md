@@ -129,9 +129,8 @@ assert_eq!(doc.root().text_content(), "from chunks");
 ```
 
 Both raw and decoded byte counts are limited; the effective ceiling is
-`min(configured_limit, u32::MAX)`. Encoding, nesting, and size failures make a
-stream parser terminal. Iterator and async helpers stop reading after the first
-error.
+`min(configured_limit, 2 GiB)`. Nesting and size failures make a stream parser
+terminal. Iterator and async helpers stop reading after the first error.
 
 ### Early Stop
 
@@ -165,9 +164,10 @@ use fast_html_parser::HtmlParser;
 let doc = HtmlParser::parse_bytes(b"<p>Hello</p>").unwrap();
 ```
 
-HTTP `Content-Type` encoding hints are not accepted by the parser in v0.2;
-apply an HTTP-layer decision before calling the parser if your scraper needs
-that signal.
+Malformed byte sequences are replaced with U+FFFD, as browsers do; decoding
+never fails a parse. HTTP `Content-Type` encoding hints are not accepted by the
+parser in v0.2; apply an HTTP-layer decision before calling the parser if your
+scraper needs that signal.
 
 ## Feature Flags
 
@@ -178,7 +178,7 @@ that signal.
 | `xpath` | No | XPath expression support |
 | `encoding` | Yes | Raw-byte and streaming parsing with encoding detection (BOM, meta charset) |
 | `async-tokio` | No | Async parsing via Tokio |
-| `async-async-std` | No | Async parsing via async-std |
+| `async-async-std` | No | Async parsing via async-std (discontinued upstream, RUSTSEC-2025-0052; kept for existing users) |
 | `simd` | Yes | Runtime-dispatched SIMD scanning; disable default features for scalar-only execution |
 
 ## Architecture

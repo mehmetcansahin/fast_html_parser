@@ -12,8 +12,9 @@ parser does not synthesize `html`, `head`, or `body` elements and does not expos
 a context-aware fragment mode.
 
 The public `Tag` representation and 64-byte arena node layout remain stable for
-the 0.2 line. Unknown and custom element names are retained as custom tags;
-CSS and XPath tag tests use the same custom-name behavior.
+the 0.2 line. `Tag` interns `xmp`, `noembed`, `noframes`, and `plaintext`
+alongside the other known names. Unknown and custom element names are retained
+as custom tags; CSS and XPath tag tests use the same custom-name behavior.
 
 ## Curated HTML repair
 
@@ -22,13 +23,24 @@ corpus:
 
 - a source `/>` marker does not close a non-void HTML element;
 - implicit closing for `p`, `li`, `dt`/`dd`, headings, `option`, and
-  `optgroup`;
-- table section, row, and cell repair, including automatic `tbody`/`tr` and
-  foster parenting of misplaced content;
-- invalid child filtering while parsing `select`;
-- active-formatting repair for standard formatting elements such as `b`, `i`,
-  `strong`, and `em`;
-- literal `plaintext` content through end of input;
+  `optgroup`, limited to the HTML element scopes so nested lists and nested
+  tables keep their structure;
+- table section, row, cell, caption, and column-group repair, including
+  automatic `tbody`/`tr`/`colgroup`, foster parenting of misplaced content
+  decided by the current node, and in-table `script`, `style`, `form`, and
+  hidden `input` elements;
+- invalid child filtering while parsing `select`, including table tags that
+  close a `select` inside a table;
+- `</br>` as `<br>`, a stray `</p>` as an empty paragraph, and the leading
+  newline dropped after `pre`, `textarea`, and `listing` start tags;
+- end-tag repair for standard formatting elements such as `b`, `i`, `strong`,
+  and `em`; formatting elements that another start tag closes implicitly are
+  not reconstructed later, so `<p><b>x<p>y` yields `<p><b>x</b></p><p>y</p>`;
+- raw-text `xmp`, `noembed`, and `noframes` content, script-data escape
+  states, and literal `plaintext` content through end of input;
+- `<?…>`, `<!…>` declarations other than comments, CDATA, and doctypes, and
+  `</` followed by a non-letter become comments; `</>` is ignored; a doctype
+  ends at its first `>`, even one inside quotes;
 - duplicate attributes resolved ASCII-case-insensitively with first-wins
   semantics; and
 - the complete vendored WHATWG named-character-reference set, including
@@ -54,24 +66,27 @@ markup must apply a security policy designed for the output context.
 
 String entry points consume UTF-8 Rust strings. Byte and streaming entry points
 detect a BOM, prescan HTML `meta` declarations, and otherwise fall back to
-UTF-8. An HTTP `Content-Type` header is not accepted as an encoding hint in
-0.2; the HTTP client layer must resolve or apply that signal before parsing.
+UTF-8. Malformed byte sequences are replaced with U+FFFD; decoding never
+produces an error. An HTTP `Content-Type` header is not accepted as an encoding
+hint in 0.2; the HTTP client layer must resolve or apply that signal before
+parsing.
 
 Configured limits apply independently to raw bytes and decoded UTF-8 bytes.
-The effective maximum is `min(configured_limit, u32::MAX)`, because arena
-offsets are stored as `u32`. At most 512 nested elements are permitted,
+The effective maximum is `min(configured_limit, 2 GiB)`: arena offsets are
+stored as `u32`, and named-character-reference decoding can expand text by up
+to 6/5. At most 512 nested elements are permitted,
 excluding the synthetic root. Attempting to create an element at depth 513 returns
 `HtmlError::Parse(ParseError::NestingTooDeep)` and no partial `Document`.
 
-Encoding, depth, and size errors are terminal for a streaming parser. Iterator,
-Tokio, and async-std adapters stop pulling their source after the first error.
+Depth and size errors are terminal for a streaming parser. Iterator, Tokio, and
+async-std adapters stop pulling their source after the first error.
 
 The streaming tokenizer bounds unfinished raw-text/RCDATA closing-tag candidates
 by discarding oversized prefixes while retaining the original tag name, scanner
-state, and a bounded text tail. A completed closing tag still closes the element;
-if EOF arrives first, discarded bytes are not recovered. Candidates within the
-buffer limit retain their complete text, without decoding character references
-inside raw-text elements such as `script` and `style`.
+state, and a bounded text tail. A completed closing tag still closes the element.
+As in browsers, a closing tag that EOF interrupts is dropped, and the element
+ends with the text before it; this is identical for one-shot, streaming, and
+early-stop parsing.
 
 ## Selectors and XPath
 
@@ -86,12 +101,19 @@ limits with `SelectorError::Invalid`:
 - 16 nested `:not(...)` levels.
 
 The dense memo table is used through 8,388,608 states; larger valid searches
-use a sparse map. XPath name tests retain non-interned names, so queries such as
-`//option` and `//my-widget` follow the same custom-tag behavior as CSS.
+use a sparse map. Sibling (`~`) chains and selections over many roots are
+evaluated in time linear in the searched subtrees. Selecting within a
+`Selection` searches each selected root and its descendants; combinators may
+match ancestors outside the selected roots.
+
+XPath requires the `xpath` feature. XPath name tests retain non-interned names,
+so queries such as `//option` and `//my-widget` follow the same custom-tag
+behavior as CSS.
 
 ## Checking a dependency upgrade
 
-0.2 intentionally contains breaking streaming and early-stop API changes. Read
+0.2 intentionally contains breaking streaming, early-stop, decoding, and
+feature-gating changes. Read
 [MIGRATION-0.2.md](MIGRATION-0.2.md), run your scraper fixtures through every
 entry point you use, and compare canonical output rather than node counts
 alone. The repository's full local development gate is:

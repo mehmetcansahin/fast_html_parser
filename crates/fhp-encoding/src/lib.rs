@@ -10,7 +10,8 @@
 //! 4. Fallback to UTF-8
 //!
 //! The actual decoding is delegated to [`encoding_rs`], which is
-//! SIMD-optimized by Mozilla/Servo.
+//! SIMD-optimized by Mozilla/Servo. Decoding never fails: malformed byte
+//! sequences are replaced with U+FFFD REPLACEMENT CHARACTER, as browsers do.
 //!
 //! # Quick Start
 //!
@@ -21,7 +22,7 @@
 //! let encoding = detect(html);
 //! assert_eq!(encoding.name(), "UTF-8");
 //!
-//! let (text, _enc) = decode_or_detect(html).unwrap();
+//! let (text, _enc) = decode_or_detect(html);
 //! assert!(text.contains("Hello"));
 //! ```
 

@@ -125,13 +125,21 @@ pub enum Tag {
     Ul,
     /// `<video>`
     Video,
+    /// `<xmp>`
+    Xmp,
+    /// `<noembed>`
+    Noembed,
+    /// `<noframes>`
+    Noframes,
+    /// `<plaintext>`
+    Plaintext,
 
     /// Any tag name not in the known set.
     Unknown = 255,
 }
 
-/// The maximum byte-length of any known tag name (`"textarea"` = 8).
-const MAX_KNOWN_TAG_LEN: usize = 8;
+/// The maximum byte-length of any known tag name (`"plaintext"` = 9).
+const MAX_KNOWN_TAG_LEN: usize = 9;
 
 /// Number of void element variants (discriminants `0..VOID_COUNT`).
 const VOID_COUNT: u8 = 14;
@@ -196,6 +204,10 @@ static TAG_MAP: phf::Map<&'static [u8], Tag> = phf::phf_map! {
     b"tr"       => Tag::Tr,
     b"ul"       => Tag::Ul,
     b"video"    => Tag::Video,
+    b"xmp"      => Tag::Xmp,
+    b"noembed"  => Tag::Noembed,
+    b"noframes" => Tag::Noframes,
+    b"plaintext" => Tag::Plaintext,
 };
 
 impl Tag {
@@ -209,7 +221,7 @@ impl Tag {
             return Tag::Unknown;
         }
 
-        // Lowercase on the stack — MAX_KNOWN_TAG_LEN is 8 so this is tiny.
+        // Lowercase on the stack — MAX_KNOWN_TAG_LEN is 9 so this is tiny.
         let mut buf = [0u8; MAX_KNOWN_TAG_LEN];
         let lower = &mut buf[..name.len()];
         for (dst, &src) in lower.iter_mut().zip(name) {
@@ -232,10 +244,14 @@ impl Tag {
     ///
     /// Raw text elements' content must not be entity-escaped during
     /// serialization, and the tokenizer enters a special raw-text mode for
-    /// them.
+    /// them. [`Tag::Plaintext`] is deliberately excluded: it has no end tag
+    /// and keeps its own tokenizer mode.
     #[inline(always)]
     pub const fn is_raw_text(self) -> bool {
-        matches!(self, Tag::Script | Tag::Style | Tag::Iframe)
+        matches!(
+            self,
+            Tag::Script | Tag::Style | Tag::Iframe | Tag::Xmp | Tag::Noembed | Tag::Noframes
+        )
     }
 
     /// Returns `true` if this is an RCDATA element (`<title>`, `<textarea>`).
@@ -309,6 +325,10 @@ impl Tag {
             Tag::Tr => Some("tr"),
             Tag::Ul => Some("ul"),
             Tag::Video => Some("video"),
+            Tag::Xmp => Some("xmp"),
+            Tag::Noembed => Some("noembed"),
+            Tag::Noframes => Some("noframes"),
+            Tag::Plaintext => Some("plaintext"),
             Tag::Unknown => None,
         }
     }
@@ -333,6 +353,8 @@ mod tests {
         assert_eq!(Tag::from_bytes(b"span"), Tag::Span);
         assert_eq!(Tag::from_bytes(b"a"), Tag::A);
         assert_eq!(Tag::from_bytes(b"textarea"), Tag::Textarea);
+        assert_eq!(Tag::from_bytes(b"PlainText"), Tag::Plaintext);
+        assert_eq!(Tag::from_bytes(b"noframes"), Tag::Noframes);
     }
 
     #[test]
@@ -387,6 +409,10 @@ mod tests {
         assert!(Tag::Script.is_raw_text());
         assert!(Tag::Style.is_raw_text());
         assert!(Tag::Iframe.is_raw_text());
+        assert!(Tag::Xmp.is_raw_text());
+        assert!(Tag::Noembed.is_raw_text());
+        assert!(Tag::Noframes.is_raw_text());
+        assert!(!Tag::Plaintext.is_raw_text());
         assert!(!Tag::Div.is_raw_text());
         assert!(!Tag::Textarea.is_raw_text());
         assert!(!Tag::Title.is_raw_text());

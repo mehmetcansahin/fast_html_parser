@@ -15,9 +15,11 @@ import os
 from pathlib import Path
 import platform
 import re
+import shutil
 import subprocess
 import sys
 import tarfile
+import tempfile
 import tomllib
 
 
@@ -47,12 +49,14 @@ class ReleaseError(RuntimeError):
     """A release prerequisite or validation failed."""
 
 
-def run(command: list[str], *, env: dict[str, str] | None = None) -> None:
+def run(
+    command: list[str], *, env: dict[str, str] | None = None, cwd: Path | None = None
+) -> None:
     print("+ " + " ".join(command), flush=True)
     merged = os.environ.copy()
     if env:
         merged.update(env)
-    result = subprocess.run(command, cwd=ROOT, env=merged, check=False)
+    result = subprocess.run(command, cwd=cwd or ROOT, env=merged, check=False)
     if result.returncode != 0:
         raise ReleaseError(f"command failed with exit code {result.returncode}: {' '.join(command)}")
 
@@ -130,6 +134,20 @@ def validate_tools_and_targets() -> None:
     if missing:
         joined = " ".join(missing)
         raise ReleaseError(f"missing Rust targets: {joined}; install with `rustup target add {joined}`")
+
+
+def check_msrv_with_fresh_lockfile() -> None:
+    """Resolve dependencies from scratch so MSRV does not rely on the checked-in lockfile."""
+    with tempfile.TemporaryDirectory(prefix="fhp-msrv-") as tmp:
+        tmp_path = Path(tmp)
+        workspace = tmp_path / "workspace"
+        shutil.copytree(ROOT, workspace, ignore=shutil.ignore_patterns("target", ".git"))
+        (workspace / "Cargo.lock").unlink()
+        run(
+            ["cargo", "+1.85.0", "check", "--workspace", "--all-features"],
+            env={"CARGO_TARGET_DIR": str(tmp_path / "target")},
+            cwd=workspace,
+        )
 
 
 def audit_package_archives(version: str) -> None:
@@ -253,11 +271,20 @@ def command_release(version: str) -> None:
     validate_tools_and_targets()
     command_check()
     run(["cargo", "+1.85.0", "check", "--workspace", "--all-targets", "--all-features"])
+    check_msrv_with_fresh_lockfile()
+    run(
+        ["cargo", "+nightly", "doc", "--workspace", "--all-features", "--no-deps"],
+        env={"RUSTDOCFLAGS": "-D warnings --cfg docsrs"},
+    )
     run(["cargo", "deny", "check"])
     for target in CROSS_TARGETS:
         run(["cargo", "check", "--workspace", "--all-features", "--target", target])
     if platform.system() == "Darwin" and platform.machine() == "arm64":
-        run(["cargo", "test", "-p", "fhp-simd", "--target", "x86_64-apple-darwin"])
+        # Rosetta 2 executes AVX2 but hides it from CPUID; force the x86 backend tests.
+        run(
+            ["cargo", "test", "-p", "fhp-simd", "--target", "x86_64-apple-darwin"],
+            env={"FHP_SIMD_FORCE_AVX2": "1", "FHP_SIMD_FORCE_SSE42": "1"},
+        )
     for target in FUZZ_TARGETS:
         run(["cargo", "+nightly", "fuzz", "run", target, "--", "-max_total_time=60"])
     run(["cargo", "package", "--workspace", "--locked", "--no-verify"])

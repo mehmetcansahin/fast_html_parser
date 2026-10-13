@@ -6,188 +6,14 @@
 //! SIMD-accelerated delimiter finding with scalar content parsing.
 
 use std::borrow::Cow;
-use std::collections::HashSet;
-use std::hash::{BuildHasherDefault, Hash, Hasher};
-use std::mem::MaybeUninit;
 
+use fhp_core::attr::{SeenAttributes, TagScanState, iter_raw_attrs, tag_name_offset};
+use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
 use crate::TreeSink;
 use crate::structural::StructuralIndex;
 use crate::token::{Attribute, Token};
-
-const INLINE_SEEN_ATTRIBUTES: usize = 8;
-const ASCII_CI_FINGERPRINT_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-
-#[derive(Clone, Copy)]
-struct SeenAttribute<'a> {
-    fingerprint: u64,
-    name: &'a [u8],
-}
-
-impl PartialEq for SeenAttribute<'_> {
-    fn eq(&self, other: &Self) -> bool {
-        self.fingerprint == other.fingerprint && self.name.eq_ignore_ascii_case(other.name)
-    }
-}
-
-impl Eq for SeenAttribute<'_> {}
-
-impl Hash for SeenAttribute<'_> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        state.write_u64(self.fingerprint);
-    }
-}
-
-/// A no-op hasher for the already-hashed attribute fingerprints.
-#[derive(Default)]
-struct FingerprintHasher(u64);
-
-impl Hasher for FingerprintHasher {
-    #[inline]
-    fn finish(&self) -> u64 {
-        self.0
-    }
-
-    #[inline]
-    fn write(&mut self, bytes: &[u8]) {
-        let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for &byte in bytes {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        }
-        self.0 = hash;
-    }
-
-    #[inline]
-    fn write_u64(&mut self, value: u64) {
-        self.0 = value;
-    }
-}
-
-type SeenAttributeSet<'a> = HashSet<SeenAttribute<'a>, BuildHasherDefault<FingerprintHasher>>;
-
-struct SeenAttributes<'a> {
-    bloom: u64,
-    // `MaybeUninit` avoids zeroing 192 bytes for the overwhelmingly common
-    // one-to-three-attribute case. The initialized prefix is tracked by
-    // `inline_len` and `SeenAttribute` is `Copy`, so no drop work is needed.
-    inline: [MaybeUninit<SeenAttribute<'a>>; INLINE_SEEN_ATTRIBUTES],
-    inline_len: usize,
-    heap: Option<SeenAttributeSet<'a>>,
-}
-
-impl<'a> SeenAttributes<'a> {
-    #[inline]
-    fn new() -> Self {
-        Self {
-            bloom: 0,
-            inline: [MaybeUninit::uninit(); INLINE_SEEN_ATTRIBUTES],
-            inline_len: 0,
-            heap: None,
-        }
-    }
-
-    #[inline]
-    fn duplicate_or_insert(&mut self, name: &'a [u8]) -> bool {
-        if self.inline_len == 0 {
-            self.inline[0].write(SeenAttribute {
-                fingerprint: 0,
-                name,
-            });
-            self.inline_len = 1;
-            return false;
-        }
-        if self.bloom == 0 {
-            let first = self.inline_entries()[0];
-            if first.name.eq_ignore_ascii_case(name) {
-                return true;
-            }
-            let first_fingerprint = ascii_ci_fingerprint(first.name);
-            self.inline[0].write(SeenAttribute {
-                fingerprint: first_fingerprint,
-                name: first.name,
-            });
-            self.bloom = fingerprint_bloom(first_fingerprint);
-        }
-
-        let fingerprint = ascii_ci_fingerprint(name);
-        self.duplicate_or_insert_hashed(name, fingerprint)
-    }
-
-    /// Variant for callers that already visited every name byte while parsing.
-    #[inline]
-    fn duplicate_or_insert_hashed(&mut self, name: &'a [u8], fingerprint: u64) -> bool {
-        let candidate = SeenAttribute { fingerprint, name };
-
-        if let Some(heap) = &mut self.heap {
-            return !heap.insert(candidate);
-        }
-
-        let bloom = fingerprint_bloom(fingerprint);
-        if self.bloom & bloom == bloom
-            && self
-                .inline_entries()
-                .iter()
-                .any(|seen| seen.fingerprint == fingerprint && seen.name.eq_ignore_ascii_case(name))
-        {
-            return true;
-        }
-
-        self.bloom |= bloom;
-        if self.inline_len < INLINE_SEEN_ATTRIBUTES {
-            self.inline[self.inline_len].write(candidate);
-            self.inline_len += 1;
-        } else {
-            let mut heap = SeenAttributeSet::with_capacity_and_hasher(
-                INLINE_SEEN_ATTRIBUTES * 2,
-                BuildHasherDefault::default(),
-            );
-            for &seen in self.inline_entries() {
-                heap.insert(seen);
-            }
-            heap.insert(candidate);
-            self.heap = Some(heap);
-        }
-        false
-    }
-
-    #[inline]
-    fn hashes_during_parse(&self) -> bool {
-        self.bloom != 0
-    }
-
-    #[inline]
-    fn inline_entries(&self) -> &[SeenAttribute<'a>] {
-        // SAFETY: only the prefix `[..inline_len]` is exposed, and every entry
-        // in that prefix is initialized immediately before `inline_len` grows.
-        unsafe {
-            std::slice::from_raw_parts(
-                self.inline.as_ptr().cast::<SeenAttribute<'a>>(),
-                self.inline_len,
-            )
-        }
-    }
-}
-
-#[inline]
-fn ascii_ci_fingerprint(name: &[u8]) -> u64 {
-    let mut hash = ASCII_CI_FINGERPRINT_OFFSET;
-    for &byte in name {
-        hash = ascii_ci_fingerprint_step(hash, byte);
-    }
-    hash
-}
-
-#[inline(always)]
-fn ascii_ci_fingerprint_step(hash: u64, byte: u8) -> u64 {
-    (hash ^ u64::from(byte.to_ascii_lowercase())).wrapping_mul(0x0000_0100_0000_01b3)
-}
-
-#[inline]
-fn fingerprint_bloom(fingerprint: u64) -> u64 {
-    (1u64 << (fingerprint & 63)) | (1u64 << ((fingerprint >> 32) & 63))
-}
 
 #[cfg(feature = "entity-decode")]
 #[inline]
@@ -283,11 +109,14 @@ enum Mode {
     InTag,
     /// Inside a comment (`<!-- ... -->`).
     InComment,
-    /// Inside a doctype (`<!DOCTYPE ...>`).
+    /// Inside a doctype (`<!DOCTYPE ...>`). The first `>` ends it.
     InDoctype,
     /// Inside a CDATA section (`<![CDATA[ ... ]]>`).
     InCData,
-    /// Inside a raw text element (script/style/iframe).
+    /// Inside a bogus comment (`<?...>`, `<!x...>`, `</ x...>`). The first
+    /// `>` ends it.
+    InBogusComment,
+    /// Inside a raw text element (script/style/iframe/xmp/noembed/noframes).
     InRawText,
     /// Inside an RCDATA element (title/textarea).
     InRcData,
@@ -295,9 +124,143 @@ enum Mode {
     InPlainText,
 }
 
+/// What a `<` in the data state starts.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LtKind {
+    /// Not markup: the `<` is literal text.
+    Text,
+    /// A start or end tag (`<a`, `</a`).
+    Tag,
+    /// A comment (`<!--`).
+    Comment,
+    /// A CDATA section (`<![CDATA[`).
+    CData,
+    /// A doctype (`<!DOCTYPE`, ASCII case-insensitive).
+    Doctype,
+    /// A bogus comment (`<?`, `<!x`, `</ x`) whose data starts `data_offset`
+    /// bytes after the `<` and ends at the first `>`.
+    BogusComment { data_offset: usize },
+    /// `</>`, which produces no token.
+    EmptyEndTag,
+}
+
+/// Classify the markup started by `bytes[0] == b'<'` in the data state.
+///
+/// Returns `None` when more bytes are needed to decide; this only happens
+/// when `!at_eof`.
+pub(crate) fn classify_lt(bytes: &[u8], at_eof: bool) -> Option<LtKind> {
+    debug_assert_eq!(bytes.first(), Some(&b'<'));
+    let Some(&next) = bytes.get(1) else {
+        return at_eof.then_some(LtKind::Text);
+    };
+    match next {
+        b'!' => {
+            let rest = &bytes[2..];
+            if rest.starts_with(b"--") {
+                return Some(LtKind::Comment);
+            }
+            if rest.len() >= 7 && rest[..7].eq_ignore_ascii_case(b"DOCTYPE") {
+                return Some(LtKind::Doctype);
+            }
+            if rest.starts_with(b"[CDATA[") {
+                return Some(LtKind::CData);
+            }
+            let undecided = (rest.len() < 2 && b"--".starts_with(rest))
+                || (rest.len() < 7 && rest.eq_ignore_ascii_case(&b"DOCTYPE"[..rest.len()]))
+                || (rest.len() < 7 && b"[CDATA[".starts_with(rest));
+            if undecided && !at_eof {
+                return None;
+            }
+            Some(LtKind::BogusComment { data_offset: 2 })
+        }
+        b'?' => Some(LtKind::BogusComment { data_offset: 1 }),
+        b'/' => match bytes.get(2) {
+            None => at_eof.then_some(LtKind::Text),
+            Some(byte) if byte.is_ascii_alphabetic() => Some(LtKind::Tag),
+            Some(b'>') => Some(LtKind::EmptyEndTag),
+            Some(_) => Some(LtKind::BogusComment { data_offset: 2 }),
+        },
+        byte if byte.is_ascii_alphabetic() => Some(LtKind::Tag),
+        _ => Some(LtKind::Text),
+    }
+}
+
+/// Script-data escape state (WHATWG "script data escaped" and "script data
+/// double escaped" states) inside `<script>` raw text.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum ScriptEscape {
+    /// Plain script data: `</script` ends the element.
+    #[default]
+    None,
+    /// After `<!--`: `</script` still ends the element, `<script` nests.
+    Escaped,
+    /// After `<!--<script`: `</script` only returns to [`ScriptEscape::Escaped`].
+    DoubleEscaped,
+}
+
+/// Handle `data[pos] == b'<'` inside script text.
+///
+/// Returns the next escape state and whether the `<` starts the script's end
+/// tag.
+pub(crate) fn script_lt_event(
+    state: ScriptEscape,
+    data: &[u8],
+    pos: usize,
+) -> (ScriptEscape, bool) {
+    let rest = &data[pos..];
+    if state == ScriptEscape::None
+        && rest.starts_with(b"<!--")
+        && rest.get(4) != Some(&b'>')
+        && rest.get(4..6) != Some(b"->".as_slice())
+    {
+        return (ScriptEscape::Escaped, false);
+    }
+    if rest.get(1) == Some(&b'/') && starts_tag_named(rest, 2, b"script") {
+        return match state {
+            ScriptEscape::DoubleEscaped => (ScriptEscape::Escaped, false),
+            _ => (ScriptEscape::None, true),
+        };
+    }
+    if state == ScriptEscape::Escaped && starts_tag_named(rest, 1, b"script") {
+        return (ScriptEscape::DoubleEscaped, false);
+    }
+    (state, false)
+}
+
+/// Handle `data[pos] == b'>'` inside script text: `-->` leaves both escape
+/// states.
+pub(crate) fn script_gt_event(state: ScriptEscape, data: &[u8], pos: usize) -> ScriptEscape {
+    if state != ScriptEscape::None && pos >= 2 && data[pos - 2..pos] == *b"--" {
+        ScriptEscape::None
+    } else {
+        state
+    }
+}
+
+/// Whether `data[pos..]` (starting at `<`) is the end tag `</name` (ASCII
+/// case-insensitive) followed by `>`, `/`, or whitespace.
+#[inline]
+pub(crate) fn is_end_tag_at(data: &[u8], pos: usize, name: &[u8]) -> bool {
+    let rest = &data[pos..];
+    rest.get(1) == Some(&b'/') && starts_tag_named(rest, 2, name)
+}
+
+/// Whether `rest[name_start..]` is `name` (ASCII case-insensitive) followed
+/// by a tag-name terminator (`>`, `/`, or whitespace).
+#[inline]
+fn starts_tag_named(rest: &[u8], name_start: usize, name: &[u8]) -> bool {
+    let name_end = name_start + name.len();
+    rest.get(name_start..name_end)
+        .is_some_and(|candidate| candidate.eq_ignore_ascii_case(name))
+        && rest
+            .get(name_end)
+            .is_some_and(|&byte| byte == b'>' || byte == b'/' || is_html_whitespace(byte))
+}
+
 /// Direct input parser driven by structural delimiter positions.
 ///
-/// Can be used in two modes:
+/// It only reacts to `<`, `>`, `"`, and `'`; any other delimiter reported by
+/// an index is ignored. Can be used in two modes:
 /// - Vec mode: via `on_delimiter` / `flush_trailing` (pushes to `Vec<Token>`)
 /// - Callback mode: via `on_delimiter_cb` / `flush_trailing_cb` (invokes closure)
 pub(crate) struct Parser<'a> {
@@ -308,14 +271,22 @@ pub(crate) struct Parser<'a> {
     cursor: usize,
     /// Position of the `<` that opened the current tag.
     tag_open_pos: usize,
-    /// Position of the `<!` or `<!--` that opened special content.
+    /// Position of the `<!` that opened a comment, doctype, or CDATA section.
     special_open_pos: usize,
     /// Current text-element tag, or `Unknown` after its closing tag completes.
     raw_text_tag: Tag,
-    /// While inside a tag, the quote char (`"` or `'`) of the attribute value
-    /// we are currently within, or `None` when not inside a quoted value. Used
-    /// so a `>` inside an attribute value does not close the tag.
-    attr_quote: Option<u8>,
+    /// Attribute-grammar state of the current tag, exact at `tag_scan_pos`.
+    ///
+    /// Only the bytes between quote delimiters are walked (lazily, when the
+    /// next quote or a `>` after `/` needs the exact state), so every tag
+    /// byte is visited at most once.
+    tag_scan: TagScanState,
+    /// Input position `tag_scan` describes.
+    tag_scan_pos: usize,
+    /// Start of the current bogus comment's data.
+    bogus_data_start: usize,
+    /// Escape state while inside `<script>` text.
+    script_escape: ScriptEscape,
 }
 
 impl<'a> Parser<'a> {
@@ -328,19 +299,10 @@ impl<'a> Parser<'a> {
             tag_open_pos: 0,
             special_open_pos: 0,
             raw_text_tag: Tag::Unknown,
-            attr_quote: None,
-        }
-    }
-
-    /// Update the in-attribute quote state for a quote byte (`"` or `'`) seen
-    /// inside a tag. Opening a quote records its char; the matching char closes
-    /// it; the other quote char inside a quoted value is a literal (ignored).
-    #[inline(always)]
-    fn update_attr_quote(&mut self, byte: u8) {
-        match self.attr_quote {
-            None => self.attr_quote = Some(byte),
-            Some(open) if open == byte => self.attr_quote = None,
-            Some(_) => {}
+            tag_scan: TagScanState::START,
+            tag_scan_pos: 0,
+            bogus_data_start: 0,
+            script_escape: ScriptEscape::None,
         }
     }
 
@@ -368,6 +330,7 @@ impl<'a> Parser<'a> {
             Mode::InComment => self.on_in_comment_impl(pos, byte, emit),
             Mode::InDoctype => self.on_in_doctype_impl(pos, byte, emit),
             Mode::InCData => self.on_in_cdata_impl(pos, byte, emit),
+            Mode::InBogusComment => self.on_in_bogus_comment_impl(pos, byte, emit),
             Mode::InRawText | Mode::InRcData => self.on_in_raw_text_impl(pos, byte, emit),
             Mode::InPlainText => {}
         }
@@ -376,167 +339,85 @@ impl<'a> Parser<'a> {
     /// In Data mode: only `<` matters.
     #[inline(always)]
     fn on_data_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        if byte == b'<' {
-            let after = self.peek(pos + 1);
-            let after2 = self.peek(pos + 2);
-            if !starts_markup_after_lt(after, after2) {
-                return;
-            }
-
-            // Flush text before this `<`.
+        if let Some(kind) = self.data_markup(pos, byte) {
             self.flush_text_impl(pos, emit);
-            self.tag_open_pos = pos;
-            self.attr_quote = None;
-
-            // Peek ahead to classify what follows `<`.
-            if after == Some(b'!') {
-                // Could be comment, doctype, or CDATA.
-                if after2 == Some(b'-') && self.peek(pos + 3) == Some(b'-') {
-                    self.mode = Mode::InComment;
-                    self.special_open_pos = pos;
-                } else if after2.is_some_and(|b| b == b'D' || b == b'd') {
-                    self.mode = Mode::InDoctype;
-                    self.special_open_pos = pos;
-                } else if after2 == Some(b'[') && self.is_cdata_open(pos) {
-                    self.mode = Mode::InCData;
-                    self.special_open_pos = pos;
-                } else {
-                    // Unknown <! — treat as doctype-like.
-                    self.mode = Mode::InDoctype;
-                    self.special_open_pos = pos;
-                }
-            } else {
-                // Normal tag (open or close).
-                self.mode = Mode::InTag;
-            }
+            self.enter_markup(pos, kind);
         }
-        // Other delimiters in Data mode are part of text content (entities, etc.)
     }
 
-    /// In tag mode: `>` closes the tag, unless it sits inside an attribute
-    /// value. `"`/`'` toggle the quoted-value state.
+    /// In tag mode: `>` closes the tag unless it sits inside a quoted
+    /// attribute value.
     #[inline(always)]
     fn on_in_tag_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        match byte {
-            b'"' | b'\'' => self.update_attr_quote(byte),
-            b'>' if self.attr_quote.is_none() => {
-                // Parse the tag content between `<` and `>`.
-                self.parse_tag_impl(self.tag_open_pos, pos, emit);
-                self.cursor = pos + 1;
-                // parse_tag may have entered a text-element mode — don't override.
-                if !matches!(
-                    self.mode,
-                    Mode::InRawText | Mode::InRcData | Mode::InPlainText
-                ) {
-                    self.mode = Mode::Data;
-                }
-            }
-            // Other delimiters inside tags (`=`, `/`, and `>` inside a quoted
-            // value) are handled during tag parsing when we see the closing `>`.
-            _ => {}
+        if let Some(self_closing) = self.tag_delimiter(pos, byte) {
+            self.parse_tag_impl(self.tag_open_pos, pos, self_closing, emit);
+            self.finish_tag(pos);
         }
     }
 
-    /// In comment mode: look for `-->`.
+    /// In comment mode: look for `-->` or `--!>`.
     fn on_in_comment_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        if byte == b'>' && pos >= 2 {
-            // Check for `-->`.
-            if self.input[pos - 1] == b'-' && self.input[pos - 2] == b'-' {
-                // Comment content is between `<!--` and `-->`.
-                let content_start = self.special_open_pos + 4; // after `<!--`
-                let content_end = pos - 2; // before `--`
-                let content = if content_start <= content_end {
-                    self.str_slice(content_start, content_end)
-                } else {
-                    ""
-                };
-                emit(Token::Comment {
-                    content: Cow::Borrowed(content),
-                });
-                self.cursor = pos + 1;
-                self.mode = Mode::Data;
-            }
+        if let Some(content_end) = self.comment_close(pos, byte) {
+            emit(Token::Comment {
+                content: Cow::Borrowed(self.str_slice(self.special_open_pos + 4, content_end)),
+            });
+            self.end_special(pos);
         }
     }
 
-    /// In doctype mode: an unquoted `>` closes it.
+    /// In doctype mode: the first `>` closes it.
     fn on_in_doctype_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        if matches!(byte, b'"' | b'\'') {
-            self.update_attr_quote(byte);
-            return;
-        }
-        if byte == b'>' && self.attr_quote.is_none() {
-            // Content between `<!` and `>`.
-            let inner_start = self.special_open_pos + 2; // after `<!`
-            let content = self.str_slice(inner_start, pos).trim();
-            // Strip "DOCTYPE " prefix if present.
-            let content =
-                if content.len() >= 7 && content.as_bytes()[..7].eq_ignore_ascii_case(b"DOCTYPE") {
-                    content[7..].trim_start()
-                } else {
-                    content
-                };
+        if byte == b'>' {
             emit(Token::Doctype {
-                content: Cow::Borrowed(content),
+                content: Cow::Borrowed(self.doctype_content(pos)),
             });
-            self.cursor = pos + 1;
-            self.mode = Mode::Data;
+            self.end_special(pos);
         }
     }
 
     /// In CDATA mode: look for `]]>`.
     fn on_in_cdata_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        if byte == b'>' && pos >= 2 && self.input[pos - 1] == b']' && self.input[pos - 2] == b']' {
-            // Content between `<![CDATA[` and `]]>`.
-            let content_start = self.special_open_pos + 9; // after `<![CDATA[`
-            let content_end = pos - 2; // before `]]`
-            let content = if content_start <= content_end {
-                self.str_slice(content_start, content_end)
-            } else {
-                ""
-            };
+        if self.cdata_close(pos, byte) {
             emit(Token::CData {
-                content: Cow::Borrowed(content),
+                content: Cow::Borrowed(self.str_slice(self.special_open_pos + 9, pos - 2)),
             });
-            self.cursor = pos + 1;
-            self.mode = Mode::Data;
+            self.end_special(pos);
+        }
+    }
+
+    /// In bogus-comment mode: the first `>` closes it.
+    fn on_in_bogus_comment_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
+        if byte == b'>' {
+            emit(Token::Comment {
+                content: Cow::Borrowed(self.str_slice(self.bogus_data_start, pos)),
+            });
+            self.end_special(pos);
         }
     }
 
     /// In raw text/RCDATA mode, only the matching end tag is markup.
     fn on_in_raw_text_impl(&mut self, pos: usize, byte: u8, emit: &mut impl FnMut(Token<'a>)) {
-        if byte == b'<' && self.is_raw_text_close(pos) {
+        if self.text_element_close(pos, byte) {
             if self.mode == Mode::InRcData {
                 self.flush_text_impl(pos, emit);
             } else {
                 self.flush_text_raw_impl(pos, emit);
             }
-            self.tag_open_pos = pos;
-            self.attr_quote = None;
-            self.mode = Mode::InTag;
+            self.begin_tag(pos);
         }
     }
 
     /// Parse a complete tag from `<` at `open` to `>` at `close`.
-    fn parse_tag_impl(&mut self, open: usize, close: usize, emit: &mut impl FnMut(Token<'a>)) {
-        // Skip the `<`.
-        let mut pos = open + 1;
-        if pos >= close {
-            return;
-        }
-
-        let first = self.input[pos];
-
-        // Close tag: `</...>`
-        if first == b'/' {
-            pos += 1;
-            let name_start = pos;
-            while pos < close && !is_whitespace(self.input[pos]) && self.input[pos] != b'/' {
-                pos += 1;
-            }
-            let name = self.str_slice(name_start, pos);
-            let tag = Tag::from_bytes(&self.input[name_start..pos]);
-            self.raw_text_tag = Tag::Unknown;
+    fn parse_tag_impl(
+        &mut self,
+        open: usize,
+        close: usize,
+        self_closing: bool,
+        emit: &mut impl FnMut(Token<'a>),
+    ) {
+        if self.input[open + 1] == b'/' {
+            let (tag, name) = self.close_tag_name(open, close);
+            self.leave_text_element();
             emit(Token::CloseTag {
                 tag,
                 name: Cow::Borrowed(name),
@@ -544,45 +425,19 @@ impl<'a> Parser<'a> {
             return;
         }
 
-        // Open tag: `<name ...>` or `<name ... />`
-        let name_start = pos;
-        while pos < close
-            && !is_whitespace(self.input[pos])
-            && self.input[pos] != b'/'
-            && self.input[pos] != b'>'
-        {
-            pos += 1;
-        }
-        let name = self.str_slice(name_start, pos);
-        let tag = Tag::from_bytes(&self.input[name_start..pos]);
-
-        // The flag records source syntax only. HTML tree construction ignores
-        // a trailing slash on non-void HTML elements.
-        let self_closing = close > 0 && self.input[close - 1] == b'/';
-
-        // Parse attributes.
-        let attrs = self.parse_attributes(pos, if self_closing { close - 1 } else { close });
-
+        let (name_end, tag, name) = self.open_tag_name(open, close);
+        let attr_end = if self_closing { close - 1 } else { close };
+        let attributes = self.parse_attributes(name_end, attr_end);
         emit(Token::OpenTag {
             tag,
             name: Cow::Borrowed(name),
-            attributes: attrs,
+            attributes,
             self_closing,
         });
-
-        // Enter the appropriate text-element mode.
-        if name.eq_ignore_ascii_case("plaintext") {
-            self.mode = Mode::InPlainText;
-        } else if !tag.is_void() && tag.is_raw_text() {
-            self.mode = Mode::InRawText;
-            self.raw_text_tag = tag;
-        } else if !tag.is_void() && tag.is_rcdata() {
-            self.mode = Mode::InRcData;
-            self.raw_text_tag = tag;
-        }
+        self.enter_text_element(tag);
     }
 
-    /// Parse attributes from the region between tag name and `>`.
+    /// Parse attributes from the region between tag name and `>` (or `/>`).
     fn parse_attributes(&self, start: usize, end: usize) -> Vec<Attribute<'a>> {
         let estimated = if end > start {
             // Attribute-heavy scraping input is commonly denser than the old
@@ -596,113 +451,15 @@ impl<'a> Parser<'a> {
         };
         let mut attrs: Vec<Attribute<'a>> = Vec::with_capacity(estimated);
         let mut seen = SeenAttributes::new();
-        let mut pos = start;
 
-        loop {
-            // Skip whitespace.
-            while pos < end && is_whitespace(self.input[pos]) {
-                pos += 1;
-            }
-            if pos >= end {
-                break;
-            }
-
-            // Attribute name.
-            let name_start = pos;
-            let hash_during_parse = seen.hashes_during_parse();
-            let mut fingerprint = ASCII_CI_FINGERPRINT_OFFSET;
-            if hash_during_parse {
-                while pos < end
-                    && !is_whitespace(self.input[pos])
-                    && self.input[pos] != b'='
-                    && self.input[pos] != b'/'
-                    && self.input[pos] != b'>'
-                {
-                    fingerprint = ascii_ci_fingerprint_step(fingerprint, self.input[pos]);
-                    pos += 1;
-                }
-            } else {
-                while pos < end
-                    && !is_whitespace(self.input[pos])
-                    && self.input[pos] != b'='
-                    && self.input[pos] != b'/'
-                    && self.input[pos] != b'>'
-                {
-                    pos += 1;
-                }
-            }
-            let name_end = pos;
-            if name_start == name_end {
-                pos += 1;
+        for attr in iter_raw_attrs(self.str_slice(start, end)) {
+            if seen.duplicate_or_insert(attr.name.as_bytes(), attr.fingerprint) {
                 continue;
             }
-            let attr_name = self.str_slice(name_start, name_end);
-            let attr_name_bytes = attr_name.as_bytes();
-            let duplicate = if hash_during_parse {
-                seen.duplicate_or_insert_hashed(attr_name_bytes, fingerprint)
-            } else {
-                seen.duplicate_or_insert(attr_name_bytes)
-            };
-
-            // Skip whitespace.
-            while pos < end && is_whitespace(self.input[pos]) {
-                pos += 1;
-            }
-
-            // Check for `=`.
-            if pos < end && self.input[pos] == b'=' {
-                pos += 1; // skip '='
-
-                // Skip whitespace.
-                while pos < end && is_whitespace(self.input[pos]) {
-                    pos += 1;
-                }
-
-                // Parse value.
-                if pos < end && (self.input[pos] == b'"' || self.input[pos] == b'\'') {
-                    // Quoted value.
-                    let quote = self.input[pos];
-                    pos += 1; // skip opening quote
-                    let val_start = pos;
-                    while pos < end && self.input[pos] != quote {
-                        pos += 1;
-                    }
-                    let val_end = pos;
-                    if pos < end {
-                        pos += 1; // skip closing quote
-                    }
-                    let raw_value = self.str_slice(val_start, val_end);
-                    if !duplicate {
-                        let value = maybe_decode_attribute_entities(raw_value);
-                        attrs.push(Attribute {
-                            name: Cow::Borrowed(attr_name),
-                            value: Some(value),
-                        });
-                    }
-                } else {
-                    // Unquoted value.
-                    let val_start = pos;
-                    while pos < end && !is_whitespace(self.input[pos]) && self.input[pos] != b'>' {
-                        pos += 1;
-                    }
-                    let raw_value = self.str_slice(val_start, pos);
-                    if !duplicate {
-                        let value = maybe_decode_attribute_entities(raw_value);
-                        attrs.push(Attribute {
-                            name: Cow::Borrowed(attr_name),
-                            value: Some(value),
-                        });
-                    }
-                }
-            } else {
-                // Boolean attribute (no value).
-                if !duplicate {
-                    attrs.push(Attribute {
-                        name: Cow::Borrowed(attr_name),
-                        value: None,
-                    });
-                }
-            }
+            attrs.push(Attribute {
+                name: Cow::Borrowed(attr.name),
+                value: attr.value.map(maybe_decode_attribute_entities),
+            });
         }
 
         attrs
@@ -745,6 +502,30 @@ impl<'a> Parser<'a> {
         self.flush_trailing_impl(emit);
     }
 
+    /// Emit whatever the current mode holds at end of input.
+    #[inline]
+    fn flush_trailing_impl(&mut self, emit: &mut impl FnMut(Token<'a>)) {
+        let end = self.input.len();
+        match self.mode {
+            Mode::Data | Mode::InRcData => self.flush_text_impl(end, emit),
+            Mode::InRawText | Mode::InPlainText => self.flush_text_raw_impl(end, emit),
+            // EOF inside a tag drops the tag (WHATWG "eof-in-tag").
+            Mode::InTag => {}
+            Mode::InComment => emit(Token::Comment {
+                content: Cow::Borrowed(self.eof_comment_content()),
+            }),
+            Mode::InCData => emit(Token::CData {
+                content: Cow::Borrowed(self.str_slice(self.special_open_pos + 9, end)),
+            }),
+            Mode::InDoctype => emit(Token::Doctype {
+                content: Cow::Borrowed(self.doctype_content(end)),
+            }),
+            Mode::InBogusComment => emit(Token::Comment {
+                content: Cow::Borrowed(self.str_slice(self.bogus_data_start, end)),
+            }),
+        }
+    }
+
     // ---- TreeSink-based methods (zero-alloc path) ----
 
     /// Process a structural delimiter (sink mode).
@@ -755,6 +536,7 @@ impl<'a> Parser<'a> {
             Mode::InComment => self.on_in_comment_sink(pos, byte, sink),
             Mode::InDoctype => self.on_in_doctype_sink(pos, byte, sink),
             Mode::InCData => self.on_in_cdata_sink(pos, byte, sink),
+            Mode::InBogusComment => self.on_in_bogus_comment_sink(pos, byte, sink),
             Mode::InRawText | Mode::InRcData => self.on_in_raw_text_sink(pos, byte, sink),
             Mode::InPlainText => {}
         }
@@ -763,117 +545,59 @@ impl<'a> Parser<'a> {
     /// In Data mode (sink): only `<` matters.
     #[inline(always)]
     fn on_data_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        if byte == b'<' {
-            let after = self.peek(pos + 1);
-            let after2 = self.peek(pos + 2);
-            if !starts_markup_after_lt(after, after2) {
-                return;
-            }
-
+        if let Some(kind) = self.data_markup(pos, byte) {
             self.flush_text_sink(pos, sink);
-            self.tag_open_pos = pos;
-            self.attr_quote = None;
-
-            if after == Some(b'!') {
-                if after2 == Some(b'-') && self.peek(pos + 3) == Some(b'-') {
-                    self.mode = Mode::InComment;
-                    self.special_open_pos = pos;
-                } else if after2.is_some_and(|b| b == b'D' || b == b'd') {
-                    self.mode = Mode::InDoctype;
-                    self.special_open_pos = pos;
-                } else if after2 == Some(b'[') && self.is_cdata_open(pos) {
-                    self.mode = Mode::InCData;
-                    self.special_open_pos = pos;
-                } else {
-                    self.mode = Mode::InDoctype;
-                    self.special_open_pos = pos;
-                }
-            } else {
-                self.mode = Mode::InTag;
-            }
+            self.enter_markup(pos, kind);
         }
     }
 
-    /// In tag mode (sink): `>` closes the tag, unless it sits inside an
-    /// attribute value. `"`/`'` toggle the quoted-value state.
+    /// In tag mode (sink): `>` closes the tag unless it sits inside a quoted
+    /// attribute value.
     #[inline(always)]
     fn on_in_tag_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        match byte {
-            b'"' | b'\'' => self.update_attr_quote(byte),
-            b'>' if self.attr_quote.is_none() => {
-                self.parse_tag_sink(self.tag_open_pos, pos, sink);
-                self.cursor = pos + 1;
-                if !matches!(
-                    self.mode,
-                    Mode::InRawText | Mode::InRcData | Mode::InPlainText
-                ) {
-                    self.mode = Mode::Data;
-                }
-            }
-            _ => {}
+        if let Some(self_closing) = self.tag_delimiter(pos, byte) {
+            self.parse_tag_sink(self.tag_open_pos, pos, self_closing, sink);
+            self.finish_tag(pos);
         }
     }
 
-    /// In comment mode (sink): look for `-->`.
+    /// In comment mode (sink): look for `-->` or `--!>`.
     fn on_in_comment_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        if byte == b'>' && pos >= 2 && self.input[pos - 1] == b'-' && self.input[pos - 2] == b'-' {
-            let content_start = self.special_open_pos + 4;
-            let content_end = pos - 2;
-            let content = if content_start <= content_end {
-                self.str_slice(content_start, content_end)
-            } else {
-                ""
-            };
-            sink.comment(content);
-            self.cursor = pos + 1;
-            self.mode = Mode::Data;
+        if let Some(content_end) = self.comment_close(pos, byte) {
+            sink.comment(self.str_slice(self.special_open_pos + 4, content_end));
+            self.end_special(pos);
         }
     }
 
-    /// In doctype mode (sink): an unquoted `>` closes it.
+    /// In doctype mode (sink): the first `>` closes it.
     fn on_in_doctype_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        if matches!(byte, b'"' | b'\'') {
-            self.update_attr_quote(byte);
-            return;
-        }
-        if byte == b'>' && self.attr_quote.is_none() {
-            let inner_start = self.special_open_pos + 2;
-            let content = self.str_slice(inner_start, pos).trim();
-            let content =
-                if content.len() >= 7 && content.as_bytes()[..7].eq_ignore_ascii_case(b"DOCTYPE") {
-                    content[7..].trim_start()
-                } else {
-                    content
-                };
-            sink.doctype(content);
-            self.cursor = pos + 1;
-            self.mode = Mode::Data;
+        if byte == b'>' {
+            sink.doctype(self.doctype_content(pos));
+            self.end_special(pos);
         }
     }
 
     /// In CDATA mode (sink): look for `]]>`.
     fn on_in_cdata_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        if byte == b'>' && pos >= 2 && self.input[pos - 1] == b']' && self.input[pos - 2] == b']' {
-            let content_start = self.special_open_pos + 9;
-            let content_end = pos - 2;
-            let content = if content_start <= content_end {
-                self.str_slice(content_start, content_end)
-            } else {
-                ""
-            };
-            sink.cdata(content);
-            self.cursor = pos + 1;
-            self.mode = Mode::Data;
+        if self.cdata_close(pos, byte) {
+            sink.cdata(self.str_slice(self.special_open_pos + 9, pos - 2));
+            self.end_special(pos);
+        }
+    }
+
+    /// In bogus-comment mode (sink): the first `>` closes it.
+    fn on_in_bogus_comment_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
+        if byte == b'>' {
+            sink.comment(self.str_slice(self.bogus_data_start, pos));
+            self.end_special(pos);
         }
     }
 
     /// In raw text/RCDATA mode (sink), only the matching end tag is markup.
     fn on_in_raw_text_sink<S: TreeSink>(&mut self, pos: usize, byte: u8, sink: &mut S) {
-        if byte == b'<' && self.is_raw_text_close(pos) {
+        if self.text_element_close(pos, byte) {
             self.flush_text_sink(pos, sink);
-            self.tag_open_pos = pos;
-            self.attr_quote = None;
-            self.mode = Mode::InTag;
+            self.begin_tag(pos);
         }
     }
 
@@ -881,59 +605,25 @@ impl<'a> Parser<'a> {
     ///
     /// Instead of parsing attributes into a Vec, passes the raw attribute
     /// region to the sink for direct-to-slab parsing.
-    fn parse_tag_sink<S: TreeSink>(&mut self, open: usize, close: usize, sink: &mut S) {
-        let mut pos = open + 1;
-        if pos >= close {
-            return;
-        }
-
-        let first = self.input[pos];
-
-        // Close tag: `</...>`
-        if first == b'/' {
-            pos += 1;
-            let name_start = pos;
-            while pos < close && !is_whitespace(self.input[pos]) && self.input[pos] != b'/' {
-                pos += 1;
-            }
-            let name = self.str_slice(name_start, pos);
-            let tag = Tag::from_bytes(&self.input[name_start..pos]);
-            self.raw_text_tag = Tag::Unknown;
+    fn parse_tag_sink<S: TreeSink>(
+        &mut self,
+        open: usize,
+        close: usize,
+        self_closing: bool,
+        sink: &mut S,
+    ) {
+        if self.input[open + 1] == b'/' {
+            let (tag, name) = self.close_tag_name(open, close);
+            self.leave_text_element();
             sink.close_tag(tag, name);
             return;
         }
 
-        // Open tag: `<name ...>` or `<name ... />`
-        let name_start = pos;
-        while pos < close
-            && !is_whitespace(self.input[pos])
-            && self.input[pos] != b'/'
-            && self.input[pos] != b'>'
-        {
-            pos += 1;
-        }
-        let name = self.str_slice(name_start, pos);
-        let tag = Tag::from_bytes(&self.input[name_start..pos]);
-
-        let has_trailing_slash = close > 0 && self.input[close - 1] == b'/';
-        let self_closing = has_trailing_slash;
-
+        let (name_end, tag, name) = self.open_tag_name(open, close);
         // Attribute region: from after tag name to before `>` (or `/>`).
-        let attr_end = if has_trailing_slash { close - 1 } else { close };
-        let attr_raw = self.str_slice(pos, attr_end);
-
-        sink.open_tag(tag, name, attr_raw, self_closing);
-
-        // Enter the appropriate text-element mode.
-        if name.eq_ignore_ascii_case("plaintext") {
-            self.mode = Mode::InPlainText;
-        } else if !tag.is_void() && tag.is_raw_text() {
-            self.mode = Mode::InRawText;
-            self.raw_text_tag = tag;
-        } else if !tag.is_void() && tag.is_rcdata() {
-            self.mode = Mode::InRcData;
-            self.raw_text_tag = tag;
-        }
+        let attr_end = if self_closing { close - 1 } else { close };
+        sink.open_tag(tag, name, self.str_slice(name_end, attr_end), self_closing);
+        self.enter_text_element(tag);
     }
 
     /// Flush text from cursor to pos (sink mode — raw, no entity decode).
@@ -948,76 +638,263 @@ impl<'a> Parser<'a> {
         self.cursor = pos;
     }
 
-    /// Flush trailing text at end of input (sink mode).
+    /// Emit whatever the current mode holds at end of input (sink mode).
     pub(crate) fn flush_trailing_sink<S: TreeSink>(&mut self, sink: &mut S) {
         let end = self.input.len();
-        if end > self.cursor {
-            let raw = self.str_slice(self.cursor, end);
-            if !raw.is_empty() {
-                sink.text(raw);
+        match self.mode {
+            Mode::Data | Mode::InRcData | Mode::InRawText | Mode::InPlainText => {
+                self.flush_text_sink(end, sink);
             }
+            // EOF inside a tag drops the tag (WHATWG "eof-in-tag").
+            Mode::InTag => {}
+            Mode::InComment => sink.comment(self.eof_comment_content()),
+            Mode::InCData => sink.cdata(self.str_slice(self.special_open_pos + 9, end)),
+            Mode::InDoctype => sink.doctype(self.doctype_content(end)),
+            Mode::InBogusComment => sink.comment(self.str_slice(self.bogus_data_start, end)),
         }
     }
 
-    /// Flush trailing text at end of input (generic).
-    #[inline]
-    fn flush_trailing_impl(&mut self, emit: &mut impl FnMut(Token<'a>)) {
-        let end = self.input.len();
-        if end > self.cursor {
-            let raw = self.str_slice(self.cursor, end);
-            if !raw.is_empty() {
-                let content = if matches!(self.mode, Mode::InRawText | Mode::InPlainText)
-                    || (self.mode == Mode::InTag && self.raw_text_tag.is_raw_text())
-                {
-                    Cow::Borrowed(raw)
-                } else {
-                    maybe_decode_entities(raw)
-                };
-                emit(Token::Text { content });
-            }
+    // ---- Shared state transitions ----
+
+    /// The markup kind started by a data-state delimiter, or `None` when it
+    /// is text.
+    #[inline(always)]
+    fn data_markup(&self, pos: usize, byte: u8) -> Option<LtKind> {
+        if byte != b'<' {
+            return None;
         }
+        // The whole input is available, so classification never waits.
+        match classify_lt(&self.input[pos..], true) {
+            None | Some(LtKind::Text) => None,
+            kind => kind,
+        }
+    }
+
+    /// Enter the mode for markup starting at `pos` (text before `pos` has
+    /// already been flushed).
+    #[inline(always)]
+    fn enter_markup(&mut self, pos: usize, kind: LtKind) {
+        match kind {
+            LtKind::Text => {}
+            LtKind::Tag => self.begin_tag(pos),
+            LtKind::Comment => {
+                self.mode = Mode::InComment;
+                self.special_open_pos = pos;
+            }
+            LtKind::CData => {
+                self.mode = Mode::InCData;
+                self.special_open_pos = pos;
+            }
+            LtKind::Doctype => {
+                self.mode = Mode::InDoctype;
+                self.special_open_pos = pos;
+            }
+            LtKind::BogusComment { data_offset } => {
+                self.mode = Mode::InBogusComment;
+                self.bogus_data_start = pos + data_offset;
+            }
+            LtKind::EmptyEndTag => self.cursor = pos + 3,
+        }
+    }
+
+    /// Enter tag mode for the `<` at `pos`.
+    #[inline(always)]
+    fn begin_tag(&mut self, pos: usize) {
+        self.mode = Mode::InTag;
+        self.tag_open_pos = pos;
+        self.tag_scan = TagScanState::START;
+        self.tag_scan_pos = pos + tag_name_offset(&self.input[pos..]);
+    }
+
+    /// Advance `tag_scan` over the bytes up to (excluding) `pos`.
+    #[inline(always)]
+    fn tag_scan_to(&mut self, pos: usize) {
+        self.tag_scan = self.tag_scan.advance(&self.input[self.tag_scan_pos..pos]);
+        self.tag_scan_pos = pos;
+    }
+
+    /// Feed a tag-mode delimiter into the attribute grammar. Returns
+    /// `Some(self_closing)` when `byte` is the `>` that ends the tag.
+    #[inline(always)]
+    fn tag_delimiter(&mut self, pos: usize, byte: u8) -> Option<bool> {
+        match byte {
+            b'"' | b'\'' => {
+                if let TagScanState::Quoted(quote) = self.tag_scan {
+                    // The other quote character is literal inside a value.
+                    if byte == quote {
+                        self.tag_scan = TagScanState::BeforeAttrName;
+                    }
+                } else {
+                    self.tag_scan_to(pos);
+                    self.tag_scan = self.tag_scan.step(byte);
+                }
+                self.tag_scan_pos = pos + 1;
+                None
+            }
+            // Between quote delimiters the state cannot become `Quoted`, so
+            // the possibly stale state still answers this exactly.
+            b'>' if !self.tag_scan.gt_is_literal() => {
+                // Only a tag ending in `/` needs the exact state: a `/` inside
+                // an unquoted value belongs to the value.
+                let self_closing = self.input[pos - 1] == b'/' && {
+                    self.tag_scan_to(pos);
+                    self.tag_scan != TagScanState::Unquoted
+                };
+                Some(self_closing)
+            }
+            _ => None,
+        }
+    }
+
+    /// Leave tag mode after the tag ending at `close` was emitted.
+    #[inline(always)]
+    fn finish_tag(&mut self, close: usize) {
+        self.cursor = close + 1;
+        // The tag may have entered a text-element mode — don't override.
+        if self.mode == Mode::InTag {
+            self.mode = Mode::Data;
+        }
+    }
+
+    /// Return to data mode after a comment, doctype, CDATA section, or bogus
+    /// comment ending at `close`.
+    #[inline(always)]
+    fn end_special(&mut self, close: usize) {
+        self.cursor = close + 1;
+        self.mode = Mode::Data;
+    }
+
+    /// Content end of the current comment if the `>` at `pos` closes it.
+    ///
+    /// `-->` may reuse the opening dashes (`<!-->`, `<!--->`); `--!>` may not.
+    #[inline]
+    fn comment_close(&self, pos: usize, byte: u8) -> Option<usize> {
+        if byte != b'>' {
+            return None;
+        }
+        // `<!--` contains no delimiter, so `pos >= special_open_pos + 4`.
+        if self.input[pos - 2..pos] == *b"--" {
+            return Some(pos - 2);
+        }
+        if pos - 3 >= self.special_open_pos + 4 && self.input[pos - 3..pos] == *b"--!" {
+            return Some(pos - 3);
+        }
+        None
+    }
+
+    /// Whether the `>` at `pos` ends the current CDATA section.
+    #[inline]
+    fn cdata_close(&self, pos: usize, byte: u8) -> bool {
+        // `<![CDATA[` contains no delimiter, so `pos >= special_open_pos + 9`.
+        byte == b'>' && self.input[pos - 2..pos] == *b"]]"
+    }
+
+    /// Doctype content between `<!` and `end`, without the `DOCTYPE` keyword.
+    fn doctype_content(&self, end: usize) -> &'a str {
+        let content = self.str_slice(self.special_open_pos + 2, end).trim();
+        if content.len() >= 7 && content.as_bytes()[..7].eq_ignore_ascii_case(b"DOCTYPE") {
+            content[7..].trim_start()
+        } else {
+            content
+        }
+    }
+
+    /// Content of a comment cut off by end of input: a trailing partial
+    /// terminator (`-`, `--`, or `--!`) is not part of the data.
+    fn eof_comment_content(&self) -> &'a str {
+        let start = self.special_open_pos + 4;
+        let data = &self.input[start..];
+        let trim = if data.ends_with(b"--!") {
+            3
+        } else {
+            data.iter()
+                .rev()
+                .take(2)
+                .take_while(|&&byte| byte == b'-')
+                .count()
+        };
+        self.str_slice(start, self.input.len() - trim)
+    }
+
+    /// Whether the `<` at `pos` inside a text element starts its end tag.
+    /// Inside `<script>` this also tracks the script-data escape states.
+    #[inline]
+    fn text_element_close(&mut self, pos: usize, byte: u8) -> bool {
+        if self.raw_text_tag == Tag::Script {
+            match byte {
+                b'<' => {
+                    let (state, closes) = script_lt_event(self.script_escape, self.input, pos);
+                    self.script_escape = state;
+                    closes
+                }
+                b'>' => {
+                    self.script_escape = script_gt_event(self.script_escape, self.input, pos);
+                    false
+                }
+                _ => false,
+            }
+        } else {
+            byte == b'<' && self.is_raw_text_close(pos)
+        }
+    }
+
+    /// Enter the text mode a start tag implies, if any.
+    #[inline]
+    fn enter_text_element(&mut self, tag: Tag) {
+        if tag == Tag::Plaintext {
+            self.mode = Mode::InPlainText;
+        } else if !tag.is_void() && tag.is_raw_text() {
+            self.mode = Mode::InRawText;
+            self.raw_text_tag = tag;
+            self.script_escape = ScriptEscape::None;
+        } else if !tag.is_void() && tag.is_rcdata() {
+            self.mode = Mode::InRcData;
+            self.raw_text_tag = tag;
+        }
+    }
+
+    /// Forget the text element after an end tag.
+    #[inline]
+    fn leave_text_element(&mut self) {
+        self.raw_text_tag = Tag::Unknown;
+        self.script_escape = ScriptEscape::None;
+    }
+
+    /// Tag and name of the end tag `</name ...>` spanning `open..=close`.
+    #[inline]
+    fn close_tag_name(&self, open: usize, close: usize) -> (Tag, &'a str) {
+        let start = open + 2;
+        let mut end = start;
+        while end < close && !is_html_whitespace(self.input[end]) && self.input[end] != b'/' {
+            end += 1;
+        }
+        (
+            Tag::from_bytes(&self.input[start..end]),
+            self.str_slice(start, end),
+        )
+    }
+
+    /// Name end, tag, and name of the start tag `<name ...>` spanning
+    /// `open..=close`.
+    #[inline]
+    fn open_tag_name(&self, open: usize, close: usize) -> (usize, Tag, &'a str) {
+        let start = open + 1;
+        let mut end = start;
+        while end < close && !is_html_whitespace(self.input[end]) && self.input[end] != b'/' {
+            end += 1;
+        }
+        (
+            end,
+            Tag::from_bytes(&self.input[start..end]),
+            self.str_slice(start, end),
+        )
     }
 
     /// Check if `<` at `pos` starts the close tag for the current raw text element.
+    #[inline]
     fn is_raw_text_close(&self, pos: usize) -> bool {
-        let remaining = &self.input[pos..];
-        if remaining.len() < 3 {
-            return false;
-        }
-        if remaining[1] != b'/' {
-            return false;
-        }
-        let tag_name = self.raw_text_tag.as_str().unwrap_or("");
-        let name_len = tag_name.len();
-        if remaining.len() < 2 + name_len + 1 {
-            return false;
-        }
-        let candidate = &remaining[2..2 + name_len];
-        if !candidate.eq_ignore_ascii_case(tag_name.as_bytes()) {
-            return false;
-        }
-        let after = remaining[2 + name_len];
-        after == b'>' || after == b'/' || is_whitespace(after)
-    }
-
-    /// Peek at a byte in the input, returning `None` if out of bounds.
-    #[inline(always)]
-    fn peek(&self, pos: usize) -> Option<u8> {
-        self.input.get(pos).copied()
-    }
-
-    /// Check whether the input at `pos` begins the literal `<![CDATA[`.
-    ///
-    /// `pos` points at `<`; the caller has already matched `<![`. The CDATA
-    /// close handler assumes a 9-byte `<![CDATA[` prefix, so we must verify the
-    /// full literal before entering CDATA mode. Otherwise the assumed content
-    /// offset could fall in the middle of a multi-byte character and produce an
-    /// invalid-UTF-8 slice.
-    #[inline(always)]
-    fn is_cdata_open(&self, pos: usize) -> bool {
-        self.input
-            .get(pos + 3..pos + 9)
-            .is_some_and(|s| s == b"CDATA[")
+        let name = self.raw_text_tag.as_str().unwrap_or("");
+        is_end_tag_at(self.input, pos, name.as_bytes())
     }
 
     /// Get a `&str` slice from the input.
@@ -1030,27 +907,6 @@ impl<'a> Parser<'a> {
             .get(start..end)
             .expect("tokenizer produced a range outside UTF-8 character boundaries")
     }
-}
-
-/// Check if a byte is ASCII whitespace.
-#[inline(always)]
-fn is_whitespace(b: u8) -> bool {
-    matches!(b, b' ' | b'\t' | b'\n' | 0x0C | b'\r')
-}
-
-#[inline(always)]
-pub(crate) fn starts_markup_after_lt(after: Option<u8>, after2: Option<u8>) -> bool {
-    match after {
-        Some(b'!') | Some(b'?') => true,
-        Some(b'/') => after2.is_some_and(is_tag_name_start),
-        Some(b) => is_tag_name_start(b),
-        None => false,
-    }
-}
-
-#[inline(always)]
-fn is_tag_name_start(b: u8) -> bool {
-    b == b'_' || b.is_ascii_alphabetic()
 }
 
 #[cfg(test)]
@@ -1302,45 +1158,6 @@ mod tests {
                 assert_eq!(attributes[0].value.as_deref(), Some("duplicate"));
             }
         }
-    }
-
-    #[test]
-    fn fingerprint_collision_still_checks_full_name() {
-        let candidate = b"beta";
-        let fingerprint = ascii_ci_fingerprint(candidate);
-        let mut seen = SeenAttributes::new();
-        seen.bloom = fingerprint_bloom(fingerprint);
-        seen.inline[0].write(SeenAttribute {
-            fingerprint,
-            name: b"alpha",
-        });
-        seen.inline_len = 1;
-
-        assert!(!seen.duplicate_or_insert(candidate));
-        assert!(seen.duplicate_or_insert(b"BETA"));
-
-        let mut heap_seen = SeenAttributes::new();
-        heap_seen.bloom = fingerprint_bloom(fingerprint);
-        heap_seen.inline[0].write(SeenAttribute {
-            fingerprint,
-            name: b"alpha",
-        });
-        heap_seen.inline_len = 1;
-        for name in [
-            b"bravo".as_slice(),
-            b"charlie".as_slice(),
-            b"delta".as_slice(),
-            b"echo".as_slice(),
-            b"foxtrot".as_slice(),
-            b"golf".as_slice(),
-            b"hotel".as_slice(),
-            b"india".as_slice(),
-        ] {
-            assert!(!heap_seen.duplicate_or_insert_hashed(name, fingerprint));
-        }
-        assert!(heap_seen.heap.is_some());
-        assert!(!heap_seen.duplicate_or_insert_hashed(candidate, fingerprint));
-        assert!(heap_seen.duplicate_or_insert_hashed(b"BETA", fingerprint));
     }
 
     #[test]

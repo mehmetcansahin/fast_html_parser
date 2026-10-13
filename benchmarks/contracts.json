@@ -31,7 +31,7 @@
       {
         "id": "realworld_hackernews_34kb",
         "digests": {
-          "fast_html_parser": { "node_count": 1289, "canonical_bytes": 75430, "fnv1a_128": "9955211543300887589655688940214611408" },
+          "fast_html_parser": { "node_count": 1289, "canonical_bytes": 75430, "fnv1a_128": "246634101242904850217047013349445249892" },
           "scraper": { "node_count": 1289, "canonical_bytes": 75430, "fnv1a_128": "244357744600868735941228058500391843836" },
           "tl": { "node_count": 1285, "canonical_bytes": 75270, "fnv1a_128": "220639095287892578106976742664492179438" }
         }
@@ -39,7 +39,7 @@
       {
         "id": "realworld_github_301kb",
         "digests": {
-          "fast_html_parser": { "node_count": 2352, "canonical_bytes": 370565, "fnv1a_128": "17520221429628825726382852179596865253" },
+          "fast_html_parser": { "node_count": 2352, "canonical_bytes": 370565, "fnv1a_128": "146420305818144093457308612695122481601" },
           "scraper": { "node_count": 2347, "canonical_bytes": 370513, "fnv1a_128": "159436390105134441791436786501668789190" },
           "tl": { "node_count": 2351, "canonical_bytes": 370055, "fnv1a_128": "217884927610587388416198048311005742500" }
         }
@@ -47,7 +47,7 @@
       {
         "id": "realworld_stackoverflow_415kb",
         "digests": {
-          "fast_html_parser": { "node_count": 7231, "canonical_bytes": 604348, "fnv1a_128": "180635918893669023802003114049669147285" },
+          "fast_html_parser": { "node_count": 7231, "canonical_bytes": 604348, "fnv1a_128": "6260501509446628239004013477644262097" },
           "scraper": { "node_count": 7226, "canonical_bytes": 604269, "fnv1a_128": "225135587216815320935407431798352380934" },
           "tl": { "node_count": 7243, "canonical_bytes": 604030, "fnv1a_128": "84179740130344130830349705493048782512" }
         }
@@ -55,7 +55,7 @@
       {
         "id": "realworld_wikipedia_590kb",
         "digests": {
-          "fast_html_parser": { "node_count": 17812, "canonical_bytes": 1048172, "fnv1a_128": "52261862017493749154144022089709564670" },
+          "fast_html_parser": { "node_count": 17812, "canonical_bytes": 1048172, "fnv1a_128": "330243106999462478845347284734046885364" },
           "scraper": { "node_count": 17809, "canonical_bytes": 1048057, "fnv1a_128": "336155157043076725353651655842976091570" },
           "tl": { "node_count": 17812, "canonical_bytes": 1049483, "fnv1a_128": "125834724340722811197684998018893479893" }
         }
@@ -68,6 +68,6 @@
     { "fixture_id": "synthetic_100kb", "id": "descendant_div_p", "css": "div p", "counts": { "fast_html_parser": 21, "scraper": 21, "tl": 0 } },
     { "fixture_id": "realworld_wikipedia_590kb", "id": "link_with_href", "css": "a[href]", "counts": { "fast_html_parser": 1908, "scraper": 1908, "tl": 1905 } },
     { "fixture_id": "realworld_wikipedia_590kb", "id": "class_mw_body", "css": "main.mw-body", "counts": { "fast_html_parser": 1, "scraper": 1, "tl": 1 } },
-    { "fixture_id": "realworld_wikipedia_590kb", "id": "descendant_table_td", "css": "table td", "counts": { "fast_html_parser": 56, "scraper": 60, "tl": 0 } }
+    { "fixture_id": "realworld_wikipedia_590kb", "id": "descendant_table_td", "css": "table td", "counts": { "fast_html_parser": 60, "scraper": 60, "tl": 0 } }
   ]
 }

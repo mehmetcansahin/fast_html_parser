@@ -66,6 +66,17 @@ Run tests including async/streaming features:
 cargo test --workspace --all-features
 ```
 
+Run the x86 SIMD backends' exhaustive differential tests on Apple Silicon:
+
+```bash
+FHP_SIMD_FORCE_AVX2=1 FHP_SIMD_FORCE_SSE42=1 \
+  cargo test -p fhp-simd --target x86_64-apple-darwin
+```
+
+Rosetta 2 executes AVX2 and SSE4.2 instructions but hides them from CPUID, so
+the backend tests skip themselves unless these overrides are set. Set them only
+where the instructions actually execute.
+
 ## Code Quality
 
 The local gate runs the following checks; use these commands when narrowing a
@@ -184,12 +195,14 @@ clean, run:
 python3 scripts/release.py release --version 0.2.0
 ```
 
-In addition to the development gate, this checks Rust 1.85, cargo-deny, native
-and x86/Rosetta SIMD execution where applicable, Linux and Windows target
-checks, every fuzz target for 60 seconds, all seven package archives, copied
-license hashes, and clean benchmark metadata. Missing toolchains, targets,
-`cargo-deny`, or `cargo-fuzz` are reported as explicit failures and are never
-installed by the script.
+In addition to the development gate, this checks Rust 1.85 with both the
+checked-in and a freshly resolved lockfile, docs.rs-equivalent nightly rustdoc
+(`--cfg docsrs`, all features), cargo-deny over the all-features dependency
+graph, native and x86/Rosetta SIMD execution where applicable, Linux and
+Windows target checks, every fuzz target for 60 seconds, all seven package
+archives, copied license hashes, and clean benchmark metadata. Missing
+toolchains, targets, `cargo-deny`, or `cargo-fuzz` are reported as explicit
+failures and are never installed by the script.
 
 ## Reporting Issues
 

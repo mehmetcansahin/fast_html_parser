@@ -4,9 +4,14 @@
 //! state across chunk boundaries. This enables parsing large files or
 //! network streams without loading the entire document into memory.
 
-use crate::extract::extract_tokens;
+use crate::extract::{
+    LtKind, ScriptEscape, classify_lt, extract_tokens, is_end_tag_at, script_gt_event,
+    script_lt_event,
+};
 use crate::structural::StructuralIndexer;
 use crate::token::Token;
+use fhp_core::attr::{TagScanState, tag_name_offset};
+use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
 /// Maximum size of the residual buffer.
@@ -158,7 +163,6 @@ enum TextFlushPlan {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SplitScan {
     split: usize,
-    in_raw_text_context: bool,
     /// Start of a matching raw-text/RCDATA close tag within `split`, together
     /// with the element whose preceding bytes are text.
     text_close: Option<(usize, Tag)>,
@@ -167,14 +171,28 @@ struct SplitScan {
 /// Text-tokenization context retained across chunk boundaries.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum TextContext {
-    Element(Tag),
+    /// Inside a raw-text or RCDATA element. `escape` is the script-data
+    /// escape state and stays [`ScriptEscape::None`] unless `tag` is
+    /// [`Tag::Script`].
+    Element {
+        tag: Tag,
+        escape: ScriptEscape,
+    },
     Plaintext,
 }
 
 impl TextContext {
     #[inline]
+    fn element(tag: Tag) -> Self {
+        Self::Element {
+            tag,
+            escape: ScriptEscape::None,
+        }
+    }
+
+    #[inline]
     fn decodes_entities(self) -> bool {
-        matches!(self, Self::Element(tag) if tag.is_rcdata())
+        matches!(self, Self::Element { tag, .. } if tag.is_rcdata())
     }
 }
 
@@ -216,14 +234,20 @@ impl StreamTokenizer {
         }
         self.residual.extend_from_slice(chunk);
 
+        // Splits only advance `consumed`; the buffer is compacted once below,
+        // so many small tokens in one feed stay linear.
+        let mut buffered = std::mem::take(&mut self.residual);
+        let mut consumed = 0;
         loop {
-            let scan = self.scanner.scan(&self.residual, self.syntax_overflow);
+            let scan = self
+                .scanner
+                .scan(&buffered[consumed..], self.syntax_overflow);
             if scan.split == 0 {
                 break;
             }
 
             let split = scan.split;
-            let mut buffered = std::mem::take(&mut self.residual);
+            let pending = &buffered[consumed..consumed + split];
             if let Some(overflow) = self.raw_close_overflow.take() {
                 debug_assert_eq!(
                     scan.text_close.map(|(_, close_tag)| close_tag),
@@ -231,24 +255,25 @@ impl StreamTokenizer {
                 );
                 tokens.push(owned_close_tag(overflow.tag, overflow.source_name()));
             } else if self.syntax_overflow {
-                tokens.push(owned_text_token(&buffered[..split], None));
+                tokens.push(owned_text_token(pending, None));
                 self.syntax_overflow = false;
             } else if let Some((close_start, tag)) = scan.text_close {
                 if close_start > 0 {
                     tokens.push(owned_text_token(
-                        &buffered[..close_start],
-                        Some(TextContext::Element(tag)),
+                        &pending[..close_start],
+                        Some(TextContext::element(tag)),
                     ));
                 }
-                tokens.extend(self.process_chunk(&buffered[close_start..split]));
+                tokens.extend(self.process_chunk(&pending[close_start..]));
             } else {
-                tokens.extend(self.process_chunk(&buffered[..split]));
+                tokens.extend(self.process_chunk(pending));
             }
 
-            discard_prefix(&mut buffered, split);
             self.scanner.discard_prefix(split);
-            self.residual = buffered;
+            consumed += split;
         }
+        buffered.drain(..consumed);
+        self.residual = buffered;
 
         self.flush_bounded_text(&mut tokens);
         self.flush_overlong_syntax(&mut tokens);
@@ -271,14 +296,20 @@ impl StreamTokenizer {
         }
         self.residual.extend_from_slice(chunk);
 
+        // Splits only advance `consumed`; the buffer is compacted once below,
+        // so many small tokens in one feed stay linear.
+        let mut buffered = std::mem::take(&mut self.residual);
+        let mut consumed = 0;
         loop {
-            let scan = self.scanner.scan(&self.residual, self.syntax_overflow);
+            let scan = self
+                .scanner
+                .scan(&buffered[consumed..], self.syntax_overflow);
             if scan.split == 0 {
                 break;
             }
 
             let split = scan.split;
-            let mut buffered = std::mem::take(&mut self.residual);
+            let pending = &buffered[consumed..consumed + split];
             if let Some(overflow) = self.raw_close_overflow.take() {
                 debug_assert_eq!(
                     scan.text_close.map(|(_, close_tag)| close_tag),
@@ -286,25 +317,26 @@ impl StreamTokenizer {
                 );
                 emit_close_tag_with(overflow.tag, overflow.source_name(), &mut on_token);
             } else if self.syntax_overflow {
-                emit_text_token_with(&buffered[..split], None, &mut on_token);
+                emit_text_token_with(pending, None, &mut on_token);
                 self.syntax_overflow = false;
             } else if let Some((close_start, tag)) = scan.text_close {
                 if close_start > 0 {
                     emit_text_token_with(
-                        &buffered[..close_start],
-                        Some(TextContext::Element(tag)),
+                        &pending[..close_start],
+                        Some(TextContext::element(tag)),
                         &mut on_token,
                     );
                 }
-                self.process_chunk_with(&buffered[close_start..split], &mut on_token);
+                self.process_chunk_with(&pending[close_start..], &mut on_token);
             } else {
-                self.process_chunk_with(&buffered[..split], &mut on_token);
+                self.process_chunk_with(pending, &mut on_token);
             }
 
-            discard_prefix(&mut buffered, split);
             self.scanner.discard_prefix(split);
-            self.residual = buffered;
+            consumed += split;
         }
+        buffered.drain(..consumed);
+        self.residual = buffered;
 
         self.flush_bounded_text_with(&mut on_token);
         self.flush_overlong_syntax_with(&mut on_token);
@@ -312,62 +344,65 @@ impl StreamTokenizer {
 
     /// Signal end of input and flush any remaining buffered data.
     pub fn finish(&mut self) -> Vec<Token<'static>> {
-        let mut prefix = Vec::new();
+        let mut tokens = Vec::new();
         if let Some(state) = self.numeric_entity.take() {
-            prefix.push(owned_numeric_entity_token(state));
-        }
-        if self.residual.is_empty() && self.raw_close_overflow.is_none() {
-            if !prefix.is_empty() {
-                self.scanner.reset();
-                self.syntax_overflow = false;
-            }
-            return prefix;
+            tokens.push(owned_numeric_entity_token(state));
         }
         let remaining = std::mem::take(&mut self.residual);
-        let mut tokens = if let Some(overflow) = self.raw_close_overflow.take() {
-            vec![owned_text_token(
-                &remaining,
-                Some(TextContext::Element(overflow.tag)),
-            )]
+        if self.raw_close_overflow.take().is_some() {
+            // `remaining` is the tail of an unterminated end tag; EOF inside
+            // a tag drops it.
         } else if self.syntax_overflow {
-            vec![owned_text_token(&remaining, None)]
+            if !remaining.is_empty() {
+                tokens.push(owned_text_token(&remaining, None));
+            }
+        } else if let Some((open, tag)) = self.scanner.text_close_candidate() {
+            // Only the text before the unterminated end tag survives EOF.
+            if open > 0 {
+                tokens.push(owned_text_token(
+                    &remaining[..open],
+                    Some(TextContext::element(tag)),
+                ));
+            }
         } else if let Some(context) = self.scanner.text_context() {
-            vec![owned_text_token(&remaining, Some(context))]
-        } else {
-            self.process_chunk(&remaining)
-        };
+            if !remaining.is_empty() {
+                tokens.push(owned_text_token(&remaining, Some(context)));
+            }
+        } else if !remaining.is_empty() {
+            tokens.extend(self.process_chunk(&remaining));
+        }
         self.scanner.reset();
         self.syntax_overflow = false;
-        prefix.append(&mut tokens);
-        prefix
+        tokens
     }
 
     /// Signal end of input and flush buffered tokens via callback without cloning.
     pub fn finish_with(&mut self, mut on_token: impl FnMut(&Token<'_>)) {
-        let mut finished_numeric_entity = false;
         if let Some(state) = self.numeric_entity.take() {
             emit_numeric_entity_with(state, &mut on_token);
-            finished_numeric_entity = true;
-        }
-        if self.residual.is_empty() && self.raw_close_overflow.is_none() {
-            if finished_numeric_entity {
-                self.scanner.reset();
-                self.syntax_overflow = false;
-            }
-            return;
         }
         let remaining = std::mem::take(&mut self.residual);
-        if let Some(overflow) = self.raw_close_overflow.take() {
-            emit_text_token_with(
-                &remaining,
-                Some(TextContext::Element(overflow.tag)),
-                &mut on_token,
-            );
+        if self.raw_close_overflow.take().is_some() {
+            // `remaining` is the tail of an unterminated end tag; EOF inside
+            // a tag drops it.
         } else if self.syntax_overflow {
-            emit_text_token_with(&remaining, None, &mut on_token);
+            if !remaining.is_empty() {
+                emit_text_token_with(&remaining, None, &mut on_token);
+            }
+        } else if let Some((open, tag)) = self.scanner.text_close_candidate() {
+            // Only the text before the unterminated end tag survives EOF.
+            if open > 0 {
+                emit_text_token_with(
+                    &remaining[..open],
+                    Some(TextContext::element(tag)),
+                    &mut on_token,
+                );
+            }
         } else if let Some(context) = self.scanner.text_context() {
-            emit_text_token_with(&remaining, Some(context), &mut on_token);
-        } else {
+            if !remaining.is_empty() {
+                emit_text_token_with(&remaining, Some(context), &mut on_token);
+            }
+        } else if !remaining.is_empty() {
             self.process_chunk_with(&remaining, &mut on_token);
         }
         self.scanner.reset();
@@ -484,12 +519,13 @@ impl StreamTokenizer {
             if open > 0 {
                 tokens.push(owned_text_token(
                     &self.residual[..open],
-                    Some(TextContext::Element(close_tag)),
+                    Some(TextContext::element(close_tag)),
                 ));
                 discard_prefix(&mut self.residual, open);
                 self.scanner.discard_prefix(open);
             }
-            if self.residual.len() > TEXT_TAIL {
+            // Truncate the candidate only once it alone exceeds the bound.
+            if self.residual.len() > limit {
                 let discard_len =
                     utf8_prefix_boundary(&self.residual, self.residual.len() - TEXT_TAIL);
                 if discard_len > 0 {
@@ -542,13 +578,14 @@ impl StreamTokenizer {
             if open > 0 {
                 emit_text_token_with(
                     &self.residual[..open],
-                    Some(TextContext::Element(close_tag)),
+                    Some(TextContext::element(close_tag)),
                     on_token,
                 );
                 discard_prefix(&mut self.residual, open);
                 self.scanner.discard_prefix(open);
             }
-            if self.residual.len() > TEXT_TAIL {
+            // Truncate the candidate only once it alone exceeds the bound.
+            if self.residual.len() > limit {
                 let discard_len =
                     utf8_prefix_boundary(&self.residual, self.residual.len() - TEXT_TAIL);
                 if discard_len > 0 {
@@ -654,14 +691,18 @@ impl Default for StreamTokenizer {
 enum ScanMode {
     Data,
     Tag {
-        quote: Option<u8>,
+        /// Attribute-grammar state after the scanned tag bytes.
+        scan: TagScanState,
         open: usize,
         text_close: Option<Tag>,
     },
-    Doctype {
-        quote: Option<u8>,
+    /// A doctype or bogus comment: the first `>` ends it.
+    Declaration,
+    /// A comment whose data starts at `content_start`. `-->` may reuse the
+    /// opening dashes (`<!-->`, `<!--->`); `--!>` may not.
+    Comment {
+        content_start: usize,
     },
-    Comment,
     CData,
 }
 
@@ -693,157 +734,159 @@ impl SplitScanner {
 
         while i < data.len() {
             match self.mode {
-                ScanMode::Data => {
-                    if let Some(context) = self.text_context {
-                        if let TextContext::Element(tag) = context {
-                            if data[i] == b'<' {
-                                if is_raw_text_close(data, i, tag) {
+                ScanMode::Data => match self.text_context {
+                    Some(TextContext::Plaintext) => i = data.len(),
+                    Some(TextContext::Element { tag, escape }) => {
+                        match data[i] {
+                            b'<' => {
+                                if is_incomplete_text_close(data, i, tag, escape) {
+                                    break;
+                                }
+                                let closes = if tag == Tag::Script {
+                                    let (escape, closes) = script_lt_event(escape, data, i);
+                                    self.text_context = Some(TextContext::Element { tag, escape });
+                                    closes
+                                } else {
+                                    is_end_tag_at(data, i, tag_name(tag))
+                                };
+                                if closes {
                                     self.mode = ScanMode::Tag {
-                                        quote: None,
+                                        scan: TagScanState::START,
                                         open: i,
                                         text_close: Some(tag),
                                     };
-                                } else if is_incomplete_raw_text_close(data, i, tag) {
-                                    break;
+                                    // Scan from the end-tag name.
+                                    i += tag_name_offset(&data[i..]);
+                                    continue;
                                 }
                             }
+                            b'>' if tag == Tag::Script => {
+                                self.text_context = Some(TextContext::Element {
+                                    tag,
+                                    escape: script_gt_event(escape, data, i),
+                                });
+                            }
+                            _ => {}
                         }
                         i += 1;
-                        continue;
                     }
-
-                    if data[i] == b'<' {
-                        if is_incomplete_markup_prefix(&data[i..]) {
-                            break;
-                        }
-                        if i + 3 < data.len() && &data[i..i + 4] == b"<!--" {
-                            self.mode = ScanMode::Comment;
-                            // Revisit the opening dashes: the extractor accepts
-                            // their overlap with `>` in `<!-->` and `<!--->`.
-                            i += 2;
+                    None => {
+                        if data[i] != b'<' {
+                            i += 1;
                             continue;
                         }
-                        if i + 8 < data.len() && &data[i..i + 9] == b"<![CDATA[" {
-                            self.mode = ScanMode::CData;
-                            i += 9;
-                            continue;
-                        }
-                        if i + 1 < data.len() {
-                            let next = data[i + 1];
-                            if next == b'!' {
-                                self.mode = ScanMode::Doctype { quote: None };
-                                i += 2;
-                                continue;
-                            }
-                            if crate::extract::starts_markup_after_lt(
-                                Some(next),
-                                data.get(i + 2).copied(),
-                            ) {
+                        match classify_lt(&data[i..], false) {
+                            None => break,
+                            Some(LtKind::Text) => i += 1,
+                            Some(LtKind::Tag) => {
                                 self.mode = ScanMode::Tag {
-                                    quote: None,
+                                    scan: TagScanState::START,
                                     open: i,
                                     text_close: None,
                                 };
-                                i += 1;
-                                continue;
+                                i += tag_name_offset(&data[i..]);
+                            }
+                            Some(LtKind::Comment) => {
+                                self.mode = ScanMode::Comment {
+                                    content_start: i + 4,
+                                };
+                                // Revisit the opening dashes: the extractor
+                                // accepts their overlap with `>` in `<!-->`
+                                // and `<!--->`.
+                                i += 2;
+                            }
+                            Some(LtKind::CData) => {
+                                self.mode = ScanMode::CData;
+                                i += 9;
+                            }
+                            Some(LtKind::Doctype) => {
+                                self.mode = ScanMode::Declaration;
+                                i += 2;
+                            }
+                            Some(LtKind::BogusComment { data_offset }) => {
+                                self.mode = ScanMode::Declaration;
+                                i += data_offset;
+                            }
+                            Some(LtKind::EmptyEndTag) => {
+                                // `</>` emits nothing and ends the text before it.
+                                i += 3;
+                                self.last_safe = i;
                             }
                         }
                     }
-                    i += 1;
-                }
+                },
                 ScanMode::Tag {
-                    mut quote,
+                    scan,
                     open,
                     text_close,
                 } => {
-                    if let Some(q) = quote {
-                        if data[i] == q {
-                            quote = None;
-                        }
+                    let byte = data[i];
+                    i += 1;
+                    if byte != b'>' || scan.gt_is_literal() {
                         self.mode = ScanMode::Tag {
-                            quote,
+                            scan: scan.step(byte),
                             open,
                             text_close,
                         };
-                        i += 1;
                         continue;
                     }
-                    match data[i] {
-                        b'"' | b'\'' => {
-                            self.mode = ScanMode::Tag {
-                                quote: Some(data[i]),
-                                open,
-                                text_close,
-                            };
-                            i += 1;
-                        }
-                        b'>' => {
-                            self.mode = ScanMode::Data;
-                            i += 1;
-                            self.last_safe = i;
-                            if let Some(tag) = text_close {
-                                self.text_context = None;
-                                self.text_close = Some((open, tag));
-                                break;
-                            }
-                            if let Some(context) = text_open_context(&data[open + 1..i - 1]) {
-                                self.text_context = Some(context);
-                                // Process the opening tag before buffering its
-                                // potentially very large text body.
-                                break;
-                            }
-                            if stop_at_next_boundary {
-                                break;
-                            }
-                        }
-                        _ => i += 1,
+
+                    self.mode = ScanMode::Data;
+                    self.last_safe = i;
+                    if let Some(tag) = text_close {
+                        self.text_context = None;
+                        self.text_close = Some((open, tag));
+                        break;
+                    }
+                    // After a syntax overflow the retained tag body is a
+                    // truncated tail, so it cannot name a text element.
+                    if stop_at_next_boundary {
+                        break;
+                    }
+                    if let Some(context) = text_open_context(&data[open + 1..i - 1]) {
+                        self.text_context = Some(context);
+                        // Process the opening tag before buffering its
+                        // potentially very large text body.
+                        break;
                     }
                 }
-                ScanMode::Doctype { mut quote } => {
-                    if let Some(q) = quote {
-                        if data[i] == q {
-                            quote = None;
-                        }
-                        self.mode = ScanMode::Doctype { quote };
-                        i += 1;
-                        continue;
-                    }
-                    match data[i] {
-                        b'"' | b'\'' => {
-                            self.mode = ScanMode::Doctype {
-                                quote: Some(data[i]),
-                            };
-                            i += 1;
-                        }
-                        b'>' => {
-                            self.last_safe = i + 1;
-                            self.mode = ScanMode::Data;
-                            i += 1;
-                            if stop_at_next_boundary {
-                                break;
-                            }
-                        }
-                        _ => i += 1,
-                    }
-                }
-                ScanMode::Comment => {
-                    if i + 2 < data.len()
-                        && data[i] == b'-'
-                        && data[i + 1] == b'-'
-                        && data[i + 2] == b'>'
-                    {
-                        self.last_safe = i + 3;
+                ScanMode::Declaration => match memchr::memchr(b'>', &data[i..]) {
+                    Some(offset) => {
+                        i += offset + 1;
+                        self.last_safe = i;
                         self.mode = ScanMode::Data;
-                        i += 3;
                         if stop_at_next_boundary {
                             break;
                         }
-                    } else if data[i] == b'-' && data.len() - i < 3 {
-                        // Keep a possible split `-->` terminator for the next
-                        // feed instead of scanning past its leading dashes.
+                    }
+                    None => i = data.len(),
+                },
+                ScanMode::Comment { content_start } => {
+                    if data[i] != b'-' {
+                        i += 1;
+                        continue;
+                    }
+                    let rest = &data[i..];
+                    let bang_allowed = i >= content_start;
+                    let terminator_len = if rest.starts_with(b"-->") {
+                        3
+                    } else if bang_allowed && rest.starts_with(b"--!>") {
+                        4
+                    } else if b"-->".starts_with(rest)
+                        || (bang_allowed && b"--!>".starts_with(rest))
+                    {
+                        // Keep a possible split terminator for the next feed
+                        // instead of scanning past its leading dashes.
                         break;
                     } else {
                         i += 1;
+                        continue;
+                    };
+                    i += terminator_len;
+                    self.last_safe = i;
+                    self.mode = ScanMode::Data;
+                    if stop_at_next_boundary {
+                        break;
                     }
                 }
                 ScanMode::CData => {
@@ -871,7 +914,6 @@ impl SplitScanner {
         self.scanned = i;
         SplitScan {
             split: self.last_safe,
-            in_raw_text_context: self.in_text_context(),
             text_close: self.text_close,
         }
     }
@@ -880,17 +922,12 @@ impl SplitScanner {
         self.scanned = self.scanned.saturating_sub(len);
         self.last_safe = self.last_safe.saturating_sub(len);
         self.text_close = None;
-        if let ScanMode::Tag {
-            quote,
-            open,
-            text_close,
-        } = self.mode
-        {
-            self.mode = ScanMode::Tag {
-                quote,
-                open: open.saturating_sub(len),
-                text_close,
-            };
+        match &mut self.mode {
+            ScanMode::Tag { open, .. } => *open = open.saturating_sub(len),
+            ScanMode::Comment { content_start } => {
+                *content_start = content_start.saturating_sub(len);
+            }
+            ScanMode::Data | ScanMode::Declaration | ScanMode::CData => {}
         }
     }
 
@@ -910,7 +947,7 @@ impl SplitScanner {
             ScanMode::Tag {
                 text_close: Some(tag),
                 ..
-            } => Some(TextContext::Element(tag)),
+            } => Some(TextContext::element(tag)),
             _ => None,
         })
     }
@@ -946,12 +983,35 @@ fn discard_prefix(buffer: &mut Vec<u8>, len: usize) {
     buffer.truncate(remaining);
 }
 
+/// Largest prefix length `<= desired` that does not split a UTF-8 sequence.
+///
+/// When `data[desired]` continues a sequence whose lead byte is at most three
+/// bytes earlier and whose length reaches past `desired`, the boundary moves
+/// back to that lead byte. Any other continuation byte is stray (invalid
+/// UTF-8, decoded lossily), so splitting at it keeps every valid character
+/// intact and cannot stall the bounded flushes.
 fn utf8_prefix_boundary(data: &[u8], desired: usize) -> usize {
-    let mut boundary = desired.min(data.len());
-    while boundary > 0 && boundary < data.len() && data[boundary] & 0b1100_0000 == 0b1000_0000 {
-        boundary -= 1;
+    let desired = desired.min(data.len());
+    let is_continuation = |byte: u8| byte & 0b1100_0000 == 0b1000_0000;
+    if desired == data.len() || !is_continuation(data[desired]) {
+        return desired;
     }
-    boundary
+    let lowest = desired.saturating_sub(3);
+    let mut lead = desired;
+    while lead > lowest && is_continuation(data[lead]) {
+        lead -= 1;
+    }
+    let sequence_len = match data[lead] {
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        0xF0..=0xF7 => 4,
+        _ => return desired,
+    };
+    if lead + sequence_len > desired {
+        lead
+    } else {
+        desired
+    }
 }
 
 /// Choose a bounded text flush without bisecting a character reference.
@@ -1091,85 +1151,62 @@ fn decode_stream_entities(input: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Borrowed(input)
 }
 
-fn is_incomplete_markup_prefix(remaining: &[u8]) -> bool {
-    if remaining == b"<" || remaining == b"</" {
+/// Name bytes of a known text-element tag.
+#[inline]
+fn tag_name(tag: Tag) -> &'static [u8] {
+    tag.as_str().unwrap_or("").as_bytes()
+}
+
+/// Whether `rest` is too short to decide an event inside a text element: a
+/// proper prefix (ASCII case-insensitive) of the element's end tag
+/// `</name` plus terminator, or inside script data of `<!--` (unescaped) or
+/// `<script` plus terminator (escaped).
+fn is_incomplete_text_close(data: &[u8], pos: usize, tag: Tag, escape: ScriptEscape) -> bool {
+    let rest = &data[pos..];
+    if awaits_tag_terminator(rest, b"</", tag_name(tag)) {
         return true;
     }
-    [b"<!--".as_slice(), b"<![CDATA[".as_slice()]
-        .iter()
-        .any(|target| remaining.len() < target.len() && target.starts_with(remaining))
-}
-
-fn is_incomplete_raw_text_close(data: &[u8], pos: usize, tag: Tag) -> bool {
-    let remaining = &data[pos..];
-    let name = tag.as_str().unwrap_or("").as_bytes();
-    if remaining.first() != Some(&b'<') {
+    if tag != Tag::Script {
         return false;
     }
-
-    let target_len = 2 + name.len();
-    for (idx, &actual) in remaining.iter().take(target_len).enumerate() {
-        let expected = match idx {
-            0 => b'<',
-            1 => b'/',
-            _ => name[idx - 2],
-        };
-        if !actual.eq_ignore_ascii_case(&expected) {
-            return false;
-        }
+    match escape {
+        ScriptEscape::None => rest.len() < 4 && b"<!--".starts_with(rest),
+        ScriptEscape::Escaped => awaits_tag_terminator(rest, b"<", b"script"),
+        ScriptEscape::DoubleEscaped => false,
     }
-
-    remaining.len() <= target_len
 }
 
+/// Whether `rest` matches the start of `prefix` + `name` (ASCII
+/// case-insensitive) but ends before the byte after `name`.
+fn awaits_tag_terminator(rest: &[u8], prefix: &[u8], name: &[u8]) -> bool {
+    rest.len() <= prefix.len() + name.len()
+        && rest.iter().enumerate().all(|(index, byte)| {
+            let expected = prefix
+                .get(index)
+                .copied()
+                .unwrap_or_else(|| name[index - prefix.len()]);
+            byte.eq_ignore_ascii_case(&expected)
+        })
+}
+
+/// The text context a complete start tag body (bytes between `<` and `>`)
+/// enters, mirroring the extractor's text-element modes.
 fn text_open_context(tag_body: &[u8]) -> Option<TextContext> {
-    if tag_body.is_empty() || tag_body[0] == b'/' {
+    if tag_body.first().is_none_or(|&byte| byte == b'/') {
         return None;
     }
-
-    let mut name_end = 0usize;
-    while name_end < tag_body.len()
-        && !is_html_whitespace(tag_body[name_end])
-        && tag_body[name_end] != b'/'
-    {
-        name_end += 1;
+    let name_end = tag_body
+        .iter()
+        .position(|&byte| is_html_whitespace(byte) || byte == b'/')
+        .unwrap_or(tag_body.len());
+    let tag = Tag::from_bytes(&tag_body[..name_end]);
+    if tag == Tag::Plaintext {
+        Some(TextContext::Plaintext)
+    } else if !tag.is_void() && (tag.is_raw_text() || tag.is_rcdata()) {
+        Some(TextContext::element(tag))
+    } else {
+        None
     }
-    if name_end == 0 {
-        return None;
-    }
-
-    let name = &tag_body[..name_end];
-    if name.eq_ignore_ascii_case(b"plaintext") {
-        return Some(TextContext::Plaintext);
-    }
-    let tag = Tag::from_bytes(name);
-    (tag.is_raw_text() || tag.is_rcdata()).then_some(TextContext::Element(tag))
-}
-
-fn is_raw_text_close(data: &[u8], pos: usize, tag: Tag) -> bool {
-    let remaining = &data[pos..];
-    if remaining.len() < 3 || remaining[1] != b'/' {
-        return false;
-    }
-
-    let tag_name = tag.as_str().unwrap_or("");
-    let name_len = tag_name.len();
-    if remaining.len() < 2 + name_len + 1 {
-        return false;
-    }
-
-    let candidate = &remaining[2..2 + name_len];
-    if !candidate.eq_ignore_ascii_case(tag_name.as_bytes()) {
-        return false;
-    }
-
-    let after = remaining[2 + name_len];
-    after == b'>' || after == b'/' || is_html_whitespace(after)
-}
-
-#[inline(always)]
-fn is_html_whitespace(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
 }
 
 /// Convert a borrowed token to an owned ('static) token.
@@ -1337,10 +1374,7 @@ mod tests {
 
     #[test]
     fn find_safe_split_buffers_open_raw_text_context() {
-        let scan = scan_safe_split(b"<div><script>if(a<b)");
-
-        assert_eq!(scan.split, 13);
-        assert!(scan.in_raw_text_context);
+        assert_eq!(scan_safe_split(b"<div><script>if(a<b)").split, 13);
     }
 
     #[test]
@@ -1381,21 +1415,12 @@ mod tests {
     }
 
     #[test]
-    fn unfinished_raw_close_keeps_text_context_at_eof() {
-        for (tag, decodes_entities) in [
-            ("ScRiPt", false),
-            ("StYlE", false),
-            ("IfRaMe", false),
-            ("TiTlE", true),
-            ("TeXtArEa", true),
-        ] {
+    fn unfinished_raw_close_tag_is_dropped_at_eof() {
+        // `</tag ` is a real end tag once its name is terminated; EOF inside
+        // that tag drops it (WHATWG "eof-in-tag"), leaving only the text.
+        for tag in ["ScRiPt", "StYlE", "IfRaMe", "TiTlE", "TeXtArEa"] {
             let html = format!("<{tag}>x</{tag} &amp;");
-            let reference = if decodes_entities && cfg!(feature = "entity-decode") {
-                "&"
-            } else {
-                "&amp;"
-            };
-            let expected = format!("x</{tag} {reference}");
+            let expected = "x";
             let check_tokens = |tokens: &[Token<'_>]| {
                 let text: String = tokens
                     .iter()
@@ -1440,11 +1465,11 @@ mod tests {
 
     #[test]
     fn completed_raw_close_restores_entity_decoding_for_later_markup() {
-        let html = "<script></script>outside</script &amp;";
+        let html = "<script></script>outside &amp;</script>&amp;";
         let expected = if cfg!(feature = "entity-decode") {
-            "outside</script &"
+            "outside &&"
         } else {
-            "outside</script &amp;"
+            "outside &amp;&amp;"
         };
         let one_shot = crate::tokenize(html);
         let mut one_shot_callback = Vec::new();
@@ -1620,10 +1645,10 @@ mod tests {
     #[test]
     fn oversized_raw_close_stays_bounded_and_preserves_quote_state() {
         let mut owned = StreamTokenizer::new();
-        let mut owned_tokens = owned.feed(b"<ScRiPt>x</ScRiPt \"");
+        let mut owned_tokens = owned.feed(b"<ScRiPt>x</ScRiPt a=\"");
         let mut callback = StreamTokenizer::new();
         let mut callback_tokens = Vec::new();
-        callback.feed_str_with("<ScRiPt>x</ScRiPt \"", |token| {
+        callback.feed_str_with("<ScRiPt>x</ScRiPt a=\"", |token| {
             callback_tokens.push(to_owned_token(token.clone()));
         });
         let chunk = format!("{}<img src=x>", " ".repeat(64 * 1024));
@@ -1654,18 +1679,17 @@ mod tests {
     }
 
     #[test]
-    fn oversized_unfinished_raw_close_keeps_its_tail_in_text_context() {
-        for (tag, decodes_entities) in [("script", false), ("title", true)] {
+    fn oversized_unfinished_raw_close_is_dropped_at_eof() {
+        for tag in ["script", "title"] {
             let first = format!(
-                "<{tag}>x</{tag} \"{}",
+                "<{tag}>x</{tag} a=\"{}",
                 "a".repeat(MAX_RAW_TEXT_RESIDUAL + 1)
             );
             let tail = "&amp;<b>EOF</b>";
-            let expected_tail = if decodes_entities && cfg!(feature = "entity-decode") {
-                "&<b>EOF</b>"
-            } else {
-                tail
-            };
+            let expected: Vec<_> = crate::tokenize(&format!("{first}{tail}"))
+                .into_iter()
+                .map(to_owned_token)
+                .collect();
             let mut owned = StreamTokenizer::new();
             let mut owned_tokens = owned.feed(first.as_bytes());
             owned_tokens.extend(owned.feed(tail.as_bytes()));
@@ -1683,6 +1707,8 @@ mod tests {
             callback.finish_with(|token| callback_tokens.push(to_owned_token(token.clone())));
 
             for tokens in [owned_tokens, callback_tokens] {
+                // EOF inside the quoted end-tag attribute drops the end tag.
+                assert_eq!(tokens, expected, "tag={tag}");
                 let text: String = tokens
                     .iter()
                     .filter_map(|token| match token {
@@ -1690,15 +1716,7 @@ mod tests {
                         _ => None,
                     })
                     .collect();
-                assert!(text.ends_with(expected_tail), "tag={tag}");
-                let open_tags: Vec<_> = tokens
-                    .iter()
-                    .filter_map(|token| match token {
-                        Token::OpenTag { name, .. } => Some(name.as_ref()),
-                        _ => None,
-                    })
-                    .collect();
-                assert_eq!(open_tags, [tag]);
+                assert_eq!(text, "x", "tag={tag}");
                 assert!(
                     !tokens
                         .iter()
@@ -1898,5 +1916,143 @@ mod tests {
         });
 
         assert_eq!(open_tags, [Tag::P]);
+    }
+
+    fn text_len(tokens: &[Token<'_>]) -> usize {
+        tokens
+            .iter()
+            .map(|token| match token {
+                Token::Text { content } => content.len(),
+                _ => 0,
+            })
+            .sum()
+    }
+
+    #[test]
+    fn many_text_elements_in_one_feed_stay_linear() {
+        let html = "<script></script>".repeat((1 << 20) / 17 + 1);
+        let expected = crate::tokenize(&html).len();
+
+        let mut tok = StreamTokenizer::new();
+        let start = std::time::Instant::now();
+        let mut tokens = tok.feed(html.as_bytes());
+        let elapsed = start.elapsed();
+        tokens.extend(tok.finish());
+
+        assert_eq!(tokens.len(), expected);
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "1 MiB feed took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn oversized_tag_tail_cannot_enter_a_text_element() {
+        // After the quoted tag overflows, only its last `TEXT_TAIL` bytes stay
+        // buffered; they read like a `<plaintext` tag body but are a value.
+        let tail = " plaintext";
+        let first = format!(
+            "<div title=\"{}{tail}{}",
+            "a".repeat(MAX_RAW_TEXT_RESIDUAL + 1),
+            " ".repeat(TEXT_TAIL - tail.len())
+        );
+        let rest = "\"><p>visible</p><b>also</b>";
+        let open_tags = |tokens: &[Token<'_>]| -> Vec<Tag> {
+            tokens
+                .iter()
+                .filter_map(|token| match token {
+                    Token::OpenTag { tag, .. } => Some(*tag),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut owned = StreamTokenizer::new();
+        let mut owned_tokens = owned.feed(first.as_bytes());
+        assert!(owned.buffered_len() <= TEXT_TAIL);
+        owned_tokens.extend(owned.feed(rest.as_bytes()));
+        owned_tokens.extend(owned.finish());
+        assert_eq!(open_tags(&owned_tokens), [Tag::P, Tag::B]);
+
+        let mut callback = StreamTokenizer::new();
+        let mut callback_tokens = Vec::new();
+        for chunk in [first.as_str(), rest] {
+            callback.feed_str_with(chunk, |token| {
+                callback_tokens.push(to_owned_token(token.clone()));
+            });
+        }
+        callback.finish_with(|token| callback_tokens.push(to_owned_token(token.clone())));
+        assert_eq!(open_tags(&callback_tokens), [Tag::P, Tag::B]);
+    }
+
+    #[test]
+    fn raw_close_candidate_text_is_independent_of_feed_boundaries() {
+        let body = format!("<script>{}", "a".repeat(MAX_RAW_TEXT_RESIDUAL + 1));
+        let candidate = format!("</script \"{}", "q".repeat(90));
+
+        let mut one = StreamTokenizer::new();
+        let mut one_tokens = one.feed(format!("{body}{candidate}").as_bytes());
+        one_tokens.extend(one.finish());
+
+        let mut two = StreamTokenizer::new();
+        let mut two_tokens = two.feed(body.as_bytes());
+        two_tokens.extend(two.feed(candidate.as_bytes()));
+        two_tokens.extend(two.finish());
+
+        assert_eq!(text_len(&one_tokens), text_len(&two_tokens));
+        assert_eq!(
+            text_len(&one_tokens),
+            text_len(&crate::tokenize(&format!("{body}{candidate}")))
+        );
+    }
+
+    #[test]
+    fn invalid_utf8_continuation_run_stays_bounded() {
+        let input = vec![0x80; 1 << 20];
+        let mut tok = StreamTokenizer::new();
+        let mut tokens = Vec::new();
+        for chunk in input.chunks(1024) {
+            tokens.extend(tok.feed(chunk));
+            assert!(
+                tok.buffered_len() <= MAX_RESIDUAL + 1024,
+                "buffered {} bytes",
+                tok.buffered_len()
+            );
+        }
+        tokens.extend(tok.finish());
+        let text: String = tokens
+            .iter()
+            .filter_map(|token| match token {
+                Token::Text { content } => Some(content.as_ref()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "\u{FFFD}".repeat(1 << 20));
+    }
+
+    #[test]
+    fn bounded_text_flush_keeps_a_character_before_a_stray_continuation_byte() {
+        // The stray `0x80` sits exactly at the bounded flush boundary, right
+        // after a complete four-byte character.
+        let mut input = vec![b'a'; MAX_RESIDUAL + 1000];
+        input.extend_from_slice("😀".as_bytes());
+        input.push(0x80);
+        input.extend(std::iter::repeat_n(b'b', TEXT_TAIL - 1));
+        let text = |tokens: &[Token<'_>]| -> String {
+            tokens
+                .iter()
+                .filter_map(|token| match token {
+                    Token::Text { content } => Some(content.as_ref()),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let mut tok = StreamTokenizer::new();
+        let mut streamed = tok.feed(&input);
+        streamed.extend(tok.finish());
+        let lossy = String::from_utf8_lossy(&input);
+
+        assert_eq!(text(&streamed), text(&crate::tokenize(&lossy)));
     }
 }

@@ -4,6 +4,8 @@
 //! algorithm: BOM → meta prescan → UTF-8 fallback.
 
 use encoding_rs::Encoding;
+use fhp_core::attr::{TagScanState, iter_raw_attrs, tag_name_offset};
+use fhp_core::is_html_whitespace;
 
 /// Maximum number of bytes to prescan for `<meta>` tags.
 const PRESCAN_LIMIT: usize = 1024;
@@ -70,143 +72,123 @@ fn prescan_meta(input: &[u8]) -> Option<&'static Encoding> {
     let limit = input.len().min(PRESCAN_LIMIT);
     let haystack = &input[..limit];
 
-    // Walk complete tags so a `<meta`-like byte sequence inside a comment or
-    // another tag's quoted attribute value cannot be mistaken for markup.
+    // Walk complete markup so a `<meta`-like byte sequence inside a comment or
+    // another tag's quoted attribute value cannot be mistaken for a tag.
     let mut pos = 0;
     while pos < haystack.len() {
         let Some(lt) = memchr_byte(b'<', &haystack[pos..]) else {
             break;
         };
         let lt = pos + lt;
+        let markup = &haystack[lt..];
 
-        if haystack[lt..].starts_with(b"<!--") {
-            let comment_body = &haystack[lt + 4..];
-            let Some(end) = find_subsequence(comment_body, b"-->") else {
+        if markup.starts_with(b"<!--") {
+            // The opener's dashes may also close the comment, so `<!-->` and
+            // `<!--->` are complete comments.
+            let Some(end) = find_subsequence(&markup[2..], b"-->") else {
                 break;
             };
-            pos = lt + 4 + end + 3;
+            pos = lt + 2 + end + 3;
             continue;
         }
 
-        let Some(after_lt) = haystack.get(lt + 1) else {
+        let Some(&after_lt) = markup.get(1) else {
             break;
         };
-        if !after_lt.is_ascii_alphabetic() && !matches!(*after_lt, b'!' | b'/' | b'?') {
+        let is_tag = after_lt.is_ascii_alphabetic()
+            || (after_lt == b'/' && markup.get(2).is_some_and(u8::is_ascii_alphabetic));
+        let gt = if is_tag {
+            find_tag_end(markup)
+        } else if matches!(after_lt, b'!' | b'/' | b'?') {
+            // Declarations, bogus comments, and `</` + non-letter end at the
+            // first `>`, quotes included.
+            memchr_byte(b'>', markup)
+        } else {
             pos = lt + 1;
             continue;
-        }
-
-        let Some(gt_offset) = find_tag_end(&haystack[lt + 1..]) else {
+        };
+        let Some(gt) = gt else {
             break;
         };
-        let gt = lt + 1 + gt_offset;
-        let tag = &haystack[lt..=gt];
-        pos = gt + 1;
+        let tag = &markup[..=gt];
+        pos = lt + gt + 1;
 
         // Require a real tag-name boundary after "meta". This excludes
         // elements such as `<metadata>` and `<metaverse>`.
         if !starts_with_ci(tag, b"<meta")
             || !tag
                 .get(5)
-                .is_some_and(|byte| is_html_space(*byte) || matches!(*byte, b'/' | b'>'))
+                .is_some_and(|byte| is_html_whitespace(*byte) || matches!(*byte, b'/' | b'>'))
         {
             continue;
         }
 
-        let attributes = parse_meta_attributes(tag);
-
-        // Try <meta charset="...">
-        if let Some(enc) = extract_charset_attr(&attributes) {
-            return Some(remap_meta_encoding(enc));
-        }
-
-        // Try <meta http-equiv="Content-Type" content="...charset=...">
-        if let Some(enc) = extract_http_equiv_charset(&attributes) {
+        if let Some(enc) = meta_encoding(tag) {
             return Some(remap_meta_encoding(enc));
         }
     }
     None
 }
 
-#[derive(Default)]
-struct MetaAttributes<'a> {
-    charset: Option<&'a [u8]>,
-    http_equiv: Option<&'a [u8]>,
-    content: Option<&'a [u8]>,
+/// Encoding declared by one complete `<meta ...>` tag.
+///
+/// Tries `<meta charset="...">` first, then
+/// `<meta http-equiv="Content-Type" content="...charset=...">`.
+fn meta_encoding(tag: &[u8]) -> Option<&'static Encoding> {
+    // The bytes strictly between `<meta` and the closing `>`. Legacy bytes in
+    // an unrelated attribute value are replaced; charset labels are ASCII.
+    let region = String::from_utf8_lossy(&tag[b"<meta".len()..tag.len() - 1]);
+    let attributes = MetaAttributes::parse(&region);
+    extract_charset_attr(&attributes).or_else(|| extract_http_equiv_charset(&attributes))
 }
 
-/// Parse the three attributes relevant to encoding detection using HTML
-/// attribute-name and value boundaries.
-fn parse_meta_attributes(tag: &[u8]) -> MetaAttributes<'_> {
-    let mut attributes = MetaAttributes::default();
-    let mut seen_charset = false;
-    let mut seen_http_equiv = false;
-    let mut seen_content = false;
-    let mut pos = b"<meta".len();
+/// The first occurrence of each attribute relevant to encoding detection.
+/// The outer `Option` records presence; the inner one the (possibly absent)
+/// value, so a valueless first occurrence still shadows later duplicates.
+#[derive(Default)]
+struct MetaAttributes<'a> {
+    charset: Option<Option<&'a str>>,
+    http_equiv: Option<Option<&'a str>>,
+    content: Option<Option<&'a str>>,
+}
 
-    while pos < tag.len() {
-        while pos < tag.len() && is_html_space(tag[pos]) {
-            pos += 1;
+impl<'a> MetaAttributes<'a> {
+    /// Parse a `<meta>` attribute region with the shared HTML attribute
+    /// grammar; the first occurrence of each name wins.
+    fn parse(region: &'a str) -> Self {
+        let mut attributes = Self::default();
+        for attr in iter_raw_attrs(region) {
+            let slot = if attr.name.eq_ignore_ascii_case("charset") {
+                &mut attributes.charset
+            } else if attr.name.eq_ignore_ascii_case("http-equiv") {
+                &mut attributes.http_equiv
+            } else if attr.name.eq_ignore_ascii_case("content") {
+                &mut attributes.content
+            } else {
+                continue;
+            };
+            slot.get_or_insert(attr.value);
         }
-        if pos >= tag.len() || tag[pos] == b'>' {
-            break;
-        }
-        if tag[pos] == b'/' {
-            pos += 1;
-            continue;
-        }
-
-        let name_start = pos;
-        while pos < tag.len() && !is_html_space(tag[pos]) && !matches!(tag[pos], b'=' | b'/' | b'>')
-        {
-            pos += 1;
-        }
-        let name = &tag[name_start..pos];
-
-        while pos < tag.len() && is_html_space(tag[pos]) {
-            pos += 1;
-        }
-        let value = if pos < tag.len() && tag[pos] == b'=' {
-            pos += 1;
-            while pos < tag.len() && is_html_space(tag[pos]) {
-                pos += 1;
-            }
-            read_attr_value(tag, &mut pos)
-        } else {
-            None
-        };
-
-        if name.eq_ignore_ascii_case(b"charset") {
-            if !seen_charset {
-                seen_charset = true;
-                attributes.charset = value;
-            }
-        } else if name.eq_ignore_ascii_case(b"http-equiv") {
-            if !seen_http_equiv {
-                seen_http_equiv = true;
-                attributes.http_equiv = value;
-            }
-        } else if name.eq_ignore_ascii_case(b"content") && !seen_content {
-            seen_content = true;
-            attributes.content = value;
-        }
+        attributes
     }
-
-    attributes
 }
 
 /// Extract encoding from `charset="VALUE"` or `charset=VALUE` in a `<meta>` tag.
 fn extract_charset_attr(attributes: &MetaAttributes<'_>) -> Option<&'static Encoding> {
-    Encoding::for_label(attributes.charset?)
+    Encoding::for_label(attributes.charset.flatten()?.as_bytes())
 }
 
 /// Extract encoding from `http-equiv="Content-Type" content="...charset=..."`.
 fn extract_http_equiv_charset(attributes: &MetaAttributes<'_>) -> Option<&'static Encoding> {
-    if !attributes.http_equiv?.eq_ignore_ascii_case(b"content-type") {
+    if !attributes
+        .http_equiv
+        .flatten()?
+        .eq_ignore_ascii_case("content-type")
+    {
         return None;
     }
 
-    extract_charset_from_content(attributes.content?)
+    extract_charset_from_content(attributes.content.flatten()?.as_bytes())
 }
 
 /// Extract a charset parameter from an HTTP Content-Type attribute value.
@@ -215,19 +197,19 @@ fn extract_charset_from_content(content: &[u8]) -> Option<&'static Encoding> {
         if !candidate.eq_ignore_ascii_case(b"charset") {
             continue;
         }
-        if index > 0 && !is_html_space(content[index - 1]) && content[index - 1] != b';' {
+        if index > 0 && !is_html_whitespace(content[index - 1]) && content[index - 1] != b';' {
             continue;
         }
 
         let mut pos = index + b"charset".len();
-        while pos < content.len() && is_html_space(content[pos]) {
+        while pos < content.len() && is_html_whitespace(content[pos]) {
             pos += 1;
         }
         if content.get(pos) != Some(&b'=') {
             continue;
         }
         pos += 1;
-        while pos < content.len() && is_html_space(content[pos]) {
+        while pos < content.len() && is_html_whitespace(content[pos]) {
             pos += 1;
         }
 
@@ -239,7 +221,7 @@ fn extract_charset_from_content(content: &[u8]) -> Option<&'static Encoding> {
         } else {
             let end = content[pos..]
                 .iter()
-                .position(|byte| is_html_space(*byte) || *byte == b';')
+                .position(|byte| is_html_whitespace(*byte) || *byte == b';')
                 .unwrap_or(content.len() - pos);
             &content[pos..pos + end]
         };
@@ -258,9 +240,12 @@ fn extract_charset_from_content(content: &[u8]) -> Option<&'static Encoding> {
 /// UTF-8: a document whose `<meta>` tag was found by an ASCII byte scan cannot
 /// actually be UTF-16 (UTF-16 interleaves NUL bytes that would have prevented
 /// the literal ASCII match), so decoding it as UTF-16 would produce mojibake.
+/// A `<meta>`-declared `x-user-defined` label is changed to windows-1252.
 fn remap_meta_encoding(enc: &'static Encoding) -> &'static Encoding {
     if enc == encoding_rs::UTF_16LE || enc == encoding_rs::UTF_16BE {
         encoding_rs::UTF_8
+    } else if enc == encoding_rs::X_USER_DEFINED {
+        encoding_rs::WINDOWS_1252
     } else {
         enc
     }
@@ -283,17 +268,16 @@ fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-/// Find the closing `>` for a tag while respecting quoted attribute values.
-fn find_tag_end(input: &[u8]) -> Option<usize> {
-    let mut quote = None;
-    for (index, byte) in input.iter().copied().enumerate() {
-        match quote {
-            Some(expected) if byte == expected => quote = None,
-            Some(_) => {}
-            None if matches!(byte, b'\'' | b'"') => quote = Some(byte),
-            None if byte == b'>' => return Some(index),
-            None => {}
+/// Index of the `>` that closes the start or end tag beginning at
+/// `markup[0] == b'<'`, following the shared tag grammar: a `>` inside a
+/// quoted attribute value is literal, any other `>` ends the tag.
+fn find_tag_end(markup: &[u8]) -> Option<usize> {
+    let mut state = TagScanState::START;
+    for (index, &byte) in markup.iter().enumerate().skip(tag_name_offset(markup)) {
+        if byte == b'>' && !state.gt_is_literal() {
+            return Some(index);
         }
+        state = state.step(byte);
     }
     None
 }
@@ -307,35 +291,6 @@ fn starts_with_ci(haystack: &[u8], needle: &[u8]) -> bool {
         .iter()
         .zip(needle)
         .all(|(&a, &b)| a.eq_ignore_ascii_case(&b))
-}
-
-/// HTML's five ASCII whitespace bytes.
-fn is_html_space(byte: u8) -> bool {
-    matches!(byte, b'\t' | b'\n' | b'\x0C' | b'\r' | b' ')
-}
-
-/// Read a borrowed attribute value and advance `pos` past it.
-fn read_attr_value<'a>(tag: &'a [u8], pos: &mut usize) -> Option<&'a [u8]> {
-    if *pos >= tag.len() {
-        return None;
-    }
-    let quote = tag[*pos];
-    if quote == b'"' || quote == b'\'' {
-        *pos += 1;
-        let start = *pos;
-        let end = memchr_byte(quote, &tag[start..])?;
-        *pos = start + end + 1;
-        Some(&tag[start..start + end])
-    } else {
-        let start = *pos;
-        while *pos < tag.len() && !is_html_space(tag[*pos]) && tag[*pos] != b'>' {
-            *pos += 1;
-        }
-        if *pos == start {
-            return None;
-        }
-        Some(&tag[start..*pos])
-    }
 }
 
 #[cfg(test)]

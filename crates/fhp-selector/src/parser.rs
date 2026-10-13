@@ -17,12 +17,12 @@
 
 use fhp_core::error::SelectorError;
 use fhp_core::hash::{class_bloom_bit, selector_hash};
+use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
 use crate::ast::{
     AttrOp, AttrSelector, Combinator, CompoundSelector, Selector, SelectorList, SimpleSelector,
 };
-use crate::space::is_html_space;
 
 /// Maximum accepted selector source length, in UTF-8 bytes.
 pub const MAX_SELECTOR_INPUT_LEN: usize = 16 * 1024;
@@ -163,7 +163,7 @@ impl<'a> Parser<'a> {
     }
 
     fn skip_whitespace(&mut self) {
-        while self.pos < self.input.len() && is_html_space(self.input[self.pos]) {
+        while self.pos < self.input.len() && is_html_whitespace(self.input[self.pos]) {
             self.pos += 1;
         }
     }
@@ -241,7 +241,7 @@ impl<'a> Parser<'a> {
                 let start = self.pos;
                 while self.pos < self.input.len() {
                     let b = self.input[self.pos];
-                    if is_html_space(b) || b == b']' {
+                    if is_html_whitespace(b) || b == b']' {
                         break;
                     }
                     self.pos += 1;

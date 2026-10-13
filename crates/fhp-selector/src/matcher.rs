@@ -9,7 +9,6 @@
 
 use std::collections::HashMap;
 
-use fhp_core::hash::selector_hash;
 use fhp_core::tag::Tag;
 use fhp_tree::arena::Arena;
 use fhp_tree::node::{NodeFlags, NodeId};
@@ -17,7 +16,9 @@ use fhp_tree::node::{NodeFlags, NodeId};
 use crate::ast::{
     AttrOp, AttrSelector, Combinator, CompoundSelector, Selector, SelectorList, SimpleSelector,
 };
-use crate::bloom::{AncestorBloom, build_ancestor_blooms, hash_str, hash_tag};
+use crate::bloom::{
+    AncestorBloom, build_ancestor_blooms, fill_ancestor_blooms, hash_str, hash_tag,
+};
 use crate::space::contains_html_space_token;
 
 // ---------------------------------------------------------------------------
@@ -25,8 +26,14 @@ use crate::space::contains_html_space_token;
 // ---------------------------------------------------------------------------
 
 /// Check if a node matches a compound selector (all parts must match).
+///
+/// Only elements match: the synthetic document root, text, comment, and
+/// doctype nodes never do, so `:not(div)` cannot match the root either.
 #[inline]
 fn match_compound(arena: &Arena, node: NodeId, compound: &CompoundSelector) -> bool {
+    if !is_element(arena.get(node)) {
+        return false;
+    }
     match compound.parts.as_slice() {
         [part] => match_simple(arena, node, part),
         parts => parts.iter().all(|part| match_simple(arena, node, part)),
@@ -86,7 +93,8 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             })
         }
 
-        SimpleSelector::Universal => is_element(n),
+        // `match_compound` only passes elements.
+        SimpleSelector::Universal => true,
 
         SimpleSelector::Attr(attr_sel) => match_attr(arena, node, attr_sel),
 
@@ -386,24 +394,54 @@ impl<'a> SelectorMatcher<'a> {
             },
 
             Combinator::GeneralSibling => {
-                let mut previous = arena.get(current).prev_sibling;
-                let mut found = false;
-                while !previous.is_null() {
-                    let previous_node = arena.get(previous);
-                    if is_element(previous_node)
-                        && match_compound(arena, previous, compound)
-                        && self.match_chain(arena, previous, next_index)
-                    {
-                        found = true;
-                        break;
-                    }
-                    previous = previous_node.prev_sibling;
-                }
-                found
+                self.match_general_sibling(arena, current, chain_index, compound)
             }
         };
 
         self.memo.insert(current, chain_index, matched);
+        matched
+    }
+
+    /// Evaluate `compound ~ current` at `chain_index` in amortized O(1) per
+    /// element sibling.
+    ///
+    /// With `prev` the preceding element sibling of `node`, the chain value
+    /// is `chain(node) = chain(prev) || (compound(prev) && match_chain(prev,
+    /// chain_index + 1))`, and the first element sibling's value is `false`.
+    /// Walk back to the nearest sibling with a memoized value (or to the first
+    /// element sibling), then forward to `current`, memoizing every sibling on
+    /// the way, so each sibling is evaluated once per `(parent, chain_index)`.
+    fn match_general_sibling(
+        &mut self,
+        arena: &Arena,
+        current: NodeId,
+        chain_index: usize,
+        compound: &CompoundSelector,
+    ) -> bool {
+        let next_index = chain_index + 1;
+
+        // Invariant after the backward walk: `matched == chain(node)`.
+        let mut node = current;
+        let mut matched = false;
+        while let Some(previous) = prev_element_sibling(arena, node) {
+            node = previous;
+            if let Some(known) = self.memo.get(previous, chain_index) {
+                matched = known;
+                break;
+            }
+        }
+
+        while node != current {
+            if !matched {
+                matched = match_compound(arena, node, compound)
+                    && self.match_chain(arena, node, next_index);
+            }
+            let Some(next) = next_element_sibling(arena, node) else {
+                break;
+            };
+            self.memo.insert(next, chain_index, matched);
+            node = next;
+        }
         matched
     }
 }
@@ -454,73 +492,189 @@ fn prev_element_sibling(arena: &Arena, node: NodeId) -> Option<NodeId> {
     None
 }
 
+/// Find the immediately following element sibling (skipping text/comments).
+fn next_element_sibling(arena: &Arena, node: NodeId) -> Option<NodeId> {
+    let mut next = arena.get(node).next_sibling;
+    while !next.is_null() {
+        let n = arena.get(next);
+        if is_element(n) {
+            return Some(next);
+        }
+        next = n.next_sibling;
+    }
+    None
+}
+
 // ---------------------------------------------------------------------------
 // Selection: collect matching nodes
 // ---------------------------------------------------------------------------
 
-/// Select all nodes matching a single selector (no bloom optimization).
+/// Select all nodes in `root`'s subtree matching a single selector.
 pub fn select_all(arena: &Arena, root: NodeId, selector: &Selector) -> Vec<NodeId> {
-    select_all_with_blooms(arena, root, selector, None)
-}
-
-/// Select all nodes matching a single selector, optionally reusing precomputed
-/// ancestor blooms.
-fn select_all_with_blooms(
-    arena: &Arena,
-    root: NodeId,
-    selector: &Selector,
-    shared_blooms: Option<&[AncestorBloom]>,
-) -> Vec<NodeId> {
-    if let Some(tag) = simple_tag_selector(selector) {
-        let mut results = Vec::new();
-        collect_tag(arena, root, tag, &mut results);
-        return results;
-    }
-
-    if let Some(id) = simple_id_selector(selector) {
-        let mut results = Vec::new();
-        collect_id(arena, root, id, &mut results);
-        return results;
-    }
-
-    let has_descendant = has_descendant_combinator(selector);
-    let mut matcher = SelectorMatcher::new(arena.len(), selector);
-
-    if has_descendant {
-        let local_blooms;
-        let blooms = if let Some(b) = shared_blooms {
-            b
-        } else {
-            local_blooms = build_ancestor_blooms(arena, root);
-            &local_blooms
-        };
-        let bloom_hashes = compute_descendant_hashes(selector);
-        let mut results = Vec::new();
-        collect_bloom(
-            arena,
-            root,
-            &mut matcher,
-            blooms,
-            &bloom_hashes,
-            &mut results,
-        );
-        results
-    } else {
-        let mut results = Vec::new();
-        collect_simple(arena, root, &mut matcher, &mut results);
-        results
-    }
-}
-
-/// Select all nodes matching a selector list.
-pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<NodeId> {
-    if list.selectors.len() == 1 {
-        return select_all(arena, root, &list.selectors[0]);
-    }
-    let mut matchers = build_list_matchers(arena.len(), &list.selectors);
     let mut results = Vec::new();
-    collect_list(arena, root, &mut matchers, &mut results);
+    SelectionCollector::new(arena.len(), std::slice::from_ref(selector)).collect(
+        arena,
+        root,
+        None,
+        &[],
+        &mut results,
+    );
     results
+}
+
+/// Select all nodes in `root`'s subtree matching a selector list.
+pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    SelectionCollector::new(arena.len(), &list.selectors).collect(
+        arena,
+        root,
+        None,
+        &[],
+        &mut results,
+    );
+    results
+}
+
+/// Select all nodes matching a selector list within several subtree roots.
+///
+/// The result is the union of the per-root results of [`select_all_list`]
+/// without duplicates: matches within one root are in document order, and
+/// roots contribute in the order given, so document-ordered roots yield a
+/// document-ordered result. A root inside the subtree of an earlier root adds
+/// nothing, and a root's traversal skips the subtrees of earlier roots.
+///
+/// Matcher memo tables and the ancestor bloom table are shared by all roots,
+/// so the cost is linear in the visited nodes instead of proportional to
+/// `roots.len() * arena.len()`.
+pub fn select_all_list_roots(arena: &Arena, roots: &[NodeId], list: &SelectorList) -> Vec<NodeId> {
+    let mut results = Vec::new();
+    if roots.is_empty() {
+        return results;
+    }
+
+    let mut collector = SelectionCollector::new(arena.len(), &list.selectors);
+    let uses_blooms = collector.uses_blooms();
+    let mut blooms = if uses_blooms {
+        vec![AncestorBloom::new(); arena.len()]
+    } else {
+        Vec::new()
+    };
+    let mut done = vec![false; arena.len()];
+
+    for &root in roots {
+        if root.is_null() || is_covered(arena, &done, root) {
+            continue;
+        }
+        let shared_blooms = if uses_blooms {
+            fill_ancestor_blooms(arena, root, &mut blooms);
+            Some(blooms.as_slice())
+        } else {
+            None
+        };
+        collector.collect(arena, root, shared_blooms, &done, &mut results);
+        done[root.index()] = true;
+    }
+    results
+}
+
+/// Whether `node` or one of its ancestors is an already collected root.
+fn is_covered(arena: &Arena, done: &[bool], node: NodeId) -> bool {
+    let mut current = node;
+    while !current.is_null() {
+        if done[current.index()] {
+            return true;
+        }
+        current = arena.get(current).parent;
+    }
+    false
+}
+
+/// Whether `node`'s subtree was already collected. An empty `done` slice
+/// means nothing was collected yet (single-root selection).
+#[inline]
+fn is_done(done: &[bool], node: NodeId) -> bool {
+    done.get(node.index()).copied().unwrap_or(false)
+}
+
+/// Collection strategy for one selector list.
+///
+/// Memo entries depend only on the node, not on the traversal root, so one
+/// collector serves every root of a multi-root selection.
+enum SelectionCollector<'a> {
+    /// A lone type selector: `div`.
+    Tag(Tag),
+    /// A lone id selector, `#id`, with its precomputed hash.
+    Id(&'a str, u32),
+    /// A single selector with a descendant combinator (bloom pre-filtering).
+    Bloom {
+        matcher: SelectorMatcher<'a>,
+        hashes: Vec<u32>,
+    },
+    /// A single selector without descendant combinators.
+    Simple(SelectorMatcher<'a>),
+    /// Several selectors, matched in one traversal.
+    List(Vec<SelectorMatcher<'a>>),
+}
+
+impl<'a> SelectionCollector<'a> {
+    fn new(node_count: usize, selectors: &'a [Selector]) -> Self {
+        let [selector] = selectors else {
+            return Self::List(build_list_matchers(node_count, selectors));
+        };
+        if let Some(tag) = simple_tag_selector(selector) {
+            return Self::Tag(tag);
+        }
+        if let Some((id, hash)) = simple_id_selector(selector) {
+            return Self::Id(id, hash);
+        }
+
+        let matcher = SelectorMatcher::new(node_count, selector);
+        if has_descendant_combinator(selector) {
+            Self::Bloom {
+                matcher,
+                hashes: compute_descendant_hashes(selector),
+            }
+        } else {
+            Self::Simple(matcher)
+        }
+    }
+
+    #[inline]
+    fn uses_blooms(&self) -> bool {
+        matches!(self, Self::Bloom { .. })
+    }
+
+    /// Append the matches in `root`'s subtree to `results` in document order,
+    /// skipping every subtree whose root is marked in `done`.
+    ///
+    /// `shared_blooms` must hold filled ancestor blooms for the subtree when
+    /// given; otherwise a bloom-filtered collector builds them for this call.
+    fn collect(
+        &mut self,
+        arena: &Arena,
+        root: NodeId,
+        shared_blooms: Option<&[AncestorBloom]>,
+        done: &[bool],
+        results: &mut Vec<NodeId>,
+    ) {
+        match self {
+            Self::Tag(tag) => collect_tag(arena, root, *tag, done, results),
+            Self::Id(id, hash) => collect_id(arena, root, id, *hash, done, results),
+            Self::Bloom { matcher, hashes } => {
+                let local_blooms;
+                let blooms = match shared_blooms {
+                    Some(blooms) => blooms,
+                    None => {
+                        local_blooms = build_ancestor_blooms(arena, root);
+                        &local_blooms
+                    }
+                };
+                collect_bloom(arena, root, matcher, blooms, hashes, done, results);
+            }
+            Self::Simple(matcher) => collect_simple(arena, root, matcher, done, results),
+            Self::List(matchers) => collect_list(arena, root, matchers, done, results),
+        }
+    }
 }
 
 #[inline]
@@ -536,8 +690,8 @@ pub fn select_first(arena: &Arena, root: NodeId, selector: &Selector) -> Option<
     if let Some(tag) = simple_tag_selector(selector) {
         return find_first_tag(arena, root, tag);
     }
-    if let Some(id) = simple_id_selector(selector) {
-        return find_first_id(arena, root, id);
+    if let Some((id, hash)) = simple_id_selector(selector) {
+        return find_first_id(arena, root, id, hash);
     }
     let mut matcher = SelectorMatcher::new(arena.len(), selector);
     find_first(arena, root, &mut matcher)
@@ -562,9 +716,10 @@ fn collect_simple(
     arena: &Arena,
     node: NodeId,
     matcher: &mut SelectorMatcher<'_>,
+    done: &[bool],
     results: &mut Vec<NodeId>,
 ) {
-    if node.is_null() {
+    if node.is_null() || is_done(done, node) {
         return;
     }
 
@@ -575,7 +730,7 @@ fn collect_simple(
 
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_simple(arena, child, matcher, results);
+        collect_simple(arena, child, matcher, done, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -587,9 +742,10 @@ fn collect_list(
     arena: &Arena,
     node: NodeId,
     matchers: &mut [SelectorMatcher<'_>],
+    done: &[bool],
     results: &mut Vec<NodeId>,
 ) {
-    if node.is_null() {
+    if node.is_null() || is_done(done, node) {
         return;
     }
 
@@ -604,32 +760,45 @@ fn collect_list(
 
     let mut child = current.first_child;
     while !child.is_null() {
-        collect_list(arena, child, matchers, results);
+        collect_list(arena, child, matchers, done, results);
         child = arena.get(child).next_sibling;
     }
 }
 
 /// DFS collection optimized for a single `#id` selector.
-fn collect_id(arena: &Arena, node: NodeId, target_id: &str, results: &mut Vec<NodeId>) {
-    if node.is_null() {
+fn collect_id(
+    arena: &Arena,
+    node: NodeId,
+    target_id: &str,
+    target_hash: u32,
+    done: &[bool],
+    results: &mut Vec<NodeId>,
+) {
+    if node.is_null() || is_done(done, node) {
         return;
     }
 
     let n = arena.get(node);
-    if is_element(n) && node_has_id(arena, node, target_id) {
+    if is_element(n) && node_has_id(arena, node, target_id, target_hash) {
         results.push(node);
     }
 
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_id(arena, child, target_id, results);
+        collect_id(arena, child, target_id, target_hash, done, results);
         child = arena.get(child).next_sibling;
     }
 }
 
 /// DFS collection optimized for a single tag selector.
-fn collect_tag(arena: &Arena, node: NodeId, target_tag: Tag, results: &mut Vec<NodeId>) {
-    if node.is_null() {
+fn collect_tag(
+    arena: &Arena,
+    node: NodeId,
+    target_tag: Tag,
+    done: &[bool],
+    results: &mut Vec<NodeId>,
+) {
+    if node.is_null() || is_done(done, node) {
         return;
     }
 
@@ -640,7 +809,7 @@ fn collect_tag(arena: &Arena, node: NodeId, target_tag: Tag, results: &mut Vec<N
 
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_tag(arena, child, target_tag, results);
+        collect_tag(arena, child, target_tag, done, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -652,9 +821,10 @@ fn collect_bloom(
     matcher: &mut SelectorMatcher<'_>,
     blooms: &[AncestorBloom],
     bloom_hashes: &[u32],
+    done: &[bool],
     results: &mut Vec<NodeId>,
 ) {
-    if node.is_null() {
+    if node.is_null() || is_done(done, node) {
         return;
     }
 
@@ -671,7 +841,7 @@ fn collect_bloom(
 
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_bloom(arena, child, matcher, blooms, bloom_hashes, results);
+        collect_bloom(arena, child, matcher, blooms, bloom_hashes, done, results);
         child = arena.get(child).next_sibling;
     }
 }
@@ -728,19 +898,19 @@ fn find_first(arena: &Arena, node: NodeId, matcher: &mut SelectorMatcher<'_>) ->
 }
 
 /// DFS to find first match optimized for a single `#id` selector.
-fn find_first_id(arena: &Arena, node: NodeId, target_id: &str) -> Option<NodeId> {
+fn find_first_id(arena: &Arena, node: NodeId, target_id: &str, target_hash: u32) -> Option<NodeId> {
     if node.is_null() {
         return None;
     }
 
     let n = arena.get(node);
-    if is_element(n) && node_has_id(arena, node, target_id) {
+    if is_element(n) && node_has_id(arena, node, target_id, target_hash) {
         return Some(node);
     }
 
     let mut child = n.first_child;
     while !child.is_null() {
-        if let Some(found) = find_first_id(arena, child, target_id) {
+        if let Some(found) = find_first_id(arena, child, target_id, target_hash) {
             return Some(found);
         }
         child = arena.get(child).next_sibling;
@@ -798,13 +968,14 @@ fn find_first_list(
     None
 }
 
+/// The id and its precomputed hash when `selector` is a lone `#id`.
 #[inline]
-fn simple_id_selector(selector: &Selector) -> Option<&str> {
+fn simple_id_selector(selector: &Selector) -> Option<(&str, u32)> {
     if !selector.chain.is_empty() {
         return None;
     }
     match selector.subject.parts.as_slice() {
-        [SimpleSelector::Id(id, _)] => Some(id.as_str()),
+        [SimpleSelector::Id(id, hash)] => Some((id.as_str(), *hash)),
         _ => None,
     }
 }
@@ -821,8 +992,7 @@ fn simple_tag_selector(selector: &Selector) -> Option<Tag> {
 }
 
 #[inline]
-fn node_has_id(arena: &Arena, node: NodeId, target_id: &str) -> bool {
-    let target_hash = selector_hash(target_id.as_bytes());
+fn node_has_id(arena: &Arena, node: NodeId, target_id: &str, target_hash: u32) -> bool {
     // `id_hash == 0` is also the "no id" sentinel; when the target hashes to 0,
     // skip the fast path and verify directly (see SimpleSelector::Id).
     if id_hash_rejects(arena, node, target_hash) {
@@ -1148,5 +1318,92 @@ mod tests {
             let _ = matcher.matches(doc.arena(), node);
         }
         assert_eq!(matcher.memo.populated_len(), first_pass_states);
+    }
+
+    fn texts(doc: &fhp_tree::Document, ids: &[NodeId]) -> Vec<String> {
+        ids.iter().map(|&id| doc.get(id).text_content()).collect()
+    }
+
+    #[test]
+    fn general_sibling_chains_match_in_any_visit_order() {
+        let doc = fhp_tree::parse(
+            "<div><p class=x>0</p><h1>a</h1><p>1</p><h1>b</h1>t<!--c--><p>2</p></div>\
+             <div><h1>c</h1><p>3</p></div>\
+             <div><p>4</p><h1>d</h1><p>5</p></div>",
+        )
+        .unwrap();
+        let arena = doc.arena();
+
+        for (css, expected) in [
+            ("h1 ~ p", vec!["1", "2", "3", "5"]),
+            (".x ~ h1 ~ p", vec!["1", "2"]),
+            ("h1 ~ h1 ~ p", vec!["2"]),
+            ("p ~ p", vec!["1", "2", "5"]),
+        ] {
+            let list = parse_selector(css).unwrap();
+            let selected = select_all_list(arena, doc.root_id(), &list);
+            assert_eq!(texts(&doc, &selected), expected, "{css}");
+
+            // A fresh matcher per node (arena order is document order here).
+            let single: Vec<_> = (0..arena.len() as u32)
+                .map(NodeId)
+                .filter(|&id| match_selector_list(arena, id, &list))
+                .collect();
+            assert_eq!(single, selected, "{css}");
+
+            // Reverse document order on one shared matcher.
+            let mut matcher = SelectorMatcher::new(arena.len(), &list.selectors[0]);
+            let mut reversed: Vec<_> = (0..arena.len() as u32)
+                .rev()
+                .map(NodeId)
+                .filter(|&id| matcher.matches(arena, id))
+                .collect();
+            reversed.reverse();
+            assert_eq!(texts(&doc, &reversed), expected, "{css}");
+        }
+    }
+
+    #[test]
+    fn multi_root_selection_is_the_ordered_union_of_root_results() {
+        let doc = fhp_tree::parse(
+            "<div id=a class=k><p>1</p><div id=b><p id=x>2</p><span>s</span></div></div>\
+             <div id=c><p>3</p></div>",
+        )
+        .unwrap();
+        let arena = doc.arena();
+        let by_id = |id: &str| {
+            select_first_list(
+                arena,
+                doc.root_id(),
+                &parse_selector(&format!("#{id}")).unwrap(),
+            )
+            .unwrap()
+        };
+        let (a, b, c) = (by_id("a"), by_id("b"), by_id("c"));
+
+        for css in ["p", "#x", "div p", ".k p", "div > p", "p, span", "div"] {
+            let list = parse_selector(css).unwrap();
+            for roots in [
+                vec![a, b, c],
+                vec![b, a, c],
+                vec![c, b, a],
+                vec![c, c, b],
+                vec![],
+            ] {
+                let mut expected = Vec::new();
+                for &root in &roots {
+                    for id in select_all_list(arena, root, &list) {
+                        if !expected.contains(&id) {
+                            expected.push(id);
+                        }
+                    }
+                }
+                assert_eq!(
+                    select_all_list_roots(arena, &roots, &list),
+                    expected,
+                    "{css} over {roots:?}"
+                );
+            }
+        }
     }
 }

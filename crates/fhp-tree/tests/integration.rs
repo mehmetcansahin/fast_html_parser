@@ -317,12 +317,13 @@ fn literal_lt_in_text_is_preserved() {
 }
 
 #[test]
-fn invalid_close_like_text_is_preserved() {
+fn end_tag_open_before_space_starts_a_bogus_comment() {
+    // `</ ` is a bogus comment that runs to the first `>` (WHATWG).
     let doc = parse("<p>a </ b</p>").unwrap();
     let p = doc.root().first_child().unwrap();
 
-    assert_eq!(p.text_content(), "a </ b");
-    assert_eq!(p.inner_html(), "a &lt;/ b");
+    assert_eq!(p.text_content(), "a ");
+    assert_eq!(p.inner_html(), "a <!-- b</p-->");
 }
 
 #[test]
@@ -361,14 +362,14 @@ fn text_markup_edge_cases_round_trip() {
         TextMarkupCase {
             name: "slash_space",
             html: "<p>a </ b</p>",
-            expected_text: "a </ b",
-            expected_inner_html: "a &lt;/ b",
+            expected_text: "a ",
+            expected_inner_html: "a <!-- b</p-->",
         },
         TextMarkupCase {
             name: "slash_digit",
             html: "<p>a </2</p>",
-            expected_text: "a </2",
-            expected_inner_html: "a &lt;/2",
+            expected_text: "a ",
+            expected_inner_html: "a <!--2</p-->",
         },
         TextMarkupCase {
             name: "trailing_lt",
@@ -638,4 +639,93 @@ fn malformed_cdata_prefix_produces_valid_utf8() {
 fn wellformed_cdata_multibyte_roundtrips() {
     let doc = parse("<div><![CDATA[a\u{20ac}b]]></div>").unwrap();
     assert!(doc.root().text_content().contains("a\u{20ac}b"));
+}
+
+// ---------------------------------------------------------------
+// Traversal, serializer, and linear-time recovery regressions
+// ---------------------------------------------------------------
+
+#[test]
+fn descendants_of_a_leaf_yield_only_the_leaf() {
+    let doc = parse("<div><span>a</span><i></i><p>b</p></div><p>c</p>").unwrap();
+    let div = doc.root().first_child().unwrap();
+    let span = div.first_child().unwrap();
+    let text_leaf = span.first_child().unwrap();
+    let empty_i = span.next_sibling().unwrap();
+    assert!(text_leaf.is_text());
+    assert_eq!(empty_i.tag(), Tag::I);
+
+    assert_eq!(
+        text_leaf.descendants().collect::<Vec<_>>(),
+        vec![text_leaf.id()]
+    );
+    assert_eq!(
+        empty_i.descendants().collect::<Vec<_>>(),
+        vec![empty_i.id()]
+    );
+    // A start node with children still walks its whole subtree only.
+    assert_eq!(span.descendants().count(), 2);
+    assert_eq!(div.descendants().count(), 6);
+}
+
+#[test]
+fn plaintext_content_serializes_unescaped() {
+    let doc = parse("<plaintext><b>x").unwrap();
+    let html = doc.to_html();
+    assert!(html.contains("<plaintext><b>x"), "html: {html}");
+}
+
+#[test]
+fn repeated_attribute_names_parse_in_linear_time() {
+    use std::fmt::Write as _;
+
+    let mut html = String::from("<div");
+    for index in 0..50_000 {
+        write!(html, " a{index}=v").unwrap();
+    }
+    for _ in 0..50_000 {
+        html.push_str(" A49999=duplicate");
+    }
+    html.push_str(">x</div>");
+
+    let start = std::time::Instant::now();
+    let doc = parse(&html).unwrap();
+    let elapsed = start.elapsed();
+
+    let div = doc.root().first_child().unwrap();
+    assert_eq!(div.attrs().len(), 50_000);
+    assert_eq!(div.attr("a49999"), Some("v"));
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "50 000 duplicate attributes took {elapsed:?}"
+    );
+}
+
+#[test]
+fn fostered_elements_before_a_table_parse_in_linear_time() {
+    let html = format!("<table>{}</table>", "<br>".repeat(40_000));
+
+    let start = std::time::Instant::now();
+    let doc = parse(&html).unwrap();
+    let elapsed = start.elapsed();
+
+    let children: Vec<_> = doc.root().children().map(|id| doc.get(id)).collect();
+    assert_eq!(children.len(), 40_001);
+    for (position, child) in children.iter().enumerate() {
+        let expected = if position < 40_000 {
+            Tag::Br
+        } else {
+            Tag::Table
+        };
+        assert_eq!(child.tag(), expected);
+        // Sibling indices (used by `:nth-child`) follow document order.
+        assert_eq!(
+            doc.arena().get(child.id()).attr_raw_offset,
+            position as u32 + 1
+        );
+    }
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "40 000 fostered elements took {elapsed:?}"
+    );
 }

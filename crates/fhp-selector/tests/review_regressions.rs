@@ -3,6 +3,11 @@ use fhp_core::tag::Tag;
 use fhp_selector::xpath::ast::XPathResult;
 use fhp_selector::{DocumentIndex, Selectable};
 use fhp_tree::parse;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
+
+/// Upper bound for the linear-time regressions below (debug builds).
+const TIME_LIMIT: Duration = Duration::from_secs(2);
 
 #[test]
 fn selector_lists_return_matches_in_document_order() {
@@ -353,4 +358,158 @@ fn selection_xpath_positions_preserve_overlapping_root_semantics() {
     // Descendant-or-self includes `outer`; nested selection roots do not
     // duplicate `first` or `nested`, and results remain in document order.
     assert_eq!(ids, ["outer", "first", "nested"]);
+}
+
+#[test]
+fn sub_selections_match_ancestors_above_each_root() {
+    let doc = parse("<div class=\"outer\"><section><p>x</p></section></div>").unwrap();
+    assert_eq!(
+        doc.select("section")
+            .unwrap()
+            .select(".outer p")
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let doc = parse(
+        "<div class=\"outer\"><section><p>x</p></section><section><p>y</p></section></div>\
+         <section><p>z</p></section>",
+    )
+    .unwrap();
+    let texts: Vec<_> = doc
+        .select("section")
+        .unwrap()
+        .select(".outer p")
+        .unwrap()
+        .iter()
+        .map(|node| node.text_content())
+        .collect();
+    assert_eq!(texts, ["x", "y"]);
+}
+
+#[test]
+fn sub_selections_over_nested_roots_are_unique_and_in_document_order() {
+    const DEPTH: usize = 100;
+    const LINKS_PER_LEVEL: usize = 50;
+    let mut html = String::new();
+    let mut next = 0usize;
+    for _ in 0..DEPTH {
+        html.push_str("<div>");
+        for _ in 0..LINKS_PER_LEVEL {
+            html.push_str(&format!("<a>{next}</a>"));
+            next += 1;
+        }
+    }
+    html.push_str(&"</div>".repeat(DEPTH));
+    let doc = parse(&html).unwrap();
+    let roots = doc.select("div").unwrap();
+    assert_eq!(roots.len(), DEPTH);
+
+    let start = Instant::now();
+    let links = roots.select("a").unwrap();
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < TIME_LIMIT,
+        "nested-root sub-selection took {elapsed:?}"
+    );
+
+    let texts: Vec<_> = links.iter().map(|node| node.text_content()).collect();
+    let expected: Vec<_> = (0..DEPTH * LINKS_PER_LEVEL)
+        .map(|i| i.to_string())
+        .collect();
+    assert_eq!(texts, expected);
+    let unique: HashSet<_> = links.node_ids().iter().copied().collect();
+    assert_eq!(unique.len(), DEPTH * LINKS_PER_LEVEL);
+}
+
+#[test]
+fn general_sibling_combinator_is_linear_in_the_sibling_count() {
+    const SIBLINGS: usize = 40_000;
+    let mut html = String::from("<div><p>before</p><h1>t</h1>");
+    for index in 0..SIBLINGS {
+        html.push_str(&format!("<p>{index}</p>"));
+    }
+    html.push_str("</div>");
+    let doc = parse(&html).unwrap();
+
+    let start = Instant::now();
+    let matched = doc.select("h1 ~ p").unwrap();
+    let chained = doc.select("h1 ~ p ~ p").unwrap();
+    let elapsed = start.elapsed();
+    assert!(elapsed < TIME_LIMIT, "`~` selection took {elapsed:?}");
+
+    // Expected: the adjacent `p` and every element sibling after it.
+    let adjacent = doc.select("h1 + p").unwrap();
+    assert_eq!(adjacent.len(), 1);
+    let mut expected = Vec::with_capacity(SIBLINGS);
+    let mut sibling = adjacent.first();
+    while let Some(node) = sibling {
+        if node.tag() == Tag::P {
+            expected.push(node.id());
+        }
+        sibling = node.next_sibling();
+    }
+    assert_eq!(expected.len(), SIBLINGS);
+    assert_eq!(matched.node_ids(), expected.as_slice());
+    assert_eq!(chained.node_ids(), &expected[1..]);
+}
+
+#[test]
+fn descendant_sub_selection_over_many_roots_is_linear() {
+    const ITEMS: usize = 2_000;
+    const BOLD_PER_ITEM: usize = 49;
+    let mut html = String::from("<ul>");
+    for _ in 0..ITEMS {
+        html.push_str("<li><a>");
+        html.push_str(&"<b>x</b>".repeat(BOLD_PER_ITEM));
+        html.push_str("</a></li>");
+    }
+    html.push_str("</ul>");
+    let doc = parse(&html).unwrap();
+    assert!(doc.arena().len() >= 200_000, "{}", doc.arena().len());
+    let roots = doc.select("li").unwrap();
+    assert_eq!(roots.len(), ITEMS);
+
+    let start = Instant::now();
+    let matched = roots.select("a b").unwrap();
+    let elapsed = start.elapsed();
+    assert!(elapsed < TIME_LIMIT, "multi-root `a b` took {elapsed:?}");
+
+    assert_eq!(matched.len(), ITEMS * BOLD_PER_ITEM);
+    assert_eq!(matched.node_ids(), doc.select("b").unwrap().node_ids());
+}
+
+#[test]
+fn negations_never_match_the_document_root() {
+    let doc = parse("<p>x</p>").unwrap();
+    for selector in [":not(div) > p", ":not(*) p"] {
+        assert_eq!(doc.select(selector).unwrap().len(), 0, "{selector}");
+        assert!(doc.select_first(selector).unwrap().is_none(), "{selector}");
+    }
+}
+
+#[cfg(feature = "xpath")]
+#[test]
+fn selection_xpath_positioned_text_scales_across_wide_sibling_roots() {
+    const WIDTH: usize = 40_000;
+    let mut html = String::with_capacity(WIDTH * 15 + 16);
+    html.push_str("<ul>");
+    for index in 1..=WIDTH {
+        html.push_str(&format!("<li>{index}</li>"));
+    }
+    html.push_str("</ul>");
+    let doc = parse(&html).unwrap();
+    let roots = doc.select("li").unwrap();
+    assert_eq!(roots.len(), WIDTH);
+
+    let start = Instant::now();
+    let result = roots.xpath("//li[40000]/text()").unwrap();
+    let elapsed = start.elapsed();
+    assert!(elapsed < TIME_LIMIT, "positioned text() took {elapsed:?}");
+
+    let XPathResult::Strings(texts) = result else {
+        panic!("expected string result");
+    };
+    assert_eq!(texts, ["40000"]);
 }

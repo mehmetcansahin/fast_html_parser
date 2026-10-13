@@ -56,9 +56,12 @@ impl<'a> Iterator for DepthFirst<'a> {
         let result = self.current;
         let node = self.arena.get(result);
 
-        // Try first child, then next sibling, then ancestor's sibling.
+        // Try first child, then next sibling, then ancestor's sibling. A
+        // childless start node is the whole subtree: never leave it.
         self.current = if !node.first_child.is_null() {
             node.first_child
+        } else if result == self.root {
+            NodeId::NULL
         } else {
             self.next_non_child(result)
         };

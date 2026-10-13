@@ -1,10 +1,10 @@
 //! Tree construction from a token stream.
 //!
-//! [`TreeBuilder`](crate::builder::TreeBuilder) consumes [`Token`](fhp_tokenizer::token::Token)s and builds an arena-based DOM tree.
+//! [`TreeBuilder`] consumes [`Token`](fhp_tokenizer::token::Token)s and builds an arena-based DOM tree.
 //! It handles implicit close rules, void elements, and common malformed-HTML
 //! recovery strategies.
 
-use fhp_core::{error::ParseError, tag::Tag};
+use fhp_core::{attr::iter_raw_attrs, error::ParseError, is_html_whitespace, tag::Tag};
 use fhp_tokenizer::token::{Attribute as TokenAttribute, Token};
 
 use crate::arena::Arena;
@@ -35,6 +35,9 @@ enum ElementKind {
     TableBody,
     Row,
     Cell,
+    Caption,
+    ColGroup,
+    Column,
     Select,
     Option,
     OptGroup,
@@ -60,15 +63,18 @@ impl ElementKind {
             Tag::Tbody | Tag::Thead => Self::TableBody,
             Tag::Tr => Self::Row,
             Tag::Td | Tag::Th => Self::Cell,
+            Tag::Col => Self::Column,
             Tag::Select => Self::Select,
+            Tag::Plaintext => Self::Plaintext,
             Tag::A | Tag::B | Tag::Em | Tag::I | Tag::Strong => Self::Formatting,
             Tag::Unknown if name.eq_ignore_ascii_case("dt") || name.eq_ignore_ascii_case("dd") => {
                 Self::DefinitionItem
             }
             Tag::Unknown if name.eq_ignore_ascii_case("tfoot") => Self::TableBody,
+            Tag::Unknown if name.eq_ignore_ascii_case("caption") => Self::Caption,
+            Tag::Unknown if name.eq_ignore_ascii_case("colgroup") => Self::ColGroup,
             Tag::Unknown if name.eq_ignore_ascii_case("option") => Self::Option,
             Tag::Unknown if name.eq_ignore_ascii_case("optgroup") => Self::OptGroup,
-            Tag::Unknown if name.eq_ignore_ascii_case("plaintext") => Self::Plaintext,
             Tag::Unknown
                 if matches_ascii_name(
                     name,
@@ -90,6 +96,8 @@ impl ElementKind {
             Self::TableBody => InsertionMode::InTableBody,
             Self::Row => InsertionMode::InRow,
             Self::Cell => InsertionMode::InCell,
+            Self::Caption => InsertionMode::InCaption,
+            Self::ColGroup => InsertionMode::InColumnGroup,
             Self::Select => InsertionMode::InSelect,
             _ => current,
         }
@@ -104,6 +112,8 @@ enum InsertionMode {
     InTableBody,
     InRow,
     InCell,
+    InCaption,
+    InColumnGroup,
     InSelect,
 }
 
@@ -112,9 +122,42 @@ struct OpenElement {
     id: NodeId,
     tag: Tag,
     kind: ElementKind,
+    /// Whether the element is in the HTML "special" category, which bounds
+    /// generic end-tag and list-item searches. Cached at push time so stack
+    /// walks never compare unknown element names.
+    special: bool,
     /// Effective insertion mode for the stack prefix ending at this entry.
     insertion_mode: InsertionMode,
     element_child_count: u32,
+}
+
+/// Element sets that end an "has an element in scope" stack walk.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Scope {
+    /// The default scope: tables, cells, and captions.
+    Standard,
+    /// Default scope plus `ol` and `ul`.
+    ListItem,
+    /// Default scope plus `button`.
+    Button,
+    /// Table scope: only a table ends the walk.
+    Table,
+}
+
+impl Scope {
+    #[inline]
+    fn stops_at(self, entry: &OpenElement) -> bool {
+        let standard = matches!(
+            entry.kind,
+            ElementKind::Table | ElementKind::Cell | ElementKind::Caption
+        );
+        match self {
+            Self::Standard => standard,
+            Self::ListItem => standard || matches!(entry.tag, Tag::Ol | Tag::Ul),
+            Self::Button => standard || entry.tag == Tag::Button,
+            Self::Table => entry.kind == ElementKind::Table,
+        }
+    }
 }
 
 enum PendingAttrs<'slice, 'input> {
@@ -129,6 +172,22 @@ enum InsertionLocation {
     Before { parent: NodeId, reference: NodeId },
 }
 
+impl InsertionLocation {
+    #[inline]
+    fn parent(self) -> NodeId {
+        match self {
+            Self::Append(parent) | Self::Before { parent, .. } => parent,
+        }
+    }
+}
+
+/// Whether the tokenizer stays in a literal text mode after this start tag
+/// (raw text through the matching end tag, or plaintext through EOF).
+#[inline]
+fn opens_raw_text(tag: Tag) -> bool {
+    tag.is_raw_text() || tag == Tag::Plaintext
+}
+
 #[inline]
 fn matches_ascii_name(name: &str, expected: &[&str]) -> bool {
     expected
@@ -136,9 +195,101 @@ fn matches_ascii_name(name: &str, expected: &[&str]) -> bool {
         .any(|candidate| name.eq_ignore_ascii_case(candidate))
 }
 
-#[inline]
-fn is_html_whitespace(byte: u8) -> bool {
-    matches!(byte, b' ' | b'\t' | b'\n' | b'\x0C' | b'\r')
+/// Whether an element belongs to the HTML "special" category, restricted to
+/// the elements this builder can produce. `unknown_name` is the preserved
+/// name of a [`Tag::Unknown`] element.
+fn is_special_element(tag: Tag, kind: ElementKind, unknown_name: Option<&str>) -> bool {
+    matches!(
+        kind,
+        ElementKind::Table
+            | ElementKind::TableBody
+            | ElementKind::Row
+            | ElementKind::Cell
+            | ElementKind::Caption
+            | ElementKind::ColGroup
+            | ElementKind::Select
+            | ElementKind::Heading
+            | ElementKind::ListItem
+            | ElementKind::DefinitionItem
+            | ElementKind::Paragraph
+            | ElementKind::Plaintext
+    ) || matches!(
+        tag,
+        Tag::Article
+            | Tag::Aside
+            | Tag::Body
+            | Tag::Button
+            | Tag::Div
+            | Tag::Footer
+            | Tag::Form
+            | Tag::Head
+            | Tag::Header
+            | Tag::Html
+            | Tag::Iframe
+            | Tag::Main
+            | Tag::Nav
+            | Tag::Ol
+            | Tag::Pre
+            | Tag::Script
+            | Tag::Section
+            | Tag::Style
+            | Tag::Textarea
+            | Tag::Title
+            | Tag::Ul
+            | Tag::Xmp
+            | Tag::Noembed
+            | Tag::Noframes
+    ) || (tag == Tag::Unknown
+        && unknown_name.is_some_and(|name| {
+            matches_ascii_name(
+                name,
+                &[
+                    "address",
+                    "applet",
+                    "blockquote",
+                    "center",
+                    "details",
+                    "dialog",
+                    "dir",
+                    "dl",
+                    "fieldset",
+                    "figcaption",
+                    "figure",
+                    "frameset",
+                    "hgroup",
+                    "listing",
+                    "marquee",
+                    "menu",
+                    "noscript",
+                    "object",
+                    "search",
+                    "summary",
+                    "template",
+                ],
+            )
+        }))
+}
+
+/// Whether the first `type` attribute is ASCII case-insensitively `hidden`
+/// (the `<input type=hidden>` exception to table foster parenting).
+fn attrs_type_hidden(attributes: &PendingAttrs<'_, '_>) -> bool {
+    match attributes {
+        PendingAttrs::Parsed(attributes) => attributes
+            .iter()
+            .find(|attribute| attribute.name.eq_ignore_ascii_case("type"))
+            .and_then(|attribute| attribute.value.as_deref())
+            .is_some_and(|value| value.eq_ignore_ascii_case("hidden")),
+        PendingAttrs::Raw(raw) => iter_raw_attrs(raw)
+            .find(|attribute| attribute.name.eq_ignore_ascii_case("type"))
+            .and_then(|attribute| attribute.value)
+            .is_some_and(|value| {
+                // Match the decoded value the token path compares.
+                #[cfg(feature = "entity-decode")]
+                let value = fhp_tokenizer::entity::decode_attribute_entities(value);
+                value.eq_ignore_ascii_case("hidden")
+            }),
+        PendingAttrs::None => false,
+    }
 }
 
 /// Known block-level starts that imply the end of an open `<p>` element.
@@ -162,6 +313,7 @@ fn closes_p_element(tag: Tag) -> bool {
             | Tag::H6
             | Tag::Header
             | Tag::Hr
+            | Tag::Li
             | Tag::Main
             | Tag::Nav
             | Tag::Ol
@@ -170,6 +322,7 @@ fn closes_p_element(tag: Tag) -> bool {
             | Tag::Section
             | Tag::Table
             | Tag::Ul
+            | Tag::Xmp
     )
 }
 
@@ -186,8 +339,10 @@ pub struct TreeBuilder {
     kind_counts: [u16; ElementKind::COUNT],
     /// Effective insertion mode of the final open-element entry.
     insertion_mode: InsertionMode,
-    /// Active formatting nodes used by the common adoption-repair path.
-    active_formatting: Vec<NodeId>,
+    /// Whether a line feed at the start of the next character token is
+    /// dropped (the token right after a `pre`, `listing`, or `textarea`
+    /// start tag).
+    skip_next_lf: bool,
     /// The synthetic root node (document root).
     root: NodeId,
     /// Base address of the original input (for source-backed text).
@@ -210,6 +365,11 @@ pub struct TreeBuilder {
     /// Text node flushed immediately before the most recently processed
     /// non-text token.
     flushed_text_node: Option<NodeId>,
+    /// Raw-text start tag (`xmp`, `style`, `plaintext`, ...) the builder
+    /// ignored, e.g. inside `select`. The tokenizer still emits that
+    /// element's content undecoded, while no raw-text parent exists; the token
+    /// path then decodes it exactly as the sink path does.
+    ignored_raw_text: Option<Tag>,
 }
 
 impl TreeBuilder {
@@ -236,6 +396,7 @@ impl TreeBuilder {
             id: root,
             tag: Tag::Unknown,
             kind: ElementKind::Root,
+            special: true,
             insertion_mode: InsertionMode::InBody,
             element_child_count: 0,
         });
@@ -246,7 +407,7 @@ impl TreeBuilder {
             open_elements,
             kind_counts,
             insertion_mode: InsertionMode::InBody,
-            active_formatting: Vec::new(),
+            skip_next_lf: false,
             root,
             source_base: 0,
             source_len: 0,
@@ -255,6 +416,7 @@ impl TreeBuilder {
             pending_table_text: String::new(),
             table_text_run_foster: false,
             flushed_text_node: None,
+            ignored_raw_text: None,
         }
     }
 
@@ -272,7 +434,7 @@ impl TreeBuilder {
     /// Stores an owned copy of `input` in the arena. Text nodes whose content
     /// is borrowed from `input` (entity-free) will reference the source
     /// instead of copying to the text slab.
-    pub fn set_source(&mut self, input: &str) {
+    pub(crate) fn set_source(&mut self, input: &str) {
         self.source_base = input.as_ptr() as usize;
         self.source_len = input.len();
         self.arena.set_source(input);
@@ -282,7 +444,7 @@ impl TreeBuilder {
     ///
     /// Use this with [`Arena::set_source_owned`] after tokenization to
     /// avoid a redundant memcpy when the caller owns the input `String`.
-    pub fn set_source_ptr(&mut self, input: &str) {
+    pub(crate) fn set_source_ptr(&mut self, input: &str) {
         self.source_base = input.as_ptr() as usize;
         self.source_len = input.len();
     }
@@ -301,15 +463,27 @@ impl TreeBuilder {
                 name,
                 attributes,
                 self_closing,
-            } => self.handle_open_tag(
-                *tag,
-                name.as_ref(),
-                PendingAttrs::Parsed(attributes),
-                *self_closing,
-            ),
+            } => {
+                let created = self.handle_open_tag(
+                    *tag,
+                    name.as_ref(),
+                    PendingAttrs::Parsed(attributes),
+                    *self_closing,
+                );
+                if matches!(created, Ok(None)) && opens_raw_text(*tag) {
+                    self.ignored_raw_text = Some(*tag);
+                }
+                created
+            }
             Token::CloseTag { tag, name } => {
-                self.handle_close_tag(*tag, name.as_ref());
-                Ok(None)
+                // The tokenizer leaves raw-text mode at the matching end tag.
+                if self.ignored_raw_text == Some(*tag) {
+                    self.ignored_raw_text = None;
+                }
+                self.handle_close_tag(*tag, name.as_ref())
+            }
+            Token::Text { content } if self.ignored_raw_text.is_some() => {
+                Ok(self.handle_raw_text(content.as_ref()))
             }
             Token::Text { content } => Ok(self.handle_text(content.as_ref())),
             Token::Comment { content } => Ok(self.handle_comment(content.as_ref())),
@@ -369,10 +543,12 @@ impl TreeBuilder {
     #[inline]
     fn push_open_element(&mut self, id: NodeId, tag: Tag, kind: ElementKind) {
         let insertion_mode = kind.pushed_mode(self.insertion_mode);
+        let special = is_special_element(tag, kind, self.arena.unknown_tag_name(id));
         self.open_elements.push(OpenElement {
             id,
             tag,
             kind,
+            special,
             insertion_mode,
             element_child_count: 0,
         });
@@ -392,9 +568,6 @@ impl TreeBuilder {
         let count = &mut self.kind_counts[entry.kind.index()];
         debug_assert!(*count > 0);
         *count -= 1;
-        if entry.kind == ElementKind::Formatting {
-            self.remove_active_formatting(entry.id);
-        }
         self.insertion_mode = self
             .open_elements
             .last()
@@ -413,64 +586,132 @@ impl TreeBuilder {
         let kind = ElementKind::classify(tag, name);
 
         if self.insertion_mode == InsertionMode::InSelect {
-            if is_select_breakout_start(tag, name) {
+            // "In select in table": table-structure starts close the select.
+            if is_select_breakout_start(tag, name)
+                || (self.kind_is_open(ElementKind::Table) && is_select_in_table_breakout(kind))
+            {
                 self.close_last_kind(ElementKind::Select);
                 return self.handle_open_tag(tag, name, attributes, source_self_closing);
             }
             match kind {
-                ElementKind::Option => self.close_last_kind(ElementKind::Option),
+                ElementKind::Option => {
+                    self.pop_if_current(ElementKind::Option);
+                }
                 ElementKind::OptGroup => {
-                    self.close_last_kind(ElementKind::Option);
-                    self.close_last_kind(ElementKind::OptGroup);
+                    self.pop_if_current(ElementKind::Option);
+                    self.pop_if_current(ElementKind::OptGroup);
                 }
                 ElementKind::Select => {
                     self.close_last_kind(ElementKind::Select);
                     return Ok(None);
                 }
+                // Processed with the "in head" rules: inserted in place.
+                _ if tag == Tag::Script => {}
                 _ => return Ok(None),
             }
         }
 
         let mut foster = false;
         match self.insertion_mode {
-            InsertionMode::InCell if is_table_structure(kind) => {
+            InsertionMode::InCell if is_table_section_start(kind) => {
                 self.close_last_kind(ElementKind::Cell);
                 return self.handle_open_tag(tag, name, attributes, source_self_closing);
             }
+            InsertionMode::InCaption if is_table_section_start(kind) => {
+                self.close_last_kind(ElementKind::Caption);
+                return self.handle_open_tag(tag, name, attributes, source_self_closing);
+            }
+            InsertionMode::InColumnGroup => {
+                if kind == ElementKind::Column {
+                    let node = self.insert_element(
+                        tag,
+                        name,
+                        kind,
+                        attributes,
+                        source_self_closing,
+                        InsertionLocation::Append(self.current_parent()),
+                    )?;
+                    return Ok(Some(node));
+                }
+                if !self.pop_if_current(ElementKind::ColGroup) {
+                    return Ok(None);
+                }
+                return self.handle_open_tag(tag, name, attributes, source_self_closing);
+            }
             InsertionMode::InRow => match kind {
-                ElementKind::Cell => {}
-                ElementKind::Row | ElementKind::TableBody | ElementKind::Table => {
+                ElementKind::Cell => self.clear_back_to(ElementKind::Row),
+                ElementKind::Row
+                | ElementKind::TableBody
+                | ElementKind::Table
+                | ElementKind::Caption
+                | ElementKind::ColGroup
+                | ElementKind::Column => {
                     self.close_last_kind(ElementKind::Row);
                     return self.handle_open_tag(tag, name, attributes, source_self_closing);
                 }
                 _ => foster = true,
             },
             InsertionMode::InTableBody => match kind {
-                ElementKind::Row => {}
+                ElementKind::Row => self.clear_back_to(ElementKind::TableBody),
                 ElementKind::Cell => {
+                    self.clear_back_to(ElementKind::TableBody);
                     self.insert_implied(Tag::Tr, "tr", ElementKind::Row)?;
                 }
-                ElementKind::TableBody | ElementKind::Table => {
+                ElementKind::TableBody
+                | ElementKind::Table
+                | ElementKind::Caption
+                | ElementKind::ColGroup
+                | ElementKind::Column => {
                     self.close_last_kind(ElementKind::TableBody);
                     return self.handle_open_tag(tag, name, attributes, source_self_closing);
                 }
                 _ => foster = true,
             },
             InsertionMode::InTable => match kind {
-                ElementKind::TableBody => {}
+                ElementKind::TableBody | ElementKind::Caption | ElementKind::ColGroup => {
+                    self.clear_back_to(ElementKind::Table);
+                }
                 ElementKind::Row => {
+                    self.clear_back_to(ElementKind::Table);
                     self.insert_implied(Tag::Tbody, "tbody", ElementKind::TableBody)?;
                 }
                 ElementKind::Cell => {
+                    self.clear_back_to(ElementKind::Table);
                     self.insert_implied(Tag::Tbody, "tbody", ElementKind::TableBody)?;
                     self.insert_implied(Tag::Tr, "tr", ElementKind::Row)?;
                 }
-                ElementKind::Table => {
-                    self.close_last_kind(ElementKind::Table);
+                ElementKind::Column => {
+                    self.clear_back_to(ElementKind::Table);
+                    self.insert_implied(Tag::Unknown, "colgroup", ElementKind::ColGroup)?;
                 }
+                ElementKind::Table => self.close_last_kind(ElementKind::Table),
                 _ => foster = true,
             },
+            // Table parts outside a table are ignored.
+            InsertionMode::InBody if is_table_section_start(kind) => return Ok(None),
             _ => {}
+        }
+
+        if foster {
+            match tag {
+                // "In head" elements and hidden inputs stay inside the table.
+                Tag::Script | Tag::Style => foster = false,
+                Tag::Input if attrs_type_hidden(&attributes) => foster = false,
+                Tag::Form => {
+                    // A form in a table is inserted empty and closed at once.
+                    let node = self.insert_element(
+                        tag,
+                        name,
+                        kind,
+                        attributes,
+                        source_self_closing,
+                        InsertionLocation::Append(self.current_parent()),
+                    )?;
+                    self.pop_open_element();
+                    return Ok(Some(node));
+                }
+                _ => {}
+            }
         }
 
         if tag == Tag::A {
@@ -480,13 +721,20 @@ impl TreeBuilder {
             self.adoption_close(tag, name);
         }
         self.apply_body_implicit_close(tag, kind);
-        let location = if foster {
+        // Fostering applies only while the current node is a table part; an
+        // element already fostered out of the table receives its content.
+        let location = if foster && self.current_node_is_table_part() {
             self.foster_location()
         } else {
             InsertionLocation::Append(self.current_parent())
         };
         let node =
             self.insert_element(tag, name, kind, attributes, source_self_closing, location)?;
+        if matches!(tag, Tag::Pre | Tag::Textarea)
+            || (tag == Tag::Unknown && name.eq_ignore_ascii_case("listing"))
+        {
+            self.skip_next_lf = true;
+        }
         Ok(Some(node))
     }
 
@@ -524,10 +772,7 @@ impl TreeBuilder {
             return Err(error);
         }
 
-        let parent = match location {
-            InsertionLocation::Append(parent) => parent,
-            InsertionLocation::Before { parent, .. } => parent,
-        };
+        let parent = location.parent();
         let depth = self.arena.get(parent).depth.saturating_add(1);
         let node = self.arena.new_element(tag, depth);
         if tag == Tag::Unknown {
@@ -543,23 +788,7 @@ impl TreeBuilder {
             _ => {}
         }
 
-        match location {
-            InsertionLocation::Append(parent) => {
-                self.arena.append_child_trusted(parent, node);
-                self.register_appended_element(parent, node);
-            }
-            InsertionLocation::Before { parent, reference } => {
-                self.arena.insert_before(parent, reference, node);
-                let count = self.arena.recompute_element_indices(parent);
-                if let Some(entry) = self
-                    .open_elements
-                    .iter_mut()
-                    .find(|entry| entry.id == parent)
-                {
-                    entry.element_child_count = count;
-                }
-            }
-        }
+        self.attach_element(node, location);
 
         let is_void = tag.is_void();
         if source_self_closing || is_void {
@@ -568,17 +797,54 @@ impl TreeBuilder {
         // A slash on a non-void HTML element is syntactic metadata only.
         if !is_void {
             self.push_open_element(node, tag, kind);
-            if kind == ElementKind::Formatting {
-                self.active_formatting.push(node);
-            }
         }
         Ok(node)
     }
 
-    fn handle_close_tag(&mut self, tag: Tag, name: &str) {
+    /// Attach a new element at `location`, keeping the element-child indices
+    /// and the parent's open-stack child count exact.
+    fn attach_element(&mut self, node: NodeId, location: InsertionLocation) {
+        match location {
+            InsertionLocation::Append(parent) => {
+                self.arena.append_child_trusted(parent, node);
+                self.register_appended_element(parent, node);
+            }
+            InsertionLocation::Before { parent, reference } => {
+                self.arena.insert_before(parent, reference, node);
+                // The new element takes the reference's index and shifts the
+                // reference and every later element sibling by one. Fostering
+                // targets an open table, which is the last element child of
+                // its parent, so this walk is O(1) element siblings.
+                let index = self.arena.full_element_index(reference);
+                self.arena.set_full_element_index(node, index);
+                let mut sibling = reference;
+                while !sibling.is_null() {
+                    if self.arena.is_element(sibling) {
+                        let shifted = self.arena.full_element_index(sibling).saturating_add(1);
+                        self.arena.set_full_element_index(sibling, shifted);
+                    }
+                    sibling = self.arena.get(sibling).next_sibling;
+                }
+                if let Some(entry) = self
+                    .open_elements
+                    .iter_mut()
+                    .rev()
+                    .find(|entry| entry.id == parent)
+                {
+                    entry.element_child_count = entry.element_child_count.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    fn handle_close_tag(&mut self, tag: Tag, name: &str) -> Result<Option<NodeId>, ParseError> {
         self.end_text_run();
+        if tag == Tag::Br {
+            // `</br>` is parsed as a `<br>` start tag without attributes.
+            return self.handle_open_tag(Tag::Br, "br", PendingAttrs::None, false);
+        }
         if tag.is_void() {
-            return;
+            return Ok(None);
         }
 
         // The overwhelmingly common close is the current element. Handle it
@@ -587,11 +853,20 @@ impl TreeBuilder {
         let last_index = self.open_elements.len() - 1;
         if last_index > 0 && self.entry_matches(last_index, tag, name) {
             self.pop_open_element();
-            return;
+            return Ok(None);
         }
 
         let kind = ElementKind::classify(tag, name);
         if self.insertion_mode == InsertionMode::InSelect {
+            // "In select in table": a table end tag closes the select only
+            // when an element with that name is in table scope.
+            if self.kind_is_open(ElementKind::Table)
+                && is_select_in_table_breakout(kind)
+                && self.find_named_in_scope(tag, name, Scope::Table).is_some()
+            {
+                self.close_last_kind(ElementKind::Select);
+                return self.handle_close_tag(tag, name);
+            }
             match kind {
                 ElementKind::Option => self.close_last_kind(ElementKind::Option),
                 ElementKind::OptGroup => {
@@ -601,32 +876,93 @@ impl TreeBuilder {
                 ElementKind::Select => self.close_last_kind(ElementKind::Select),
                 _ => {}
             }
-            return;
+            return Ok(None);
         }
 
-        if kind == ElementKind::Formatting {
-            self.adoption_close(tag, name);
-            return;
+        // "In column group": any other end tag closes the column group and
+        // is reprocessed in the table.
+        if self.insertion_mode == InsertionMode::InColumnGroup
+            && !matches!(kind, ElementKind::ColGroup | ElementKind::Column)
+        {
+            if self.pop_if_current(ElementKind::ColGroup) {
+                return self.handle_close_tag(tag, name);
+            }
+            return Ok(None);
         }
 
         match kind {
-            ElementKind::Cell | ElementKind::Row | ElementKind::TableBody | ElementKind::Table => {
-                self.close_table_through(kind)
+            ElementKind::Formatting => self.adoption_close(tag, name),
+            ElementKind::Cell
+            | ElementKind::Row
+            | ElementKind::TableBody
+            | ElementKind::Table
+            | ElementKind::Caption => {
+                self.close_in_scope(kind, Scope::Table);
+            }
+            ElementKind::ColGroup => {
+                self.pop_if_current(ElementKind::ColGroup);
+            }
+            ElementKind::Column => {}
+            ElementKind::Paragraph => {
+                if !self.close_in_scope(ElementKind::Paragraph, Scope::Button) {
+                    // `</p>` without an open paragraph inserts an empty one.
+                    let location = if self.current_node_is_table_part() {
+                        self.foster_location()
+                    } else {
+                        InsertionLocation::Append(self.current_parent())
+                    };
+                    let node = self.insert_element(
+                        Tag::P,
+                        "p",
+                        ElementKind::Paragraph,
+                        PendingAttrs::None,
+                        false,
+                        location,
+                    )?;
+                    self.pop_open_element();
+                    return Ok(Some(node));
+                }
+            }
+            ElementKind::ListItem => {
+                self.close_in_scope(ElementKind::ListItem, Scope::ListItem);
+            }
+            // `</dd>` and `</dt>` close only an element with the same name.
+            ElementKind::DefinitionItem => {
+                if let Some(index) = self.find_named_in_scope(tag, name, Scope::Standard) {
+                    self.truncate_stack(index);
+                }
+            }
+            // Any heading end tag closes the innermost open heading.
+            ElementKind::Heading => {
+                self.close_in_scope(ElementKind::Heading, Scope::Standard);
             }
             _ => self.close_matching(tag, name, kind),
         }
+        Ok(None)
     }
 
+    /// Close an element by name. Ordinary end tags stop at the first special
+    /// element; end tags of special elements (`div`, `ul`, `section`, ...)
+    /// close through anything except a table, cell, or caption boundary.
     fn close_matching(&mut self, tag: Tag, name: &str, kind: ElementKind) {
         if !self.kind_is_open(kind) {
             return;
         }
-        let last_index = self.open_elements.len() - 1;
-        if let Some(index) = (1..last_index)
-            .rev()
-            .find(|&index| self.entry_matches(index, tag, name))
-        {
-            self.truncate_stack(index);
+        let closes_special = is_special_element(tag, kind, Some(name));
+        for index in (1..self.open_elements.len()).rev() {
+            if self.entry_matches(index, tag, name) {
+                self.truncate_stack(index);
+                return;
+            }
+            let entry = &self.open_elements[index];
+            let stops = if closes_special {
+                Scope::Standard.stops_at(entry)
+            } else {
+                entry.special
+            };
+            if stops {
+                return;
+            }
         }
     }
 
@@ -661,64 +997,131 @@ impl TreeBuilder {
         }
     }
 
-    /// Close table-scoped categories in the same order as the recovery
-    /// algorithm, using one reverse traversal of the open-elements stack.
-    fn close_table_through(&mut self, through: ElementKind) {
-        const TABLE_KINDS: [ElementKind; 4] = [
-            ElementKind::Cell,
-            ElementKind::Row,
-            ElementKind::TableBody,
-            ElementKind::Table,
-        ];
-
-        let through_index = match through {
-            ElementKind::Cell => 0,
-            ElementKind::Row => 1,
-            ElementKind::TableBody => 2,
-            ElementKind::Table => 3,
-            _ => return,
-        };
-        let mut remaining = TABLE_KINDS.map(|kind| self.kind_counts[kind.index()]);
-        let mut stage = 0;
-        while stage <= through_index && remaining[stage] == 0 {
-            stage += 1;
-        }
-        if stage > through_index {
+    /// Pop everything above the innermost open element of `kind` ("clear the
+    /// stack back to a table context"). No-op when none is open.
+    fn clear_back_to(&mut self, kind: ElementKind) {
+        if !self.kind_is_open(kind) {
             return;
         }
+        if let Some(index) = self
+            .open_elements
+            .iter()
+            .rposition(|entry| entry.kind == kind)
+        {
+            self.truncate_stack(index + 1);
+        }
+    }
 
-        let mut truncate_to = self.open_elements.len();
+    /// Pop the current node if it is of `kind`. Returns whether it popped.
+    fn pop_if_current(&mut self, kind: ElementKind) -> bool {
+        let is_current = self.open_elements.len() > 1
+            && self
+                .open_elements
+                .last()
+                .is_some_and(|entry| entry.kind == kind);
+        if is_current {
+            self.pop_open_element();
+        }
+        is_current
+    }
+
+    /// Stack index of the innermost open element of `kind`, unless an element
+    /// that bounds `scope` is reached first.
+    fn find_in_scope(&self, kind: ElementKind, scope: Scope) -> Option<usize> {
+        if !self.kind_is_open(kind) {
+            return None;
+        }
         for index in (1..self.open_elements.len()).rev() {
-            let kind = self.open_elements[index].kind;
-            if let Some(kind_index) = table_kind_index(kind) {
-                remaining[kind_index] -= 1;
+            let entry = &self.open_elements[index];
+            if entry.kind == kind {
+                return Some(index);
             }
-            if kind != TABLE_KINDS[stage] {
-                continue;
-            }
-
-            truncate_to = index;
-            stage += 1;
-            while stage <= through_index && remaining[stage] == 0 {
-                stage += 1;
-            }
-            if stage > through_index {
-                break;
+            if scope.stops_at(entry) {
+                return None;
             }
         }
+        None
+    }
 
-        debug_assert!(stage > through_index);
-        self.truncate_stack(truncate_to);
+    /// Stack index of the innermost open element named `tag`/`name`, unless
+    /// an element that bounds `scope` is reached first.
+    fn find_named_in_scope(&self, tag: Tag, name: &str, scope: Scope) -> Option<usize> {
+        for index in (1..self.open_elements.len()).rev() {
+            if self.entry_matches(index, tag, name) {
+                return Some(index);
+            }
+            if scope.stops_at(&self.open_elements[index]) {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Close the innermost open element of `kind` if it is in `scope`.
+    /// Returns whether an element was closed.
+    fn close_in_scope(&mut self, kind: ElementKind, scope: Scope) -> bool {
+        match self.find_in_scope(kind, scope) {
+            Some(index) => {
+                self.truncate_stack(index);
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// The `li`/`dd`/`dt` start-tag loop: close an open item of `kind` unless
+    /// a special element other than `address`, `div`, or `p` is reached first.
+    fn close_list_item_start(&mut self, kind: ElementKind) {
+        if !self.kind_is_open(kind) {
+            return;
+        }
+        for index in (1..self.open_elements.len()).rev() {
+            let entry = self.open_elements[index];
+            if entry.kind == kind {
+                self.truncate_stack(index);
+                return;
+            }
+            let transparent = entry.tag == Tag::Div
+                || entry.kind == ElementKind::Paragraph
+                || self
+                    .arena
+                    .unknown_tag_name(entry.id)
+                    .is_some_and(|name| name.eq_ignore_ascii_case("address"));
+            if entry.special && !transparent {
+                return;
+            }
+        }
+    }
+
+    /// Whether the current node is a table, table section, or row, where
+    /// non-table content is foster-parented.
+    #[inline]
+    fn current_node_is_table_part(&self) -> bool {
+        self.open_elements.last().is_some_and(|entry| {
+            matches!(
+                entry.kind,
+                ElementKind::Table | ElementKind::TableBody | ElementKind::Row
+            )
+        })
     }
 
     fn adoption_close(&mut self, tag: Tag, name: &str) {
         if !self.kind_is_open(ElementKind::Formatting) {
             return;
         }
-        let Some(index) = (1..self.open_elements.len())
-            .rev()
-            .find(|&index| self.entry_matches(index, tag, name))
-        else {
+        // Table, cell, and caption boundaries act as formatting markers: a
+        // formatting element outside them is not repaired from inside.
+        let mut found = None;
+        for index in (1..self.open_elements.len()).rev() {
+            if self.entry_matches(index, tag, name) {
+                found = Some(index);
+                break;
+            }
+            if Scope::Standard.stops_at(&self.open_elements[index]) {
+                return;
+            }
+        }
+        let Some(index) = found else {
             return;
         };
         // Well-formed formatting closes dominate real-world input. They need
@@ -744,22 +1147,17 @@ impl TreeBuilder {
         self.truncate_stack(index);
 
         for old in reopen {
-            let parent = self.current_parent();
-            let depth = self.arena.get(parent).depth.saturating_add(1);
+            // Like any other insertion, a clone made while a table part is the
+            // current node is foster-parented.
+            let location = if self.current_node_is_table_part() {
+                self.foster_location()
+            } else {
+                InsertionLocation::Append(self.current_parent())
+            };
+            let depth = self.arena.get(location.parent()).depth.saturating_add(1);
             let node = self.arena.clone_element_shallow(old.id, depth);
-            self.arena.append_child_trusted(parent, node);
-            self.register_appended_element(parent, node);
+            self.attach_element(node, location);
             self.push_open_element(node, old.tag, old.kind);
-            self.active_formatting.push(node);
-        }
-    }
-
-    #[inline]
-    fn remove_active_formatting(&mut self, node: NodeId) {
-        if self.active_formatting.last() == Some(&node) {
-            self.active_formatting.pop();
-        } else {
-            self.active_formatting.retain(|&active| active != node);
         }
     }
 
@@ -803,13 +1201,6 @@ impl TreeBuilder {
             let count = &mut self.kind_counts[entry.kind.index()];
             debug_assert!(*count > 0);
             *count -= 1;
-            if entry.kind == ElementKind::Formatting {
-                // Most truncations remove no formatting nodes and touch no
-                // formatting storage. When they do, reverse stack order makes
-                // the well-formed case a sequence of allocation-free Vec pops
-                // while still cleaning malformed non-tail entries.
-                self.remove_active_formatting(entry.id);
-            }
         }
         self.open_elements.truncate(len);
         self.insertion_mode = self
@@ -820,19 +1211,32 @@ impl TreeBuilder {
     }
 
     fn apply_body_implicit_close(&mut self, tag: Tag, kind: ElementKind) {
+        match kind {
+            ElementKind::ListItem | ElementKind::DefinitionItem => {
+                self.close_list_item_start(kind);
+            }
+            _ => {}
+        }
         if self.kind_is_open(ElementKind::Paragraph)
-            && (closes_p_element(tag) || kind == ElementKind::Paragraph)
+            && (closes_p_element(tag)
+                || matches!(
+                    kind,
+                    ElementKind::Paragraph
+                        | ElementKind::ListItem
+                        | ElementKind::DefinitionItem
+                        | ElementKind::Plaintext
+                ))
         {
-            self.close_last_kind(ElementKind::Paragraph);
+            self.close_in_scope(ElementKind::Paragraph, Scope::Button);
         }
         match kind {
-            ElementKind::ListItem => self.close_last_kind(ElementKind::ListItem),
-            ElementKind::DefinitionItem => self.close_last_kind(ElementKind::DefinitionItem),
-            ElementKind::Heading => self.close_last_kind(ElementKind::Heading),
-            ElementKind::Option => self.close_last_kind(ElementKind::Option),
-            ElementKind::OptGroup => {
-                self.close_last_kind(ElementKind::Option);
-                self.close_last_kind(ElementKind::OptGroup);
+            ElementKind::Heading => {
+                self.pop_if_current(ElementKind::Heading);
+            }
+            // In body, `option` and `optgroup` starts only close a current
+            // `option`.
+            ElementKind::Option | ElementKind::OptGroup => {
+                self.pop_if_current(ElementKind::Option);
             }
             _ => {}
         }
@@ -860,22 +1264,43 @@ impl TreeBuilder {
     }
 
     /// Handle text content (already entity-decoded by the tokenizer).
-    fn handle_text(&mut self, content: &str) -> Option<NodeId> {
+    fn handle_text(&mut self, mut content: &str) -> Option<NodeId> {
         if content.is_empty() {
             return None;
         }
+        if self.skip_next_lf {
+            self.skip_next_lf = false;
+            if let Some(rest) = content.strip_prefix('\n') {
+                if rest.is_empty() {
+                    return None;
+                }
+                content = rest;
+            }
+        }
 
-        let in_table_text_mode = matches!(
-            self.insertion_mode,
-            InsertionMode::InTable | InsertionMode::InTableBody | InsertionMode::InRow
-        );
-        if in_table_text_mode {
+        let mut inserted = None;
+        if self.insertion_mode == InsertionMode::InColumnGroup {
+            // Whitespace belongs to the column group; the first other
+            // character closes it and continues with the table rules.
+            let Some(split) = content.bytes().position(|byte| !is_html_whitespace(byte)) else {
+                return self.insert_text(content, false);
+            };
+            if split > 0 {
+                inserted = self.insert_text(&content[..split], false);
+                content = &content[split..];
+            }
+            if !self.pop_if_current(ElementKind::ColGroup) {
+                return self.insert_text(content, false).or(inserted);
+            }
+        }
+
+        if self.current_node_is_table_part() {
             if self.table_text_run_foster {
                 return self.insert_text(content, true);
             }
             if content.bytes().all(is_html_whitespace) {
                 self.pending_table_text.push_str(content);
-                return None;
+                return inserted;
             }
 
             self.table_text_run_foster = true;
@@ -925,6 +1350,7 @@ impl TreeBuilder {
         }
         self.last_text_node = NodeId::NULL;
         self.table_text_run_foster = false;
+        self.skip_next_lf = false;
     }
 
     #[cfg(feature = "encoding")]
@@ -945,13 +1371,8 @@ impl TreeBuilder {
 
         #[cfg(feature = "entity-decode")]
         {
-            let parent = self.current_parent();
-            let parent_is_raw_text = self.arena.get(parent).tag.is_raw_text()
-                || self
-                    .open_elements
-                    .last()
-                    .is_some_and(|entry| entry.kind == ElementKind::Plaintext);
-            if parent_is_raw_text {
+            let parent_tag = self.arena.get(self.current_parent()).tag;
+            if parent_tag.is_raw_text() || parent_tag == Tag::Plaintext {
                 self.handle_text(raw)
             } else {
                 let decoded = fhp_tokenizer::entity::decode_entities(raw);
@@ -1071,11 +1492,32 @@ impl TreeBuilder {
     }
 }
 
+/// Kinds that start a table section, row, cell, caption, or column. They
+/// close an open cell or caption and are ignored outside a table.
 #[inline]
-fn is_table_structure(kind: ElementKind) -> bool {
+fn is_table_section_start(kind: ElementKind) -> bool {
     matches!(
         kind,
-        ElementKind::Table | ElementKind::TableBody | ElementKind::Row | ElementKind::Cell
+        ElementKind::TableBody
+            | ElementKind::Row
+            | ElementKind::Cell
+            | ElementKind::Caption
+            | ElementKind::ColGroup
+            | ElementKind::Column
+    )
+}
+
+/// Table-structure tags that close a `select` inside a table ("in select in
+/// table").
+#[inline]
+fn is_select_in_table_breakout(kind: ElementKind) -> bool {
+    matches!(
+        kind,
+        ElementKind::Table
+            | ElementKind::TableBody
+            | ElementKind::Row
+            | ElementKind::Cell
+            | ElementKind::Caption
     )
 }
 
@@ -1083,17 +1525,6 @@ fn is_table_structure(kind: ElementKind) -> bool {
 fn is_select_breakout_start(tag: Tag, name: &str) -> bool {
     matches!(tag, Tag::Input | Tag::Textarea)
         || (tag == Tag::Unknown && name.eq_ignore_ascii_case("keygen"))
-}
-
-#[inline]
-const fn table_kind_index(kind: ElementKind) -> Option<usize> {
-    match kind {
-        ElementKind::Cell => Some(0),
-        ElementKind::Row => Some(1),
-        ElementKind::TableBody => Some(2),
-        ElementKind::Table => Some(3),
-        _ => None,
-    }
 }
 
 impl fhp_tokenizer::TreeSink for TreeBuilder {
@@ -1109,7 +1540,7 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
 
     fn close_tag(&mut self, tag: Tag, name: &str) {
         if self.error.is_none() {
-            self.handle_close_tag(tag, name);
+            let _ = self.handle_close_tag(tag, name);
         }
     }
 
@@ -1132,9 +1563,9 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
     }
 
     fn cdata(&mut self, content: &str) {
-        // CDATA treated as text.
+        // CDATA content is literal text, exactly like `Token::CData`.
         if self.error.is_none() {
-            self.handle_raw_text(content);
+            self.handle_text(content);
         }
     }
 }
@@ -1584,28 +2015,25 @@ mod tests {
     }
 
     #[test]
-    fn generic_truncation_does_not_accumulate_stale_formatting_entries() {
+    fn generic_truncation_restores_the_stack() {
         let mut builder = TreeBuilder::new();
         for _ in 0..2_048 {
             process(&mut builder, &make_open(Tag::Div));
             process(&mut builder, &make_open(Tag::B));
             process(&mut builder, &make_close(Tag::Div));
-            assert!(builder.active_formatting.is_empty());
+            assert_eq!(builder.open_elements.len(), 1);
             assert_stack_invariants(&builder);
         }
     }
 
     #[test]
-    fn well_formed_formatting_close_is_allocation_free() {
+    fn well_formed_formatting_close_creates_no_nodes() {
         let mut builder = TreeBuilder::new();
-        assert_eq!(builder.active_formatting.capacity(), 0);
-
         process(&mut builder, &make_open(Tag::B));
         let node_count = builder.arena.nodes.len();
         process(&mut builder, &make_close(Tag::B));
 
         assert_eq!(builder.arena.nodes.len(), node_count);
-        assert!(builder.active_formatting.is_empty());
         assert_eq!(builder.open_elements.len(), 1);
         assert_stack_invariants(&builder);
     }
@@ -1628,69 +2056,138 @@ mod tests {
     }
 
     #[test]
-    fn table_scope_close_matches_sequential_recovery_on_malformed_stacks() {
-        const TABLE_KINDS: [ElementKind; 4] = [
-            ElementKind::Cell,
-            ElementKind::Row,
-            ElementKind::TableBody,
-            ElementKind::Table,
-        ];
-        let stacks = [
-            vec![
-                ElementKind::Table,
-                ElementKind::TableBody,
-                ElementKind::Row,
-                ElementKind::Cell,
-            ],
-            vec![
-                ElementKind::TableBody,
-                ElementKind::Cell,
-                ElementKind::TableBody,
-            ],
-            vec![
-                ElementKind::Table,
-                ElementKind::Row,
-                ElementKind::Cell,
-                ElementKind::Row,
-            ],
-            vec![
-                ElementKind::Cell,
-                ElementKind::Table,
-                ElementKind::TableBody,
-                ElementKind::Row,
-            ],
-        ];
-
-        for stack in stacks {
-            for (through_index, through) in TABLE_KINDS.into_iter().enumerate() {
-                let mut expected_len = stack.len() + 1;
-                for expected_kind in &TABLE_KINDS[..=through_index] {
-                    if let Some(index) = (1..expected_len)
-                        .rev()
-                        .find(|&index| stack[index - 1] == *expected_kind)
-                    {
-                        expected_len = index;
-                    }
-                }
-
-                let mut builder = TreeBuilder::new();
-                for kind in &stack {
-                    let node = builder.arena.new_element(Tag::Div, 1);
-                    builder.push_open_element(node, Tag::Div, *kind);
-                }
-                builder.close_table_through(through);
-
-                assert_eq!(builder.open_elements.len(), expected_len);
-                assert_stack_invariants(&builder);
-            }
+    fn caption_and_column_group_modes_restore_from_stack_prefix() {
+        let html = "<table><caption>c<b>d</caption><colgroup><col> <col>x\
+                    <tr><td><table><caption>e</table>f</td></tr></table>";
+        let mut builder = TreeBuilder::new();
+        let mut seen = Vec::new();
+        for token in fhp_tokenizer::tokenize(html) {
+            process(&mut builder, &token);
+            assert_stack_invariants(&builder);
+            seen.push(builder.insertion_mode);
         }
+        assert!(seen.contains(&InsertionMode::InCaption));
+        assert!(seen.contains(&InsertionMode::InColumnGroup));
+        assert_eq!(builder.insertion_mode, InsertionMode::InBody);
+        assert_eq!(builder.open_elements.len(), 1);
+    }
+
+    #[test]
+    fn table_end_tags_never_cross_an_inner_table() {
+        let (arena, root) =
+            parse("<table><tr><td><table></tr></td>a</table>b</td></tr></table>").unwrap();
+        let outer = arena.get(root).first_child;
+        let tbody = arena.get(outer).first_child;
+        let tr = arena.get(tbody).first_child;
+        let td = arena.get(tr).first_child;
+        assert_eq!(arena.get(td).tag, Tag::Td);
+
+        // The stray `</tr>` and `</td>` belong to the inner table's scope and
+        // are ignored; its text is fostered before it, inside the cell.
+        let fostered = arena.get(td).first_child;
+        let inner = arena.get(fostered).next_sibling;
+        let after = arena.get(inner).next_sibling;
+        assert_eq!(arena.text(fostered), "a");
+        assert_eq!(arena.get(inner).tag, Tag::Table);
+        assert!(arena.get(inner).first_child.is_null());
+        assert_eq!(arena.text(after), "b");
+        assert!(arena.get(after).next_sibling.is_null());
+    }
+
+    /// Compact markup outline of the children of `node` (no attributes).
+    fn outline(arena: &Arena, node: NodeId) -> String {
+        let mut out = String::new();
+        let mut child = arena.get(node).first_child;
+        while !child.is_null() {
+            let flags = arena.get(child).flags;
+            if flags.has(NodeFlags::IS_TEXT) {
+                out.push_str(arena.text(child));
+            } else if !flags.has(NodeFlags::IS_COMMENT) && !flags.has(NodeFlags::IS_DOCTYPE) {
+                let tag = arena.get(child).tag;
+                let name = tag
+                    .as_str()
+                    .or_else(|| arena.unknown_tag_name(child))
+                    .unwrap_or("?");
+                out.push('<');
+                out.push_str(name);
+                out.push('>');
+                if !tag.is_void() {
+                    out.push_str(&outline(arena, child));
+                    out.push_str("</");
+                    out.push_str(name);
+                    out.push('>');
+                }
+            }
+            child = arena.get(child).next_sibling;
+        }
+        out
+    }
+
+    fn parse_outline(html: &str) -> String {
+        let (arena, root) = parse(html).unwrap();
+        outline(&arena, root)
+    }
+
+    #[test]
+    fn special_end_tags_close_through_paragraphs_and_list_items() {
+        assert_eq!(parse_outline("<div><p>a</div>b"), "<div><p>a</p></div>b");
+        assert_eq!(parse_outline("<ul><li>a</ul>b"), "<ul><li>a</li></ul>b");
+        assert_eq!(
+            parse_outline("<button><p>a</button>b"),
+            "<button><p>a</p></button>b"
+        );
+    }
+
+    #[test]
+    fn ordinary_end_tags_stop_at_special_elements() {
+        assert_eq!(
+            parse_outline("<div><span><p>a</span>b</div>"),
+            "<div><span><p>ab</p></span></div>"
+        );
+    }
+
+    #[test]
+    fn paragraph_end_tag_in_a_table_fosters_the_empty_paragraph() {
+        assert_eq!(
+            parse_outline("<table></p><tr><td>x</td></tr></table>"),
+            "<p></p><table><tbody><tr><td>x</td></tr></tbody></table>"
+        );
+    }
+
+    #[test]
+    fn column_group_keeps_leading_whitespace_and_fosters_other_text() {
+        assert_eq!(
+            parse_outline("<table><colgroup>  x <col></table>"),
+            "x <table><colgroup>  </colgroup><colgroup><col></colgroup></table>"
+        );
+    }
+
+    #[cfg(feature = "entity-decode")]
+    #[test]
+    fn hidden_input_type_is_compared_after_entity_decoding() {
+        assert_eq!(
+            parse_outline("<table><input type=&#104;idden><tr><td>x</td></tr></table>"),
+            "<table><input><tbody><tr><td>x</td></tr></tbody></table>"
+        );
+    }
+
+    #[test]
+    fn select_ignores_style_and_body_optgroup_only_closes_an_option() {
+        assert_eq!(
+            parse_outline("<select><style>x</style></select>"),
+            "<select>x</select>"
+        );
+        assert_eq!(
+            parse_outline("<optgroup>a<optgroup>b"),
+            "<optgroup>a<optgroup>b</optgroup></optgroup>"
+        );
     }
 
     #[test]
     fn plaintext_keeps_markup_literal() {
         let (arena, root) = parse("<plaintext><b>x&amp;").unwrap();
         let plaintext = arena.get(root).first_child;
-        assert_eq!(arena.unknown_tag_name(plaintext), Some("plaintext"));
+        assert_eq!(arena.get(plaintext).tag, Tag::Plaintext);
         assert_eq!(arena.text(arena.get(plaintext).first_child), "<b>x&amp;");
     }
 

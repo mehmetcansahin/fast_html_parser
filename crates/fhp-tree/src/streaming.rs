@@ -7,7 +7,7 @@
 //! is complete.
 
 use encoding_rs::Encoding;
-use fhp_core::error::{EncodingError, ParseError};
+use fhp_core::error::ParseError;
 use fhp_tokenizer::streaming::StreamTokenizer;
 use fhp_tokenizer::token::Token;
 
@@ -106,18 +106,8 @@ impl core::fmt::Debug for EarlyStopOutcome {
 /// Stateful decoder shared by both streaming parser variants.
 struct DecoderState {
     decoder: encoding_rs::Decoder,
-    encoding: &'static Encoding,
-    raw_offset: usize,
     decoded_size: usize,
     max_input_size: usize,
-}
-
-/// Strictly decoded text up to (but not including) the first malformed
-/// sequence. Early-stop parsing gets a chance to observe a match in `text`
-/// before the trailing decoding error is surfaced.
-struct DecodedPrefix {
-    text: String,
-    error: Option<EncodingError>,
 }
 
 impl DecoderState {
@@ -127,8 +117,6 @@ impl DecoderState {
         (
             Self {
                 decoder: encoding.new_decoder_without_bom_handling(),
-                encoding,
-                raw_offset: 0,
                 decoded_size: 0,
                 max_input_size,
             },
@@ -136,43 +124,9 @@ impl DecoderState {
         )
     }
 
+    /// Decode `bytes` and commit the output to the decoded-size accounting.
     fn decode(&mut self, bytes: &[u8], last: bool) -> Result<String, HtmlError> {
-        let max_len = self
-            .decoder
-            .max_utf8_buffer_length(bytes.len())
-            .unwrap_or_else(|| bytes.len().saturating_mul(4).saturating_add(4));
-        let mut output = String::with_capacity(max_len);
-        let mut pos = 0;
-        let mut malformed_offset = None;
-
-        loop {
-            let (result, read, had_errors) =
-                self.decoder
-                    .decode_to_string(&bytes[pos..], &mut output, last);
-            if had_errors && malformed_offset.is_none() {
-                malformed_offset = Some(self.raw_offset.saturating_add(pos));
-            }
-            pos += read;
-            match result {
-                encoding_rs::CoderResult::InputEmpty => break,
-                encoding_rs::CoderResult::OutputFull => {
-                    let additional = self
-                        .decoder
-                        .max_utf8_buffer_length(bytes.len().saturating_sub(pos))
-                        .unwrap_or(16);
-                    output.reserve(additional.max(1));
-                }
-            }
-        }
-
-        self.raw_offset = self.raw_offset.saturating_add(bytes.len());
-        if let Some(offset) = malformed_offset {
-            return Err(HtmlError::Encoding(EncodingError::MalformedInput {
-                encoding: self.encoding.name(),
-                offset,
-            }));
-        }
-
+        let output = self.decode_lossy(bytes, last);
         let decoded_size = self.decoded_size.saturating_add(output.len());
         if decoded_size > self.max_input_size {
             return Err(HtmlError::InputTooLarge {
@@ -184,52 +138,30 @@ impl DecoderState {
         Ok(output)
     }
 
-    /// Decode without replacement, retaining valid output before the first
-    /// malformed sequence. Unlike [`Self::decode`], decoded-size accounting is
-    /// committed by the caller after it has checked for an early match.
-    fn decode_prefix(&mut self, bytes: &[u8], last: bool) -> DecodedPrefix {
+    /// Decode `bytes`, replacing malformed sequences with U+FFFD. Unlike
+    /// [`Self::decode`], decoded-size accounting is committed by the caller
+    /// after it has checked for an early match.
+    fn decode_lossy(&mut self, bytes: &[u8], last: bool) -> String {
         let max_len = self
             .decoder
-            .max_utf8_buffer_length_without_replacement(bytes.len())
+            .max_utf8_buffer_length(bytes.len())
             .unwrap_or_else(|| bytes.len().saturating_mul(4).saturating_add(4));
         let mut output = String::with_capacity(max_len);
         let mut pos = 0;
 
         loop {
-            let (result, read) =
+            let (result, read, _had_errors) =
                 self.decoder
-                    .decode_to_string_without_replacement(&bytes[pos..], &mut output, last);
+                    .decode_to_string(&bytes[pos..], &mut output, last);
             pos += read;
             match result {
-                encoding_rs::DecoderResult::InputEmpty => {
-                    self.raw_offset = self.raw_offset.saturating_add(bytes.len());
-                    return DecodedPrefix {
-                        text: output,
-                        error: None,
-                    };
-                }
-                encoding_rs::DecoderResult::OutputFull => {
+                encoding_rs::CoderResult::InputEmpty => return output,
+                encoding_rs::CoderResult::OutputFull => {
                     let additional = self
                         .decoder
-                        .max_utf8_buffer_length_without_replacement(bytes.len().saturating_sub(pos))
+                        .max_utf8_buffer_length(bytes.len().saturating_sub(pos))
                         .unwrap_or(16);
                     output.reserve(additional.max(1));
-                }
-                encoding_rs::DecoderResult::Malformed(malformed_len, trailing_len) => {
-                    let malformed_before =
-                        usize::from(malformed_len).saturating_add(usize::from(trailing_len));
-                    let offset = self
-                        .raw_offset
-                        .saturating_add(pos)
-                        .saturating_sub(malformed_before);
-                    self.raw_offset = self.raw_offset.saturating_add(pos);
-                    return DecodedPrefix {
-                        text: output,
-                        error: Some(EncodingError::MalformedInput {
-                            encoding: self.encoding.name(),
-                            offset,
-                        }),
-                    };
                 }
             }
         }
@@ -255,7 +187,7 @@ impl StreamParser {
 
     /// Create a parser with a caller-provided raw and decoded input limit.
     ///
-    /// Limits above `u32::MAX` are capped because arena offsets use `u32`.
+    /// Limits above 2 GiB are capped because arena offsets use `u32`.
     pub fn with_max_input_size(max_input_size: usize) -> Self {
         let max_input_size = effective_max(max_input_size);
         Self {
@@ -477,7 +409,7 @@ impl EarlyStopParser {
         match result {
             Ok(EarlyStopProgress::Matched) => {
                 // The unconsumed suffix is outside the early-stop result. In
-                // particular, it cannot trigger raw-size or decoding errors.
+                // particular, it cannot trigger raw-size errors.
                 self.seen_input_size = self.seen_input_size.saturating_add(consumed);
                 Ok(EarlyStopProgress::Matched)
             }
@@ -517,18 +449,17 @@ impl EarlyStopParser {
 
             if self.decoder.is_none() {
                 self.process_prescan_ascii()?;
-                if self.found.is_some() {
-                    // A replacement encoding reports malformed input from byte
-                    // zero, so even an ASCII node cannot be returned before the
-                    // consumed prefix has been validated by the selected decoder.
-                    // Do not decode bytes after the match: early-stop intentionally
-                    // leaves that suffix unobserved.
-                    self.validate_prescan_match()?;
+                if self.found.is_some() && self.prescan_prefix_survives_decoding() {
+                    // Do not decode bytes after the match: early-stop
+                    // intentionally leaves that suffix unobserved.
                     return Ok(EarlyStopProgress::Matched);
                 }
-                if self.initial_buf.len() < PRESCAN_LIMIT {
+                if self.found.is_none() && self.initial_buf.len() < PRESCAN_LIMIT {
                     return Ok(EarlyStopProgress::NeedMore);
                 }
+                // The prescan window is full, or the encoding selected by the
+                // matched prefix does not decode it to the processed ASCII; the
+                // flush then discards that eager work and decodes from the start.
                 self.flush_initial_buf()?;
                 if self.found.is_some() {
                     return Ok(EarlyStopProgress::Matched);
@@ -549,7 +480,9 @@ impl EarlyStopParser {
 
     /// Process the newly available ASCII prefix before encoding is known.
     /// Every encoding selectable by an in-band HTML declaration preserves
-    /// these bytes; ESC is excluded because it can change stateful decoders.
+    /// these bytes, except the replacement encoding (which decodes the whole
+    /// input to one U+FFFD); ESC is excluded because it can change stateful
+    /// decoders.
     fn process_prescan_ascii(&mut self) -> Result<(), HtmlError> {
         while let Some(&byte) = self.initial_buf.get(self.prescan_processed_ascii) {
             if !byte.is_ascii() || byte == 0x1B {
@@ -570,35 +503,49 @@ impl EarlyStopParser {
         Ok(())
     }
 
-    fn validate_prescan_match(&self) -> Result<(), HtmlError> {
+    /// Whether the encoding selected by the consumed prefix decodes it to the
+    /// ASCII text already processed. Only the replacement encoding does not.
+    fn prescan_prefix_survives_decoding(&self) -> bool {
         let consumed = &self.initial_buf[..self.prescan_processed_ascii];
         let (mut decoder, bom_len) = DecoderState::detect(consumed, self.max_input_size);
-        if self.prescan_processed_ascii > bom_len {
-            let primed = decoder.decode(&consumed[bom_len..], false)?;
-            debug_assert_eq!(primed.as_bytes(), &consumed[bom_len..]);
-        }
-        Ok(())
+        let ascii = &consumed[bom_len..];
+        decoder.decode_lossy(ascii, false).as_bytes() == ascii
     }
 
     fn flush_initial_buf(&mut self) -> Result<(), HtmlError> {
         let buf = core::mem::take(&mut self.initial_buf);
-        let processed = self.prescan_processed_ascii;
         let (mut decoder, bom_len) = DecoderState::detect(&buf, self.max_input_size);
+        let mut processed = self.prescan_processed_ascii.max(bom_len);
 
         if processed > bom_len {
-            let primed = decoder.decode(&buf[bom_len..processed], false)?;
-            debug_assert_eq!(primed.as_bytes(), &buf[bom_len..processed]);
+            let ascii = &buf[bom_len..processed];
+            if decoder.decode(ascii, false)?.as_bytes() != ascii {
+                // The replacement encoding does not preserve the eagerly
+                // processed ASCII: rebuild from the start of the input.
+                self.discard_prescan_work();
+                (decoder, _) = DecoderState::detect(&buf, self.max_input_size);
+                processed = bom_len;
+            }
         }
         self.decoder = Some(decoder);
-        self.decode_segments_and_check(&buf[processed.max(bom_len)..], false)
+        self.decode_segments_and_check(&buf[processed..], false)
+    }
+
+    /// Reset the tokenizer, tree, and match state built from the eagerly
+    /// processed ASCII prefix.
+    fn discard_prescan_work(&mut self) {
+        self.tokenizer = StreamTokenizer::new();
+        self.builder = TreeBuilder::new();
+        self.prescan_processed_ascii = 0;
+        self.pending_match = None;
+        self.found = None;
     }
 
     /// Decode one raw syntactic segment at a time. `>` is safe as a decoder
     /// input boundary even when it is part of a multibyte/stateful sequence;
     /// the decoder buffers incomplete state. This lets ordinary HTML tokens
-    /// become observable before errors from later raw input are surfaced. A
-    /// UTF-16 decoder may still need a following byte to complete the `>` code
-    /// unit, so strict prefix decoding remains the final ordering safeguard.
+    /// become observable, and an early match win, before a size error from
+    /// later raw input is surfaced.
     fn decode_segments_and_check(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
         let mut start = 0;
         while let Some(relative) = memchr::memchr(b'>', &bytes[start..]) {
@@ -619,24 +566,20 @@ impl EarlyStopParser {
     }
 
     fn decode_and_check(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
-        let decoded = self
+        let decoder = self
             .decoder
             .as_mut()
-            .expect("decoder initialized before processing")
-            .decode_prefix(bytes, last);
-        let decoded_before = self
-            .decoder
-            .as_ref()
-            .expect("decoder remains initialized")
-            .decoded_size;
-        let decoded_size = decoded_before.saturating_add(decoded.text.len());
+            .expect("decoder initialized before processing");
+        let text = decoder.decode_lossy(bytes, last);
+        let decoded_before = decoder.decoded_size;
+        let decoded_size = decoded_before.saturating_add(text.len());
         let remaining = self.max_input_size.saturating_sub(decoded_before);
-        let mut process_len = decoded.text.len().min(remaining);
-        while !decoded.text.is_char_boundary(process_len) {
+        let mut process_len = text.len().min(remaining);
+        while !text.is_char_boundary(process_len) {
             process_len -= 1;
         }
 
-        self.process_and_check(&decoded.text[..process_len])?;
+        self.process_and_check(&text[..process_len])?;
         if self.found.is_some() {
             return Ok(());
         }
@@ -651,9 +594,6 @@ impl EarlyStopParser {
             .as_mut()
             .expect("decoder remains initialized")
             .decoded_size = decoded_size;
-        if let Some(error) = decoded.error {
-            return Err(HtmlError::Encoding(error));
-        }
         Ok(())
     }
 
@@ -866,7 +806,7 @@ pub fn parse_stream_with_limit<'a>(
 }
 
 fn effective_max(max_input_size: usize) -> usize {
-    max_input_size.min(usize::try_from(u32::MAX).unwrap_or(usize::MAX))
+    max_input_size.min(crate::MAX_REPRESENTABLE_INPUT_SIZE)
 }
 
 fn explicit_bom_length(input: &[u8]) -> Option<usize> {
@@ -970,7 +910,7 @@ mod tests {
     }
 
     #[test]
-    fn early_stop_replacement_labels_error_before_ascii_match() {
+    fn replacement_labels_decode_to_one_replacement_character() {
         const REPLACEMENT_LABELS: [&str; 6] = [
             "csiso2022kr",
             "hz-gb-2312",
@@ -980,57 +920,51 @@ mod tests {
             "replacement",
         ];
 
-        fn assert_replacement_error(result: Result<EarlyStopProgress, HtmlError>, case: &str) {
-            match result {
-                Err(HtmlError::Encoding(EncodingError::MalformedInput { encoding, offset })) => {
-                    assert_eq!(encoding, "replacement", "case={case}");
-                    assert_eq!(offset, 0, "case={case}");
+        fn assert_replacement_document(parser: EarlyStopParser, case: &str) {
+            match parser.finish() {
+                Ok(EarlyStopOutcome::Done(document)) => {
+                    assert_eq!(document.root().text_content(), "\u{FFFD}", "case={case}");
                 }
-                other => panic!("expected replacement decoding error for {case}, got {other:?}"),
+                other => panic!("expected an unmatched U+FFFD document for {case}, got {other:?}"),
             }
         }
 
         for label in REPLACEMENT_LABELS {
             let input = format!("<meta charset={label}><p id=hit>x</p>");
-            for after_element in [false, true] {
-                let mode = if after_element {
-                    "after-element"
-                } else {
-                    "on-create"
-                };
+            let one_shot = crate::parse_bytes(input.as_bytes()).unwrap();
+            assert_eq!(one_shot.root().text_content(), "\u{FFFD}", "label={label}");
+            let streamed = parse_stream(input.as_bytes().chunks(1)).unwrap();
+            assert_eq!(streamed.root().text_content(), "\u{FFFD}", "label={label}");
+
+            for mode in ["on-create", "after-element", "never"] {
                 let case = format!("label={label}, mode={mode}");
-
-                let mut whole = if after_element {
-                    EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
-                } else {
-                    EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
-                };
-                assert_replacement_error(whole.feed(input.as_bytes()), &format!("{case}, whole"));
-
-                let mut bytewise = if after_element {
-                    EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
-                } else {
-                    EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
-                };
-                let mut error = None;
-                for byte in input.as_bytes() {
-                    match bytewise.feed(core::slice::from_ref(byte)) {
-                        Ok(EarlyStopProgress::NeedMore) => {}
-                        Ok(EarlyStopProgress::Matched) => {
-                            panic!("matched before decoding replacement input: {case}, bytewise")
-                        }
-                        Err(found) => {
-                            error = Some(found);
-                            break;
-                        }
+                let parser = || match mode {
+                    "on-create" => {
+                        EarlyStopParser::stop_on_create(|node| node.attr("id") == Some("hit"))
                     }
-                }
-                assert_replacement_error(
-                    Err(error.unwrap_or_else(|| {
-                        panic!("missing replacement decoding error: {case}, bytewise")
-                    })),
-                    &format!("{case}, bytewise"),
+                    "after-element" => {
+                        EarlyStopParser::stop_after_element(|node| node.attr("id") == Some("hit"))
+                    }
+                    _ => EarlyStopParser::stop_on_create(|_| false),
+                };
+
+                let mut whole = parser();
+                assert_eq!(
+                    whole.feed(input.as_bytes()).unwrap(),
+                    EarlyStopProgress::NeedMore,
+                    "{case}, whole"
                 );
+                assert_replacement_document(whole, &format!("{case}, whole"));
+
+                let mut bytewise = parser();
+                for byte in input.as_bytes() {
+                    assert_eq!(
+                        bytewise.feed(core::slice::from_ref(byte)).unwrap(),
+                        EarlyStopProgress::NeedMore,
+                        "{case}, bytewise"
+                    );
+                }
+                assert_replacement_document(bytewise, &format!("{case}, bytewise"));
             }
         }
     }

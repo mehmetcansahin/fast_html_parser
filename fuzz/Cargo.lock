@@ -49,6 +49,7 @@ dependencies = [
 name = "fhp-core"
 version = "0.2.0"
 dependencies = [
+ "memchr",
  "phf",
  "thiserror",
 ]

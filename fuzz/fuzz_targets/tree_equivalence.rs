@@ -12,7 +12,6 @@ enum Outcome {
 fn error_kind(error: &fhp_tree::HtmlError) -> &'static str {
     match error {
         fhp_tree::HtmlError::InputTooLarge { .. } => "input-too-large",
-        fhp_tree::HtmlError::Encoding(_) => "encoding",
         fhp_tree::HtmlError::Parse(_) => "parse",
         fhp_tree::HtmlError::ParserTerminated => "terminated",
         fhp_tree::HtmlError::Io(_) => "io",
@@ -26,15 +25,15 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let chunk_size = usize::from(data[0]).max(1);
-    let html = String::from_utf8_lossy(&data[1..]).into_owned();
-    let expected = match fhp_tree::parse(&html) {
+    let html = &data[1..];
+    let expected = match fhp_tree::parse_bytes(html) {
         Ok(document) => Outcome::Document(document.to_html()),
         Err(error) => Outcome::Error(error_kind(&error)),
     };
 
     let mut parser = StreamParser::new();
     let mut feed_error = None;
-    for chunk in html.as_bytes().chunks(chunk_size) {
+    for chunk in html.chunks(chunk_size) {
         if let Err(error) = parser.feed(chunk) {
             feed_error = Some(error);
             break;

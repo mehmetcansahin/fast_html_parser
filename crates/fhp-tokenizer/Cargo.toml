@@ -28,3 +28,7 @@ criterion = { workspace = true }
 [[bench]]
 name = "tokenizer_bench"
 harness = false
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]

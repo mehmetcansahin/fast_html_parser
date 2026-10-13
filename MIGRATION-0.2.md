@@ -1,8 +1,9 @@
 # Migrating to fast-html-parser 0.2
 
 Version 0.2 is intentionally breaking. It makes streaming failures explicit,
-returns owned early-stop results, removes the ineffective fragment toggle, and
-tightens parser and selector limits.
+returns owned early-stop results, removes the ineffective fragment toggle,
+decodes malformed input lossily, gates XPath behind its feature, and tightens
+parser and selector limits.
 
 ## Streaming feed is fallible
 
@@ -34,7 +35,7 @@ let document = parse_stream_with_limit(bytes.chunks(4), 8 * 1024 * 1024)?;
 ```
 
 The configured limit applies to both raw and decoded bytes and is capped at
-`u32::MAX`. An encoding, nesting, or size failure makes that parser terminal.
+2 GiB. A nesting or size failure makes that parser terminal.
 The first operation returns the specific error; later `feed`/`finish` calls
 return `HtmlError::ParserTerminated`. Iterator, Tokio, and async-std wrappers
 stop reading their source at the first failure.
@@ -42,6 +43,39 @@ stop reading their source at the first failure.
 The first chunk no longer needs to be small: at most 1 KiB is copied for the
 encoding prescan, and the remainder is processed during the same call in
 64 KiB internal blocks.
+
+## Decoding replaces malformed input
+
+Byte and streaming entry points no longer fail on malformed byte sequences.
+Like browsers, they replace each malformed sequence with U+FFFD and continue.
+`HtmlError::Encoding` and `fhp_core::error::EncodingError` are removed; delete
+match arms for them. `encoding::decode` and `encoding::decode_or_detect` return
+the decoded `String` (and the detected encoding) directly:
+
+```rust
+use fast_html_parser::encoding::{Encoding, decode, decode_or_detect};
+
+let text = decode(b"caf\xe9", Encoding::for_label(b"utf-8").unwrap());
+assert_eq!(text, "caf\u{FFFD}");
+
+let (text, encoding) = decode_or_detect(b"<meta charset=windows-1252>caf\xe9");
+assert_eq!(encoding.name(), "windows-1252");
+assert!(text.ends_with("caf\u{e9}"));
+```
+
+`fast_html_parser::encoding` now re-exports the whole `fhp-encoding` crate
+(including `DecodingReader`), and `fast_html_parser::selector` re-exports the
+whole `fhp-selector` crate when `css-selector` is enabled.
+
+## XPath requires the `xpath` feature
+
+In 0.1, the `css-selector` feature also compiled the XPath engine. XPath
+methods (`xpath`, `XPathResult`) now exist only with the `xpath` feature:
+
+```toml
+[dependencies]
+fast-html-parser = { version = "0.2.0", features = ["xpath"] }
+```
 
 ## Early stop has two explicit modes
 
@@ -102,8 +136,8 @@ outside the 0.2 scope.
 ## Errors are extensible and tree building is fallible
 
 `HtmlError` now includes `HtmlError::Parse(ParseError)`. `HtmlError`,
-`ParseError`, `EncodingError`, and selector error enums are non-exhaustive;
-downstream matches must include a wildcard arm:
+`ParseError`, and selector error enums are non-exhaustive; downstream matches
+must include a wildcard arm:
 
 ```rust
 use fast_html_parser::{HtmlError, HtmlParser};
@@ -130,6 +164,17 @@ For `TreeSink` implementors, the `self_closing` argument now means only that a
 slash appeared in the source start tag. Determine HTML voidness with
 `Tag::is_void()`. A slash does not close a non-void element.
 
+`TreeBuilder::set_source` and `set_source_ptr` are no longer public. Feed
+tokens or sink events directly; text and attribute values are copied into the
+arena.
+
+## `Tag` has more variants
+
+`Tag` gained `Xmp`, `Noembed`, `Noframes`, and `Plaintext`. Exhaustive `match`
+expressions over `Tag` need arms for them, and code that recognized these
+elements through `Tag::Unknown` plus the custom name must match the new
+variants instead.
+
 ## SIMD feature selection
 
 `simd` is a real default feature. With defaults enabled, the scanner performs
@@ -149,8 +194,11 @@ features disabled restores runtime-dispatched acceleration.
   values are decoded;
 - named entities use the complete vendored WHATWG table and distinguish text
   from attribute legacy-semicolon rules;
-- non-void `/>`, optional end tags, table repair, formatting repair, `select`,
-  and `plaintext` follow the curated 0.2 compatibility contract;
+- non-void `/>`, optional end tags, table repair, formatting end-tag repair,
+  `select`, and `plaintext` follow the curated 0.2 compatibility contract;
+  formatting elements closed implicitly are not reconstructed in later blocks;
+- a doctype ends at its first `>`, even inside quotes, and `<?…>`, unknown
+  `<!…>` declarations, and `</` followed by a non-letter become comments;
 - selectors now have explicit complexity limits and return
   `SelectorError::Invalid` when a limit is exceeded; and
 - XPath preserves literal custom tag tests, so `//my-widget` behaves like the

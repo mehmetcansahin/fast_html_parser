@@ -81,7 +81,7 @@ use fhp_tree::node::{NodeFlags, NodeId};
 use fhp_tree::traverse::DepthFirst;
 use fhp_tree::{Document, NodeRef};
 
-use matcher::{select_all_list, select_first_list};
+use matcher::{select_all_list, select_all_list_roots, select_first_list};
 use parser::parse_selector;
 use space::{contains_html_space_token, split_html_space};
 #[cfg(feature = "xpath")]
@@ -204,35 +204,6 @@ fn parse_selector_cached(css: &str) -> Result<Arc<ast::SelectorList>, SelectorEr
     })
 }
 
-/// Merge results from multiple roots, deduplicating by NodeId index.
-///
-/// DFS results are already in document order (ascending NodeId index), so
-/// we merge sorted lists instead of using a HashSet. O(n) vs O(n log n).
-fn merge_dedup_results(
-    _arena: &fhp_tree::arena::Arena,
-    roots: &[NodeId],
-    mut query: impl FnMut(NodeId) -> Vec<NodeId>,
-) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    let mut max_seen = u32::MAX; // tracks highest NodeId index seen
-    for &root in roots {
-        for id in query(root) {
-            let idx = id.index() as u32;
-            if results.is_empty() || idx > max_seen {
-                max_seen = idx;
-                results.push(id);
-            } else if idx != max_seen {
-                // Out-of-order (different subtree) — insert if not duplicate.
-                // For typical DFS, this branch is rare.
-                if !results.contains(&id) {
-                    results.push(id);
-                }
-            }
-        }
-    }
-    results
-}
-
 /// A collection of matched nodes from a selector query.
 ///
 /// Provides iteration, text extraction, attribute access, and
@@ -296,15 +267,7 @@ impl<'a> Selection<'a> {
     /// Each matched node is used as a subtree root, and results are
     /// deduplicated in document order.
     pub fn select_compiled(&self, sel: &CompiledSelector) -> Result<Selection<'a>, SelectorError> {
-        let list = &sel.list;
-        if self.nodes.len() == 1 {
-            let results = select_all_list(self.doc.arena(), self.nodes[0], list);
-            return Ok(Selection::new(self.doc, results));
-        }
-        let results = merge_dedup_results(self.doc.arena(), &self.nodes, |root| {
-            select_all_list(self.doc.arena(), root, list)
-        });
-        Ok(Selection::new(self.doc, results))
+        Ok(Selection::new(self.doc, self.select_within(&sel.list)))
     }
 
     /// Sub-select: run a CSS selector within the matched nodes.
@@ -313,15 +276,17 @@ impl<'a> Selection<'a> {
     /// deduplicated in document order.
     pub fn select(&self, css: &str) -> Result<Selection<'a>, SelectorError> {
         let list = parse_selector_cached(css)?;
-        if self.nodes.len() == 1 {
-            // Single root — DFS produces document-order results, no duplicates possible.
-            let results = select_all_list(self.doc.arena(), self.nodes[0], &list);
-            return Ok(Selection::new(self.doc, results));
+        Ok(Selection::new(self.doc, self.select_within(&list)))
+    }
+
+    /// Matches of `list` within the subtrees of the matched nodes.
+    fn select_within(&self, list: &ast::SelectorList) -> Vec<NodeId> {
+        let arena = self.doc.arena();
+        match self.nodes.as_slice() {
+            // Single root: the DFS is already in document order without duplicates.
+            [root] => select_all_list(arena, *root, list),
+            roots => select_all_list_roots(arena, roots, list),
         }
-        let results = merge_dedup_results(self.doc.arena(), &self.nodes, |root| {
-            select_all_list(self.doc.arena(), root, &list)
-        });
-        Ok(Selection::new(self.doc, results))
     }
 
     /// Evaluate an XPath expression within the matched nodes.
@@ -340,23 +305,38 @@ impl<'a> Selection<'a> {
     pub fn xpath(&self, expr: &str) -> Result<XPathResult, XPathError> {
         let parsed = xpath::parser::parse_xpath(expr)?;
 
-        if matches!(parsed, XPathExpr::TextExtract(_)) {
-            let mut text_nodes = Vec::new();
-            let mut seen = std::collections::HashSet::new();
-            for &node_id in &self.nodes {
-                for text_node in
-                    xpath::eval::evaluate_text_nodes(&parsed, self.doc.arena(), node_id)
-                        .unwrap_or_default()
-                {
-                    if seen.insert(text_node) {
-                        text_nodes.push(text_node);
+        if let XPathExpr::TextExtract(inner) = &parsed {
+            let arena = self.doc.arena();
+            let mut candidates = Vec::new();
+            match inner.as_ref() {
+                // Resolve positions once per parent across all roots instead of
+                // rescanning each root's siblings.
+                XPathExpr::PositionPredicate { tag, pos } if self.nodes.len() > 1 => {
+                    for node in xpath::eval::find_descendants_by_tag_at_position_for_roots(
+                        arena,
+                        &self.nodes,
+                        tag,
+                        *pos,
+                    ) {
+                        xpath::eval::collect_direct_text_children(arena, node, &mut candidates);
+                    }
+                }
+                _ => {
+                    for &node_id in &self.nodes {
+                        candidates.extend(
+                            xpath::eval::evaluate_text_nodes(&parsed, arena, node_id)
+                                .unwrap_or_default(),
+                        );
                     }
                 }
             }
+
+            let mut seen = std::collections::HashSet::new();
             return Ok(XPathResult::Strings(
-                text_nodes
+                candidates
                     .into_iter()
-                    .map(|id| self.doc.arena().text(id).to_owned())
+                    .filter(|&id| seen.insert(id))
+                    .map(|id| arena.text(id).to_owned())
                     .collect(),
             ));
         }

@@ -1,37 +1,33 @@
 //! Structural character indexer for HTML input.
 //!
-//! Scans input in 64-byte blocks using SIMD dispatch, producing per-delimiter
-//! u64 bitmasks. Quote-aware masking (prefix XOR) ensures that delimiters
-//! inside quoted attribute values are not treated as structural.
+//! Scans input in 64-byte blocks using SIMD dispatch, producing u64 bitmasks
+//! for the four delimiters the extraction stage dispatches on: `<`, `>`, `"`
+//! and `'`. The index is context-free: delimiters inside quoted attribute
+//! values, comments, or raw text are indexed too, and the scalar extraction
+//! stage decides which of them are structural.
 //!
-//! This is stage 1 of the two-stage tokenizer pipeline (see crate docs).
+//! This is stage 1 (SIMD delimiter index) of the two-stage tokenizer
+//! pipeline (see crate docs).
 
 use fhp_simd::dispatch::{SimdOps, ops};
 
 /// Size of each processing block in bytes.
 const BLOCK_SIZE: usize = 64;
 
-/// Per-block bitmasks for each HTML delimiter type.
+/// Per-block bitmasks for each delimiter the extraction stage dispatches on.
 ///
 /// Bit `i` of a mask is set if the byte at position `i` within the block
-/// matches that delimiter. After quote-aware masking, non-structural
-/// positions (inside quoted strings) are cleared from the relevant masks.
+/// matches that delimiter.
 #[derive(Clone, Debug, Default)]
 pub struct BlockBitmaps {
     /// `<` positions.
     pub lt: u64,
     /// `>` positions.
     pub gt: u64,
-    /// `&` positions.
-    pub amp: u64,
     /// `"` positions.
     pub quot: u64,
     /// `'` positions.
     pub apos: u64,
-    /// `=` positions.
-    pub eq: u64,
-    /// `/` positions.
-    pub slash: u64,
 }
 
 /// Result of structural indexing: a sequence of [`BlockBitmaps`] covering
@@ -84,7 +80,7 @@ impl StructuralIndex {
 
     /// OR of all delimiter masks for a block.
     fn combined_mask(block: &BlockBitmaps) -> u64 {
-        block.lt | block.gt | block.amp | block.quot | block.apos | block.eq | block.slash
+        block.lt | block.gt | block.quot | block.apos
     }
 }
 
@@ -139,28 +135,23 @@ impl<'a> Iterator for DelimiterIter<'a> {
 /// Determine which delimiter byte is at bit position `bit` within `block`.
 #[inline]
 fn determine_byte(block: &BlockBitmaps, bit: usize) -> u8 {
-    if (block.lt >> bit) & 1 == 1 {
+    let mask = 1u64 << bit;
+    if block.lt & mask != 0 {
         b'<'
-    } else if (block.gt >> bit) & 1 == 1 {
+    } else if block.gt & mask != 0 {
         b'>'
-    } else if (block.amp >> bit) & 1 == 1 {
-        b'&'
-    } else if (block.quot >> bit) & 1 == 1 {
+    } else if block.quot & mask != 0 {
         b'"'
-    } else if (block.apos >> bit) & 1 == 1 {
-        b'\''
-    } else if (block.eq >> bit) & 1 == 1 {
-        b'='
     } else {
-        b'/'
+        b'\''
     }
 }
 
 /// SIMD-powered structural character indexer.
 ///
-/// Scans input in 64-byte blocks, producing bitmasks for each delimiter
-/// type. Quote-aware masking ensures delimiters inside `"..."` or `'...'`
-/// are not flagged as structural.
+/// Scans input in 64-byte blocks, producing one bitmask per delimiter
+/// (`<`, `>`, `"`, `'`). Every occurrence is indexed; the extraction stage
+/// decides which positions are structural.
 ///
 /// # Example
 ///
@@ -185,33 +176,22 @@ impl StructuralIndexer {
 
     /// Scan `input` and produce a [`StructuralIndex`].
     ///
-    /// The input is processed in 64-byte blocks. For each block, a
-    /// [`BlockBitmaps`] is produced with bitmasks for every HTML delimiter.
-    /// Quote-aware masking is then applied to clear non-structural positions.
+    /// The input is processed in 64-byte blocks. Each block's
+    /// [`BlockBitmaps`] comes from a single SIMD `compute_all_masks` pass.
     pub fn index(&self, input: &[u8]) -> StructuralIndex {
         let block_count = input.len().div_ceil(BLOCK_SIZE);
         let mut bitmaps = Vec::with_capacity(block_count);
+        let compute = self.dispatch.compute_all_masks;
 
         for chunk in input.chunks(BLOCK_SIZE) {
             // SAFETY: dispatch function pointers are initialized from backends
             // that match the detected CPU features.
-            let compute = self.dispatch.compute_byte_mask;
-            let lt = unsafe { compute(chunk, b'<') };
-            let gt = unsafe { compute(chunk, b'>') };
-            let amp = unsafe { compute(chunk, b'&') };
-            let quot = unsafe { compute(chunk, b'"') };
-            let apos = unsafe { compute(chunk, b'\'') };
-            let eq = unsafe { compute(chunk, b'=') };
-            let slash = unsafe { compute(chunk, b'/') };
-
+            let masks = unsafe { compute(chunk) };
             bitmaps.push(BlockBitmaps {
-                lt,
-                gt,
-                amp,
-                quot,
-                apos,
-                eq,
-                slash,
+                lt: masks.lt,
+                gt: masks.gt,
+                quot: masks.quot,
+                apos: masks.apos,
             });
         }
 
@@ -244,8 +224,8 @@ mod tests {
 
         let delims: Vec<_> = index.iter_delimiters().collect();
 
-        // Expected structural delimiters:
-        // 0: '<', 4: '>', 10: '<', 11: '/', 15: '>'
+        // Expected delimiters: 0: '<', 4: '>', 10: '<', 15: '>'. The `/` of
+        // the end tag is not an indexed delimiter.
         assert_eq!(
             delims,
             vec![
@@ -254,10 +234,6 @@ mod tests {
                 DelimiterEntry {
                     pos: 10,
                     byte: b'<'
-                },
-                DelimiterEntry {
-                    pos: 11,
-                    byte: b'/'
                 },
                 DelimiterEntry {
                     pos: 15,
@@ -275,14 +251,19 @@ mod tests {
 
         let delims: Vec<_> = index.iter_delimiters().collect();
 
-        // '<' at 0, '=' at 10, '"' at 11, '"' at 15, '>' at 16,
-        // '<' at 20, '/' at 21, '>' at 25
-        // Note: "foo" is inside quotes, but the content "foo" has no delimiters.
-        let bytes: Vec<u8> = delims.iter().map(|d| d.byte).collect();
-        assert!(bytes.contains(&b'<'));
-        assert!(bytes.contains(&b'>'));
-        assert!(bytes.contains(&b'='));
-        assert!(bytes.contains(&b'"'));
+        // Only `<`, `>`, `"` and `'` are indexed; `=` and `/` are not.
+        let entries: Vec<(usize, u8)> = delims.iter().map(|d| (d.pos, d.byte)).collect();
+        assert_eq!(
+            entries,
+            vec![
+                (0, b'<'),
+                (11, b'"'),
+                (15, b'"'),
+                (16, b'>'),
+                (20, b'<'),
+                (25, b'>'),
+            ]
+        );
     }
 
     // ---------------------------------------------------------------
@@ -326,7 +307,8 @@ mod tests {
 
     #[test]
     fn single_quote_inside_double_quotes_ignored() {
-        // The ' inside "it's" should not affect masking.
+        // The ' inside "it's" is indexed like any other quote byte; it does
+        // not hide the tag-closing '>'.
         let input = b"<div title=\"it's\">text</div>";
         let indexer = StructuralIndexer::new();
         let index = indexer.index(input);
@@ -385,21 +367,9 @@ mod tests {
             delims,
             vec![
                 DelimiterEntry { pos: 0, byte: b'<' },
-                DelimiterEntry { pos: 3, byte: b'/' },
                 DelimiterEntry { pos: 4, byte: b'>' },
             ]
         );
-    }
-
-    #[test]
-    fn entity_reference() {
-        let input = b"a &amp; b";
-        let indexer = StructuralIndexer::new();
-        let index = indexer.index(input);
-
-        let amp_entries: Vec<_> = index.iter_delimiters().filter(|d| d.byte == b'&').collect();
-        assert_eq!(amp_entries.len(), 1);
-        assert_eq!(amp_entries[0].pos, 2);
     }
 
     // ---------------------------------------------------------------
@@ -437,12 +407,14 @@ mod tests {
             "should find < at offset 100"
         );
 
-        // Verify delimiters inside "test" are masked.
-        // The attribute value "test" contains no delimiters, so nothing to mask.
-        // But the = and " around it should be structural.
+        // The quotes around the attribute value are indexed.
         assert!(
-            delims.iter().any(|d| d.byte == b'='),
-            "should find = in attribute"
+            delims.iter().any(|d| d.pos == 317 && d.byte == b'"'),
+            "should find opening quote at offset 317"
+        );
+        assert!(
+            delims.iter().any(|d| d.pos == 322 && d.byte == b'"'),
+            "should find closing quote at offset 322"
         );
 
         // Verify there are closing tags at the end.

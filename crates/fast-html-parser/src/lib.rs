@@ -112,12 +112,15 @@ pub mod xpath {
     pub use fhp_selector::xpath::ast::XPathResult;
 }
 
-/// Encoding detection and conversion.
+/// The full CSS selector (and, with `xpath`, XPath) engine crate.
+#[cfg(feature = "css-selector")]
+#[cfg_attr(docsrs, doc(cfg(feature = "css-selector")))]
+pub use fhp_selector as selector;
+
+/// Encoding detection and conversion (the `fhp-encoding` crate).
 #[cfg(feature = "encoding")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
-pub mod encoding {
-    pub use fhp_encoding::{Encoding, decode, decode_or_detect, detect};
-}
+pub use fhp_encoding as encoding;
 
 /// Async parser (requires `async-tokio` feature).
 #[cfg(feature = "async-tokio")]
@@ -277,11 +280,11 @@ impl HtmlParser {
     }
 
     /// Parse raw bytes with default settings, auto-detecting encoding.
+    /// Malformed byte sequences are replaced with U+FFFD.
     ///
     /// # Errors
     ///
-    /// Returns [`HtmlError::InputTooLarge`] or [`HtmlError::Encoding`] on
-    /// failure.
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
     ///
     /// # Example
     ///
@@ -321,11 +324,12 @@ impl HtmlParser {
     }
 
     /// Parse raw bytes with the current configuration, auto-detecting encoding.
+    /// Malformed byte sequences are replaced with U+FFFD.
     ///
     /// # Errors
     ///
-    /// Returns [`HtmlError::InputTooLarge`] or [`HtmlError::Encoding`] on
-    /// failure.
+    /// Returns [`HtmlError::InputTooLarge`] if the raw or decoded input exceeds
+    /// the configured limit.
     #[cfg(feature = "encoding")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
     pub fn parse_raw(&self, input: &[u8]) -> Result<Document, HtmlError> {

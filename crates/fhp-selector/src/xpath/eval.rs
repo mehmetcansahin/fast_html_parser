@@ -598,7 +598,7 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate, position: us
 }
 
 /// Collect the direct child text nodes selected by XPath's `text()` node test.
-fn collect_direct_text_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) {
+pub(crate) fn collect_direct_text_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) {
     let n = arena.get(node);
     let mut child = n.first_child;
     while !child.is_null() {

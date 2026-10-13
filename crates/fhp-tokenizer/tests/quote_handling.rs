@@ -4,9 +4,11 @@
 //! Regression coverage for the global quote-masking bug where a lone `'`/`"`
 //! in text content swallowed the rest of the document.
 
-use fhp_core::tag::Tag;
+mod common;
+
+use common::sink_events;
 use fhp_tokenizer::token::Token;
-use fhp_tokenizer::{TreeSink, tokenize, tokenize_into, tokenize_with};
+use fhp_tokenizer::{tokenize, tokenize_with};
 
 // ---- helpers -------------------------------------------------------------
 
@@ -14,34 +16,6 @@ fn collect_with(input: &str) -> Vec<Token<'_>> {
     let mut v = Vec::new();
     tokenize_with(input, |t| v.push(t));
     v
-}
-
-#[derive(Default)]
-struct EventSink {
-    events: Vec<String>,
-}
-
-impl TreeSink for EventSink {
-    fn open_tag(&mut self, _tag: Tag, name: &str, _attr_raw: &str, _self_closing: bool) {
-        self.events.push(format!("open:{name}"));
-    }
-    fn close_tag(&mut self, _tag: Tag, name: &str) {
-        self.events.push(format!("close:{name}"));
-    }
-    fn text(&mut self, t: &str) {
-        self.events.push(format!("text:{t}"));
-    }
-    fn comment(&mut self, c: &str) {
-        self.events.push(format!("comment:{c}"));
-    }
-    fn doctype(&mut self, _c: &str) {}
-    fn cdata(&mut self, _c: &str) {}
-}
-
-fn sink_events(input: &str) -> Vec<String> {
-    let mut s = EventSink::default();
-    tokenize_into(input, &mut s);
-    s.events
 }
 
 fn count_open(tokens: &[Token<'_>], want: &str) -> usize {

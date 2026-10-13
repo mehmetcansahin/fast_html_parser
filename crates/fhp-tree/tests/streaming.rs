@@ -172,7 +172,6 @@ fn one_shot_owned_sink_and_streaming_build_the_same_dom() {
     let streamed = parse_stream(html.as_bytes().chunks(3)).unwrap();
 
     let mut builder = TreeBuilder::new();
-    builder.set_source(html);
     fhp_tokenizer::tokenize_into(html, &mut builder);
     let (sink_arena, sink_root) = builder.finish().unwrap();
 
@@ -186,21 +185,112 @@ fn one_shot_owned_sink_and_streaming_build_the_same_dom() {
 }
 
 #[test]
-fn unfinished_raw_close_keeps_dom_text_context_at_eof() {
-    for (tag, decodes_entities) in [
-        ("script", false),
-        ("style", false),
-        ("iframe", false),
-        ("title", true),
-        ("textarea", true),
-    ] {
-        let html = format!("<{tag}>x</{tag} &amp;");
-        let reference = if decodes_entities && cfg!(feature = "entity-decode") {
-            "&"
-        } else {
-            "&amp;"
+fn cdata_text_is_literal_on_every_entry_point() {
+    let html = "<p><![CDATA[x&amp;y]]></p>";
+    let expected = "x&amp;y";
+
+    assert_eq!(parse(html).unwrap().root().text_content(), expected);
+    assert_eq!(
+        fhp_tree::parse_owned(html.to_owned())
+            .unwrap()
+            .root()
+            .text_content(),
+        expected
+    );
+    assert_eq!(
+        parse_bytes(html.as_bytes()).unwrap().root().text_content(),
+        expected
+    );
+
+    for chunk_size in [1, 5, html.len()] {
+        let mut stream = StreamParser::new();
+        for chunk in html.as_bytes().chunks(chunk_size) {
+            stream.feed(chunk).unwrap();
+        }
+        assert_eq!(
+            stream.finish().unwrap().root().text_content(),
+            expected,
+            "chunk_size={chunk_size}"
+        );
+
+        let mut early = EarlyStopParser::stop_after_element(|node| node.tag() == Tag::P);
+        let mut progress = EarlyStopProgress::NeedMore;
+        for chunk in html.as_bytes().chunks(chunk_size) {
+            progress = early.feed(chunk).unwrap();
+            if progress == EarlyStopProgress::Matched {
+                break;
+            }
+        }
+        assert_eq!(
+            progress,
+            EarlyStopProgress::Matched,
+            "chunk_size={chunk_size}"
+        );
+        let EarlyStopOutcome::Matched(found) = early.finish().unwrap() else {
+            panic!("the closed paragraph must match");
         };
-        let expected_text = format!("x</{tag} {reference}");
+        assert_eq!(
+            found.node().text_content(),
+            expected,
+            "chunk_size={chunk_size}"
+        );
+    }
+}
+
+#[test]
+fn raw_text_of_an_ignored_start_tag_decodes_on_every_entry_point() {
+    // `select` ignores these start tags, so their content has no raw-text
+    // parent; every entry point decodes it like ordinary text.
+    let mut inputs: Vec<String> = ["xmp", "noembed", "noframes", "style", "iframe"]
+        .iter()
+        .map(|tag| format!("<select><option>a<{tag}>&amp;</{tag}>b</select>"))
+        .collect();
+    inputs.push("<select><option>a<plaintext>&amp;b".to_owned());
+    let expected = if cfg!(feature = "entity-decode") {
+        "a&b"
+    } else {
+        "a&amp;b"
+    };
+
+    for html in &inputs {
+        assert_eq!(
+            parse(html).unwrap().root().text_content(),
+            expected,
+            "{html}"
+        );
+        for chunk_size in [1, 7, html.len()] {
+            let streamed = parse_stream(html.as_bytes().chunks(chunk_size)).unwrap();
+            assert_eq!(
+                streamed.root().text_content(),
+                expected,
+                "{html}, chunk_size={chunk_size}"
+            );
+
+            let mut early = EarlyStopParser::stop_after_element(|node| node.tag() == Tag::Select);
+            for chunk in html.as_bytes().chunks(chunk_size) {
+                if early.feed(chunk).unwrap() == EarlyStopProgress::Matched {
+                    break;
+                }
+            }
+            let EarlyStopOutcome::Matched(found) = early.finish().unwrap() else {
+                panic!("the select must match: {html}");
+            };
+            assert_eq!(
+                found.node().text_content(),
+                expected,
+                "{html}, chunk_size={chunk_size}"
+            );
+        }
+    }
+}
+
+#[test]
+fn unfinished_raw_close_tag_is_dropped_at_eof() {
+    // EOF inside the terminated end-tag name drops the end tag (WHATWG
+    // "eof-in-tag"); EOF then closes the element with only its text.
+    for tag in ["script", "style", "iframe", "title", "textarea"] {
+        let html = format!("<{tag}>x</{tag} &amp;");
+        let expected_text = "x";
         let one_shot = parse(&html).unwrap();
         assert_eq!(one_shot.root().text_content(), expected_text);
         let expected = canonical_arena(one_shot.arena(), one_shot.root().id());
@@ -246,7 +336,6 @@ fn depth_error_is_identical_for_one_shot_owned_sink_and_streaming() {
     assert!(is_depth_error(parse_stream(html.as_bytes().chunks(17))));
 
     let mut builder = TreeBuilder::new();
-    builder.set_source(&html);
     fhp_tokenizer::tokenize_into(&html, &mut builder);
     assert!(matches!(
         builder.finish(),
@@ -348,14 +437,14 @@ fn stream_parser_preserves_lt_edge_cases_across_chunk_boundaries() {
         StreamingEdgeCase {
             name: "invalid_close_like_and_lt_space",
             html: b"<p>a </ b and 1 < 2</p><p>ok</p>",
-            expected_text: "a </ b and 1 < 2ok",
-            expected_html: "<p>a &lt;/ b and 1 &lt; 2</p><p>ok</p>",
+            expected_text: "a ok",
+            expected_html: "<p>a <!-- b and 1 < 2</p--></p><p>ok</p>",
         },
         StreamingEdgeCase {
             name: "double_lt_and_slash_digit",
             html: b"<p>a << b and a </2</p><span>next</span>",
-            expected_text: "a << b and a </2next",
-            expected_html: "<p>a &lt;&lt; b and a &lt;/2</p><span>next</span>",
+            expected_text: "a << b and a next",
+            expected_html: "<p>a &lt;&lt; b and a <!--2</p--><span>next</span></p>",
         },
         StreamingEdgeCase {
             name: "script_raw_text",
@@ -740,5 +829,92 @@ mod async_std_tests {
                 ))
             ));
         });
+    }
+}
+
+/// Tokenizer review fixtures (WHATWG tag grammar, bogus comments, EOF
+/// handling, legacy raw text, script escapes) and tree-builder conformance
+/// fixtures: streaming must build the one-shot DOM at every chunk size.
+#[test]
+fn stream_equiv_review_fixtures() {
+    const FIXTURES: &[&str] = &[
+        // Tokenizer.
+        "<img alt=it's><p>visible</p>",
+        "<div a\"b>x</div>",
+        "<a b=x'y c='z>w'>",
+        "<a href=http://example.com/>",
+        "<a b=/>",
+        "<a b=\"x\"/>",
+        "<br/>",
+        "<?xml version=\"1.0\"?>",
+        "<!x y>",
+        "<![if !IE]>",
+        "<p>a</ b>c</p>",
+        "<p>a</>c</p>",
+        "<_foo>",
+        "<!-- c --!><p>",
+        "<!DOCTYPE html \"a>b\">",
+        "<!-- x",
+        "<!-- x --",
+        "<![CDATA[x",
+        "<!DOCTYPE html",
+        "<div class=\"a",
+        "<?php",
+        "<xmp><b>x</b></xmp>",
+        "<noembed><b>x</b></noembed>",
+        "<noframes><b>x</b></noframes>",
+        "<script><!--<script>x</script>y--></script><p>",
+        // Tree builder.
+        "<ul><li>a<ul><li>b</li></ul></li></ul>",
+        "<ul><li>a<ol><li>b<li>c</ol><li>d</ul>",
+        "<dl><dt>a<dd><dl><dt>b</dl></dl>",
+        "<ul><li>a<table><tr><td><li>b</td></tr></table></li></ul>",
+        "<table><tr><td><table><tr><td>inner</td></tr></table></td><td>x</td></tr></table>",
+        "<table><tr><td><div><table><tr><td>i</td></tr></table></div></td></tr></table>",
+        "<table><caption>cap</caption><tr><td>x</td></tr></table>",
+        "<table><colgroup><col><col></colgroup><tr><td>x</td></tr></table>",
+        "<table><col><tr><td>x</td></tr></table>",
+        "<table><script>var a=1;</script><tr><td>x</td></tr></table>",
+        "<table><style>td{}</style><tr><td>x</td></tr></table>",
+        "<table><form><tr><td>x</td></tr></form></table>",
+        "<table><input type=hidden name=a><tr><td>x</td></tr></table>",
+        "<table><input type=text><tr><td>x</td></tr></table>",
+        "<table><div>hello<span>w</span></div><tr><td>x</td></tr></table>",
+        "<table><p>para</p><tr><td>x</td></tr></table>",
+        "<table><div>x<tr><td>y</td></tr></table>",
+        "<div><table><tr><td>cell</div>after</td></tr></table>",
+        "<a href=o><table><tr><td><a href=i>x</a></td><td>y</td></tr></table></a>",
+        "<table><tr><td><select><option>a</td><td>b</td></tr></table>",
+        "<table><tr><td><select><option>a<table><tr><td>b</td></tr></table></td></tr></table>",
+        "<h1>a<span>b<h2>c</h2></span></h1>",
+        "<option>a<div>b<option>c",
+        "<p>a<li>b",
+        "<div>a</p>b</div>",
+        "<p>a</br>b</p>",
+        "<td>x</td>",
+        "<table><tr><td>a</td></tr></table><td>b</td>",
+        "<select><option>a</option><script>s</script></select>",
+        "<pre>\ncode</pre><textarea>\ntext</textarea>",
+        "<img alt=it's><p>visible</p><p>it's done</p>",
+        "<div a\"b>x</div><p>y</p>",
+        "<?xml version=\"1.0\"?><p>hi</p>",
+        "<a href=http://example.com/>x</a>",
+        "<a b=/>x</a>",
+        "<!-- c --!><p>after</p>",
+        "<![if !IE]><p>a</p><![endif]><p>b</p>",
+        "<p>a</ b>c</p>",
+        "<p>a</>c</p>",
+        "<_foo>x</_foo>",
+        "<p>x</p><!-- unterminated",
+        "<p>x</p><div class=\"a",
+        "<xmp><b>x</b></xmp>",
+        "<noembed><b>x</b></noembed>",
+        "<script><!--<script>x</script>y--></script><p>z</p>",
+    ];
+
+    for html in FIXTURES {
+        for chunk_size in (1..=9).chain([17]) {
+            assert_stream_equiv(html.as_bytes(), chunk_size);
+        }
     }
 }

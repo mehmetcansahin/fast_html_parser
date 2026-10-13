@@ -1,12 +1,15 @@
 //! Comprehensive integration tests for fhp-tokenizer.
 
+mod common;
+
 use std::borrow::Cow;
 
+use common::{sink, token_events};
 use fhp_core::tag::Tag;
 use fhp_tokenizer::entity::decode_entities;
 use fhp_tokenizer::streaming::StreamTokenizer;
-use fhp_tokenizer::token::Token;
-use fhp_tokenizer::tokenize;
+use fhp_tokenizer::token::{Attribute, Token};
+use fhp_tokenizer::{tokenize, tokenize_with};
 
 fn text_content(tokens: &[Token<'_>]) -> String {
     tokens
@@ -187,21 +190,14 @@ fn well_formed_full_document() {
 
 #[test]
 fn malformed_unclosed_tag() {
-    // `<div` with no `>` — should be treated as text.
-    let tokens = tokenize("<div");
-    // The text should contain the unclosed tag as text.
-    assert!(
-        !tokens.is_empty(),
-        "should produce at least one token for unclosed tag"
-    );
+    // EOF inside a tag drops the tag (WHATWG "eof-in-tag").
+    assert!(tokenize("<div").is_empty());
 }
 
 #[test]
 fn malformed_missing_close_quote() {
-    // Attribute with missing closing quote.
-    let tokens = tokenize("<div class=\"foo>");
-    // Should still produce something (may be mangled).
-    assert!(!tokens.is_empty());
+    // The unterminated quoted value runs to EOF, so the tag never ends.
+    assert!(tokenize("<div class=\"foo>").is_empty());
 }
 
 #[test]
@@ -239,17 +235,6 @@ fn script_entity_is_not_decoded_as_text() {
     });
 
     assert_eq!(script_text, Some("const s = \"&amp;\";"));
-}
-
-#[test]
-fn invalid_close_like_text_is_preserved() {
-    let tokens = tokenize("<p>a </ b</p>");
-    let text = tokens.iter().find_map(|token| match token {
-        Token::Text { content } => Some(content.as_ref()),
-        _ => None,
-    });
-
-    assert_eq!(text, Some("a </ b"));
 }
 
 #[derive(Debug)]
@@ -296,20 +281,6 @@ fn invalid_lt_sequences_stay_in_text() {
             name: "lt_before_ampersand",
             html: "<p>a <&b</p>",
             expected_text: "a <&b",
-            expected_open_tags: &["p"],
-            expected_close_tags: &["p"],
-        },
-        TextMarkupCase {
-            name: "slash_space",
-            html: "<p>a </ b</p>",
-            expected_text: "a </ b",
-            expected_open_tags: &["p"],
-            expected_close_tags: &["p"],
-        },
-        TextMarkupCase {
-            name: "slash_digit",
-            html: "<p>a </2</p>",
-            expected_text: "a </2",
             expected_open_tags: &["p"],
             expected_close_tags: &["p"],
         },
@@ -600,21 +571,6 @@ fn plaintext_is_literal_across_streaming_chunk_boundaries() {
 }
 
 #[test]
-fn quoted_doctype_identifier_does_not_end_at_inner_gt() {
-    let tokens = tokenize("<!DOCTYPE html SYSTEM \"a>b\"><p>x</p>");
-    let doctypes: Vec<_> = tokens
-        .iter()
-        .filter_map(|token| match token {
-            Token::Doctype { content } => Some(content.as_ref()),
-            _ => None,
-        })
-        .collect();
-
-    assert_eq!(doctypes, ["html SYSTEM \"a>b\""]);
-    assert_eq!(text_content(&tokens), "x");
-}
-
-#[test]
 fn attribute_value_presence_cases() {
     let tokens = tokenize("<input value=\"\" disabled data-empty=''>");
     let attrs = match &tokens[0] {
@@ -898,4 +854,305 @@ fn cdata_malformed_prefix_is_not_treated_as_cdata() {
     // debug_assert panic in debug. The parser must not produce a CData token.
     let tokens = tokenize("<![ABCDE\u{20ac}]]>");
     assert!(!tokens.iter().any(|t| matches!(t, Token::CData { .. })));
+}
+
+// ---------------------------------------------------------------
+// WHATWG tokenizer states (review regressions)
+// ---------------------------------------------------------------
+
+fn open<'a>(name: &'a str, attrs: &[(&'a str, Option<&'a str>)], self_closing: bool) -> Token<'a> {
+    Token::OpenTag {
+        tag: Tag::from_bytes(name.as_bytes()),
+        name: Cow::Borrowed(name),
+        attributes: attrs
+            .iter()
+            .map(|&(name, value)| Attribute {
+                name: Cow::Borrowed(name),
+                value: value.map(Cow::Borrowed),
+            })
+            .collect(),
+        self_closing,
+    }
+}
+
+fn close(name: &str) -> Token<'_> {
+    Token::CloseTag {
+        tag: Tag::from_bytes(name.as_bytes()),
+        name: Cow::Borrowed(name),
+    }
+}
+
+fn text(content: &str) -> Token<'_> {
+    Token::Text {
+        content: Cow::Borrowed(content),
+    }
+}
+
+fn comment(content: &str) -> Token<'_> {
+    Token::Comment {
+        content: Cow::Borrowed(content),
+    }
+}
+
+fn doctype(content: &str) -> Token<'_> {
+    Token::Doctype {
+        content: Cow::Borrowed(content),
+    }
+}
+
+fn cdata(content: &str) -> Token<'_> {
+    Token::CData {
+        content: Cow::Borrowed(content),
+    }
+}
+
+/// Owned copy of `tokens` with adjacent text tokens merged (chunked input may
+/// split a text run at different points).
+fn merge_text(tokens: &[Token<'_>]) -> Vec<Token<'static>> {
+    let mut merged: Vec<Token<'static>> = Vec::new();
+    for token in tokens {
+        let owned = match token {
+            Token::Text { content } => {
+                if let Some(Token::Text { content: previous }) = merged.last_mut() {
+                    previous.to_mut().push_str(content);
+                    continue;
+                }
+                Token::Text {
+                    content: Cow::Owned(content.to_string()),
+                }
+            }
+            Token::OpenTag {
+                tag,
+                name,
+                attributes,
+                self_closing,
+            } => Token::OpenTag {
+                tag: *tag,
+                name: Cow::Owned(name.to_string()),
+                attributes: attributes
+                    .iter()
+                    .map(|attr| Attribute {
+                        name: Cow::Owned(attr.name.to_string()),
+                        value: attr
+                            .value
+                            .as_ref()
+                            .map(|value| Cow::Owned(value.to_string())),
+                    })
+                    .collect(),
+                self_closing: *self_closing,
+            },
+            Token::CloseTag { tag, name } => Token::CloseTag {
+                tag: *tag,
+                name: Cow::Owned(name.to_string()),
+            },
+            Token::Comment { content } => Token::Comment {
+                content: Cow::Owned(content.to_string()),
+            },
+            Token::Doctype { content } => Token::Doctype {
+                content: Cow::Owned(content.to_string()),
+            },
+            Token::CData { content } => Token::CData {
+                content: Cow::Owned(content.to_string()),
+            },
+        };
+        merged.push(owned);
+    }
+    merged
+}
+
+/// Require the exact token sequence from `tokenize` and `tokenize_with`, the
+/// equivalent events (with attributes parsed from the raw region) from
+/// `tokenize_into`, and the same tokens (text runs merged) from
+/// `StreamTokenizer` at every small chunk size.
+fn assert_tokens(html: &str, expected: &[Token<'_>]) {
+    assert_eq!(tokenize(html), expected, "tokenize, html={html:?}");
+
+    let mut with = Vec::new();
+    tokenize_with(html, |token| with.push(token));
+    assert_eq!(with, expected, "tokenize_with, html={html:?}");
+
+    let sink = sink(html);
+    let (events, open_tags) = token_events(expected);
+    assert_eq!(sink.events, events, "tokenize_into, html={html:?}");
+    assert_eq!(
+        sink.open_tags, open_tags,
+        "tokenize_into attributes, html={html:?}"
+    );
+
+    let expected = merge_text(expected);
+    for chunk_size in (1..=9).chain([html.len().max(1)]) {
+        let streamed = collect_streaming(html.as_bytes(), chunk_size);
+        assert_eq!(
+            merge_text(&streamed),
+            expected,
+            "StreamTokenizer, chunk_size={chunk_size}, html={html:?}"
+        );
+    }
+}
+
+#[test]
+fn apostrophe_in_unquoted_value_is_literal() {
+    assert_tokens(
+        "<img alt=it's><p>visible</p>",
+        &[
+            open("img", &[("alt", Some("it's"))], false),
+            open("p", &[], false),
+            text("visible"),
+            close("p"),
+        ],
+    );
+}
+
+#[test]
+fn quote_in_attribute_name_is_literal() {
+    assert_tokens(
+        "<div a\"b>x</div>",
+        &[
+            open("div", &[("a\"b", None)], false),
+            text("x"),
+            close("div"),
+        ],
+    );
+}
+
+#[test]
+fn quotes_only_open_values_directly_after_equals() {
+    assert_tokens(
+        "<a b=x'y c='z>w'>",
+        &[open("a", &[("b", Some("x'y")), ("c", Some("z>w"))], false)],
+    );
+}
+
+#[test]
+fn slash_ending_an_unquoted_value_is_not_self_closing() {
+    assert_tokens(
+        "<a href=http://example.com/>",
+        &[open("a", &[("href", Some("http://example.com/"))], false)],
+    );
+    assert_tokens("<a b=/>", &[open("a", &[("b", Some("/"))], false)]);
+}
+
+#[test]
+fn slash_outside_values_is_self_closing() {
+    assert_tokens("<a b=\"x\"/>", &[open("a", &[("b", Some("x"))], true)]);
+    assert_tokens("<br/>", &[open("br", &[], true)]);
+}
+
+#[test]
+fn processing_instruction_is_a_bogus_comment() {
+    assert_tokens(
+        "<?xml version=\"1.0\"?>",
+        &[comment("?xml version=\"1.0\"?")],
+    );
+}
+
+#[test]
+fn unknown_markup_declarations_are_bogus_comments() {
+    assert_tokens("<!x y>", &[comment("x y")]);
+    assert_tokens("<![if !IE]>", &[comment("[if !IE]")]);
+}
+
+#[test]
+fn end_tag_open_before_non_letter_is_a_bogus_comment() {
+    assert_tokens(
+        "<p>a</ b>c</p>",
+        &[
+            open("p", &[], false),
+            text("a"),
+            comment(" b"),
+            text("c"),
+            close("p"),
+        ],
+    );
+}
+
+#[test]
+fn end_tag_names_keep_equals_and_quotes() {
+    // In the tag-name state `=` and quotes are name bytes, so the end tag
+    // ends at its first `>` instead of swallowing the rest of the document.
+    assert_tokens(
+        "<div>a</div=\"x>b\"<p>visible</p>",
+        &[
+            open("div", &[], false),
+            text("a"),
+            close("div=\"x"),
+            text("b\""),
+            open("p", &[], false),
+            text("visible"),
+            close("p"),
+        ],
+    );
+    assert_tokens(
+        "<div>a</div ='x>b",
+        &[open("div", &[], false), text("a"), close("div"), text("b")],
+    );
+    assert_tokens(
+        "<script>x</script =\"y>z",
+        &[
+            open("script", &[], false),
+            text("x"),
+            close("script"),
+            text("z"),
+        ],
+    );
+}
+
+#[test]
+fn empty_end_tag_produces_no_token() {
+    assert_tokens(
+        "<p>a</>c</p>",
+        &[open("p", &[], false), text("a"), text("c"), close("p")],
+    );
+}
+
+#[test]
+fn lt_before_underscore_is_text() {
+    assert_tokens("<_foo>", &[text("<_foo>")]);
+}
+
+#[test]
+fn comment_closes_on_dash_dash_bang_gt() {
+    assert_tokens("<!-- c --!><p>", &[comment(" c "), open("p", &[], false)]);
+}
+
+#[test]
+fn doctype_ends_at_first_gt_even_inside_quotes() {
+    assert_tokens(
+        "<!DOCTYPE html \"a>b\">",
+        &[doctype("html \"a"), text("b\">")],
+    );
+}
+
+#[test]
+fn eof_inside_markup_emits_the_unfinished_construct() {
+    assert_tokens("<!-- x", &[comment(" x")]);
+    assert_tokens("<!-- x --", &[comment(" x ")]);
+    assert_tokens("<![CDATA[x", &[cdata("x")]);
+    assert_tokens("<!DOCTYPE html", &[doctype("html")]);
+    assert_tokens("<div class=\"a", &[]);
+    assert_tokens("<?php", &[comment("?php")]);
+}
+
+#[test]
+fn legacy_raw_text_elements_keep_markup_literal() {
+    for name in ["xmp", "noembed", "noframes"] {
+        let html = format!("<{name}><b>x</b></{name}>");
+        assert_tokens(
+            &html,
+            &[open(name, &[], false), text("<b>x</b>"), close(name)],
+        );
+    }
+}
+
+#[test]
+fn script_end_tag_inside_escaped_script_block_does_not_close() {
+    assert_tokens(
+        "<script><!--<script>x</script>y--></script><p>",
+        &[
+            open("script", &[], false),
+            text("<!--<script>x</script>y-->"),
+            close("script"),
+            open("p", &[], false),
+        ],
+    );
 }

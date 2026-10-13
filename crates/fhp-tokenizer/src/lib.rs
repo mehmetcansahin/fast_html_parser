@@ -2,10 +2,10 @@
 //!
 //! Uses a two-stage pipeline inspired by simdjson:
 //!
-//! 1. **Structural indexing** (SIMD): scan input in 64-byte blocks, produce
-//!    per-delimiter bitmasks, then apply quote-aware masking.
-//! 2. **Token extraction** (scalar): walk the structural index to emit tokens
-//!    via a branchless state machine.
+//! 1. **SIMD delimiter index**: scan input in 64-byte blocks and produce
+//!    bitmasks of every `<`, `>`, `"` and `'` byte.
+//! 2. **Scalar extraction**: walk the indexed delimiters in order and emit
+//!    tokens, tracking each tag body with an incremental attribute grammar.
 //!
 //! # Quick Start
 //!
@@ -20,8 +20,6 @@
 pub mod entity;
 /// Token extraction — stage 2 (scalar state machine).
 pub mod extract;
-/// Branchless state machine for token extraction.
-pub mod state_machine;
 /// Streaming (chunk-based) tokenizer — see [`crate::streaming::StreamTokenizer`].
 pub mod streaming;
 /// Structural character indexer — SIMD-powered bitmask generation (stage 1).
@@ -110,9 +108,9 @@ const BLOCK_SIZE: usize = 64;
 
 /// Tokenize HTML and feed each token to a callback — zero intermediate allocation.
 ///
-/// Fuses SIMD structural indexing, quote-aware masking, and token extraction
-/// into a single streaming pass. No `Vec<BlockBitmaps>` or `Vec<Token>` is
-/// allocated.
+/// Fuses the SIMD delimiter index and scalar extraction (with its incremental
+/// attribute grammar) into a single streaming pass. No `Vec<BlockBitmaps>` or
+/// `Vec<Token>` is allocated.
 ///
 /// # Example
 ///
@@ -179,10 +177,10 @@ pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
 
 /// Tokenize HTML directly into a [`TreeSink`], bypassing all intermediate allocations.
 ///
-/// Fuses SIMD structural indexing, quote-aware masking, and token extraction
-/// into a single streaming pass. Instead of constructing `Token` enums, calls
-/// sink methods directly — eliminating `Vec<Attribute>`, `Cow` wrappers, and
-/// entity-decode `String` allocations in the hot loop.
+/// Fuses the SIMD delimiter index and scalar extraction (with its incremental
+/// attribute grammar) into a single streaming pass. Instead of constructing
+/// `Token` enums, calls sink methods directly — eliminating `Vec<Attribute>`,
+/// `Cow` wrappers, and entity-decode `String` allocations in the hot loop.
 ///
 /// # Example
 ///
