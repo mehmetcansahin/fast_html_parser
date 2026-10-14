@@ -252,8 +252,8 @@ def validate_clean_benchmark_report() -> None:
 
 
 def command_check() -> None:
-    run(["python3", "scripts/generate_entities.py", "--check"])
-    run(["python3", "scripts/sync_licenses.py", "--check"])
+    run([sys.executable, "scripts/generate_entities.py", "--check"])
+    run([sys.executable, "scripts/sync_licenses.py", "--check"])
     run(["cargo", "fmt", "--all", "--", "--check"])
     run(["cargo", "clippy", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"])
     run(["cargo", "test", "--workspace", "--all-features"])
@@ -264,8 +264,8 @@ def command_check() -> None:
         ["cargo", "doc", "--workspace", "--all-features", "--no-deps"],
         env={"RUSTDOCFLAGS": "-D warnings"},
     )
-    run(["python3", "-m", "unittest", "discover", "-s", "scripts/tests", "-v"])
-    run(["python3", "scripts/bench.py", "verify"])
+    run([sys.executable, "-m", "unittest", "discover", "-s", "scripts/tests", "-v"])
+    run([sys.executable, "scripts/bench.py", "verify"])
 
 
 def fuzz_command(target: str, fuzz_dir: Path = FUZZ_DIR) -> list[str]:
