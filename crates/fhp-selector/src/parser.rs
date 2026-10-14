@@ -14,6 +14,8 @@
 //! - Combinators: `A B` (descendant), `A > B` (child), `A + B` (adjacent),
 //!   `A ~ B` (general sibling)
 //! - Comma-separated selector lists: `div, span`
+//!
+//! [`ast::SelectorList`]: crate::ast::SelectorList
 
 use fhp_core::error::SelectorError;
 use fhp_core::hash::{class_bloom_bit, selector_hash};

@@ -1,10 +1,12 @@
 //! Streaming, incremental, and predicate-based HTML parsing.
 //!
-//! [`StreamParser`](crate::streaming::StreamParser) buffers at most the first
-//! 1 KiB for encoding prescan and processes caller-provided chunks in bounded
-//! 64 KiB blocks. [`EarlyStopParser`](crate::streaming::EarlyStopParser) can
-//! stop either when a matching node is created or after that element's subtree
-//! is complete.
+//! [`StreamParser`] buffers at most the first 1 KiB for encoding prescan and
+//! processes caller-provided chunks in bounded 64 KiB blocks.
+//! [`EarlyStopParser`] can stop either when a matching node is created or
+//! after that element's subtree is complete.
+//!
+//! [`StreamParser`]: crate::streaming::StreamParser
+//! [`EarlyStopParser`]: crate::streaming::EarlyStopParser
 
 use encoding_rs::Encoding;
 use fhp_core::error::ParseError;

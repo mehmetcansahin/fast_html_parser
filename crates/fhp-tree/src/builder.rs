@@ -1,8 +1,10 @@
 //! Tree construction from a token stream.
 //!
-//! [`TreeBuilder`] consumes [`Token`](fhp_tokenizer::token::Token)s and builds an arena-based DOM tree.
+//! [`TreeBuilder`] consumes [`Token`]s and builds an arena-based DOM tree.
 //! It handles implicit close rules, void elements, and common malformed-HTML
 //! recovery strategies.
+//!
+//! [`Token`]: fhp_tokenizer::token::Token
 
 use fhp_core::{attr::iter_raw_attrs, error::ParseError, is_html_whitespace, tag::Tag};
 use fhp_tokenizer::token::{Attribute as TokenAttribute, Token};

@@ -1,9 +1,11 @@
 //! Async HTML parser powered by async-std.
 //!
 //! Reads from an [`async_std::io::Read`] source in 64 KiB chunks and builds
-//! the DOM incrementally using [`StreamParser`](crate::streaming::StreamParser).
+//! the DOM incrementally using [`StreamParser`].
 //!
 //! Requires the `async-async-std` feature flag.
+//!
+//! [`StreamParser`]: crate::streaming::StreamParser
 
 use async_std::io::{Read, ReadExt};
 

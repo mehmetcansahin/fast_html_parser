@@ -2,7 +2,9 @@
 //!
 //! All nodes live in a single contiguous `Vec<Node>`, giving cache-friendly
 //! traversal. Text content and attributes are stored in separate slabs,
-//! referenced by offset+length from each [`Node`](crate::node::Node).
+//! referenced by offset+length from each [`Node`].
+//!
+//! [`Node`]: crate::node::Node
 
 use fhp_core::attr::{SeenAttributes, ascii_ci_fingerprint, iter_raw_attrs};
 use fhp_core::hash::{class_bloom_bit, selector_hash};

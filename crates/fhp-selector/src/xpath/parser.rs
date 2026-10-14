@@ -1,6 +1,6 @@
 //! XPath expression parser.
 //!
-//! Parses a subset of XPath 1.0 into [`XPathExpr`](crate::xpath::ast::XPathExpr) AST nodes.
+//! Parses a subset of XPath 1.0 into [`XPathExpr`] AST nodes.
 //!
 //! # Supported syntax
 //!
@@ -12,6 +12,8 @@
 //! - `/path/to/tag` — absolute path
 //! - `//*` — descendant wildcard
 //! - `..` — parent axis
+//!
+//! [`XPathExpr`]: crate::xpath::ast::XPathExpr
 
 use super::ast::{NameTest, PathStep, Predicate, XPathExpr};
 use fhp_core::error::XPathError;

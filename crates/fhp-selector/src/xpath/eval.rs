@@ -1,6 +1,8 @@
 //! XPath expression evaluator.
 //!
-//! Walks the DOM tree and collects nodes or text matching an [`XPathExpr`](crate::xpath::ast::XPathExpr).
+//! Walks the DOM tree and collects nodes or text matching an [`XPathExpr`].
+//!
+//! [`XPathExpr`]: crate::xpath::ast::XPathExpr
 
 use std::collections::{HashMap, HashSet};
 

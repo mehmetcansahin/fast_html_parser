@@ -15,7 +15,9 @@
 //! assert!(root.children().count() > 0);
 //! ```
 
-/// Arena allocator for [`Node`](crate::node::Node)s, text, and attributes.
+/// Arena allocator for [`Node`]s, text, and attributes.
+///
+/// [`Node`]: crate::node::Node
 pub mod arena;
 /// Async HTML parser (requires `async-tokio` feature).
 #[cfg(feature = "async-tokio")]
@@ -24,15 +26,24 @@ pub mod async_parser;
 #[cfg(feature = "async-async-std")]
 #[cfg_attr(docsrs, doc(cfg(feature = "async-async-std")))]
 pub mod async_std_parser;
-/// Tree builder — converts a [`Token`](fhp_tokenizer::token::Token) stream into a DOM tree.
+/// Tree builder — converts a [`Token`] stream into a DOM tree.
+///
+/// [`Token`]: fhp_tokenizer::token::Token
 pub mod builder;
-/// Cache-line aligned [`Node`](crate::node::Node) layout.
+/// Cache-line aligned [`Node`] layout.
+///
+/// [`Node`]: crate::node::Node
 pub mod node;
-/// Streaming and incremental parsing — [`StreamParser`](crate::streaming::StreamParser) and [`EarlyStopParser`](crate::streaming::EarlyStopParser).
+/// Streaming and incremental parsing — [`StreamParser`] and [`EarlyStopParser`].
+///
+/// [`StreamParser`]: crate::streaming::StreamParser
+/// [`EarlyStopParser`]: crate::streaming::EarlyStopParser
 #[cfg(feature = "encoding")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub mod streaming;
-/// Allocation-free traversal iterators (uses [`VecDeque`](std::collections::VecDeque) for BFS).
+/// Allocation-free traversal iterators (uses [`VecDeque`] for BFS).
+///
+/// [`VecDeque`]: std::collections::VecDeque
 pub mod traverse;
 
 use fhp_core::is_html_whitespace;

@@ -1,9 +1,11 @@
 //! Async HTML parser powered by Tokio.
 //!
 //! Reads from a [`tokio::io::AsyncRead`] source in 64 KB chunks and builds
-//! the DOM tree incrementally using [`StreamParser`](crate::streaming::StreamParser).
+//! the DOM tree incrementally using [`StreamParser`].
 //!
 //! Requires the `async-tokio` feature flag.
+//!
+//! [`StreamParser`]: crate::streaming::StreamParser
 
 use tokio::io::{AsyncRead, AsyncReadExt};
 

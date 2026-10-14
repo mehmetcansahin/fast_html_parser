@@ -1,8 +1,10 @@
 //! Streaming decoder for chunk-based processing.
 //!
-//! [`DecodingReader`] wraps a [`Read`](std::io::Read) source and decodes
+//! [`DecodingReader`] wraps a [`Read`] source and decodes
 //! bytes on-the-fly into UTF-8. This is useful for large inputs where
 //! loading the entire document into memory is undesirable.
+//!
+//! [`Read`]: std::io::Read
 
 use std::io::{self, Read};
 
