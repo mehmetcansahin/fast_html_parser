@@ -7,32 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- A tokenizer oracle shared by `cargo test` and the new
-  `tokenizer_differential` fuzz target, which replaces `tokenizer_equivalence`.
-  It compares all five tokenizer entry points under arbitrary chunking,
-  checks span and token invariants, shifts input across SIMD blocks, and
-  round-trips serialized tokens.
-- An HTML fuzzing dictionary and committed tokenizer seeds, both used by the
-  release gate.
-- The html5lib-tests tokenizer suite, vendored at a pinned commit and run by
-  `cargo test` against a categorized expected-failures list.
-- A test that one-shot and streaming tokenization time grows linearly on
-  adversarial input, such as unterminated comments, tags, and raw text.
-
-### Fixed
-
-- Trim only HTML whitespace around doctype content; vertical tab, NBSP, and
-  other Unicode whitespace are now kept, as the WHATWG tokenizer requires.
-- Resolve benchmark fixture paths on Windows.
-- Preserve Rust 1.85 support for multi-root positioned XPath evaluation.
-- Bound oversized raw-text/RCDATA closing-tag candidates without accumulating
-  their discarded source; preserve the original tag name and quote state.
-- Drop a raw-text/RCDATA closing tag interrupted by EOF identically across
-  one-shot, callback, streaming, and early-stop parsing.
-
-## [0.2.0] - 2026-07-16
+## [0.2.0] - 2026-10-14
 
 ### Added
 
@@ -46,6 +21,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and legacy forms.
 - A curated canonical-DOM conformance corpus and fuzz targets for tokenizer
   chunking, one-shot/streaming tree equivalence, entities, and selectors.
+- A tokenizer oracle shared by `cargo test` and the `tokenizer_differential`
+  fuzz target. It compares all five tokenizer entry points under arbitrary
+  chunking, checks span and token invariants, shifts input across SIMD blocks,
+  and round-trips serialized tokens.
+- An HTML fuzzing dictionary and committed tokenizer seeds, both used by the
+  release gate.
+- The html5lib-tests tokenizer suite, vendored at a pinned commit and run by
+  `cargo test` against a categorized expected-failures list.
+- A test that one-shot and streaming tokenization time grows linearly on
+  adversarial input, such as unterminated comments, tags, and raw text.
 - Selector complexity limits and memoized matching with dense and sparse state
   storage; XPath literal name tests now retain custom element names.
 - `scripts/release.py check` and `release --version`, which provide the required
@@ -149,6 +134,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   compacts its residual once per feed, and keeps oversized tags, close-tag
   candidates, and invalid UTF-8 tails bounded without splitting valid
   characters.
+- Tokenizer: oversized raw-text/RCDATA closing-tag candidates are bounded
+  without accumulating their discarded source and keep the original tag name
+  and quote state; a closing tag interrupted by EOF is dropped identically
+  across one-shot, callback, streaming, and early-stop parsing.
+- Tokenizer: only HTML whitespace is trimmed around doctype content; vertical
+  tab, NBSP, and other Unicode whitespace are kept, as the WHATWG tokenizer
+  requires.
 - Tree: nested lists, nested tables, captions, column groups, and in-table
   `script`, `style`, `form`, and hidden `input` keep their structure instead of
   being flattened or fostered out; foster parenting depends on the current
