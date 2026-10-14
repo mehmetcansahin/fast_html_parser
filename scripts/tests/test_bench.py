@@ -2,6 +2,7 @@ import copy
 import dataclasses
 import hashlib
 import json
+import shutil
 import sys
 import tempfile
 import unittest
@@ -399,6 +400,23 @@ class CriterionJsonTests(unittest.TestCase):
             self.assertEqual(parsed[0].benchmark, "regression/group/case")
             self.assertAlmostEqual(parsed[0].point, 0.061)
             self.assertAlmostEqual(parsed[0].lower, 0.012)
+
+    def test_estimates_beyond_windows_max_path_are_found(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            home = Path(temporary)
+            # Criterion can write past MAX_PATH; mirror that with long paths.
+            result = bench._long_path(home).joinpath(*["component"] * 30, "new")
+            self.assertGreater(len(str(result / "estimates.json")), 300)
+            try:
+                write_json(result / "estimates.json", estimate_document(20.0, 18.0, 22.0))
+                write_json(result / "benchmark.json", {"full_id": "regression/deep"})
+                write_sample_statistics(result, [20.0, 21.0])
+                estimates = bench.parse_new_estimates(
+                    home, bench.Harness("harness", "package", "bench")
+                )
+                self.assertEqual([e.benchmark for e in estimates], ["regression/deep"])
+            finally:
+                shutil.rmtree(bench._long_path(home / "component"), ignore_errors=True)
 
     def test_estimate_rejects_non_95_percent_confidence_interval(self):
         with tempfile.TemporaryDirectory() as temporary:

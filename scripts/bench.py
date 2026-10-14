@@ -1078,11 +1078,29 @@ def _benchmark_identity(benchmark_path: Path) -> Tuple[str, Optional[str], Optio
     return full_id, kind, _finite_number(raw_value, benchmark_path, "throughput")
 
 
+def _long_path(path: Path) -> Path:
+    """Return `path` in a form Windows can open beyond MAX_PATH.
+
+    Criterion nests every benchmark ID component under CRITERION_HOME, so
+    result paths easily exceed 260 characters. Unless long paths are enabled
+    system-wide, Windows rejects them and `Path.rglob` skips them silently,
+    dropping estimates. Extended-length paths are exempt from that limit.
+    """
+    if os.name != "nt":
+        return path
+    text = str(path.resolve())
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
+
+
 def parse_new_estimates(
     home: Path, harness: Harness, rotation: Optional[str] = None
 ) -> List[Estimate]:
     estimates: List[Estimate] = []
-    for path in sorted(home.rglob("new/estimates.json")):
+    for path in sorted(_long_path(home).rglob("new/estimates.json")):
         benchmark_path = path.parent / "benchmark.json"
         if not benchmark_path.is_file():
             raise BenchError(f"missing Criterion benchmark metadata beside {path}")
@@ -1150,7 +1168,7 @@ def parse_named_estimates(home: Path, harness: Harness, name: str) -> List[Estim
 
 def parse_change_estimates(home: Path, harness: Harness) -> List[ChangeEstimate]:
     estimates: List[ChangeEstimate] = []
-    for path in sorted(home.rglob("change/estimates.json")):
+    for path in sorted(_long_path(home).rglob("change/estimates.json")):
         benchmark_path = path.parent.parent / "new" / "benchmark.json"
         if not benchmark_path.is_file():
             raise BenchError(f"missing new/benchmark.json for Criterion change {path}")
@@ -1554,7 +1572,7 @@ def clear_transient_comparison_data(root: Path, home: Path) -> None:
     # itself contain a component named `new` or `change`; only Criterion result
     # leaves with their direct files qualify for removal.
     transient: List[Path] = []
-    for path in resolved_home.rglob("*"):
+    for path in _long_path(resolved_home).rglob("*"):
         if not path.is_dir() or not (path / "estimates.json").is_file():
             continue
         if path.name == "new" and (path / "benchmark.json").is_file():
@@ -1571,7 +1589,7 @@ def _named_baseline_dirs(home: Path, name: str) -> List[Path]:
         return []
     return sorted(
         path
-        for path in home.rglob(name)
+        for path in _long_path(home).rglob(name)
         if path.is_dir()
         and any(
             (path / filename).is_file()
@@ -1605,7 +1623,7 @@ def ensure_baseline_name_available(root: Path, name: str) -> None:
         detail = (
             str(metadata_path.relative_to(root))
             if metadata_path.exists()
-            else str(existing_dirs[0].relative_to(root))
+            else str(existing_dirs[0].relative_to(_long_path(root)))
         )
         raise BenchError(
             f"baseline {name!r} already exists or has partial artifacts at {detail}; "
