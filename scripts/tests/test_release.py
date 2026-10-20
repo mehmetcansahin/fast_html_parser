@@ -111,6 +111,7 @@ other = { version = "0.1.0", path = "../other" }
                         "schema_version": 1,
                         "canonical_dom": {"fixtures": [{"id": "fixture"}]},
                         "selectors": [{"fixture_id": "fixture", "id": "selector"}],
+                        "tokenizer": {"fixtures": [{"id": "fixture"}]},
                     }
                 ),
                 encoding="utf-8",

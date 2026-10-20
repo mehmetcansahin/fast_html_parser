@@ -1,6 +1,8 @@
+import contextlib
 import copy
 import dataclasses
 import hashlib
+import io
 import json
 import shutil
 import sys
@@ -84,6 +86,7 @@ def write_semantic_contract(root):
             "schema_version": 1,
             "canonical_dom": {"fixtures": [{"id": "fixture"}]},
             "selectors": [{"fixture_id": "fixture", "id": "selector"}],
+            "tokenizer": {"fixtures": [{"id": "fixture"}]},
         },
     )
     return path
@@ -696,6 +699,7 @@ class RunDriftTests(unittest.TestCase):
                             "schema_version": 1,
                             "canonical_dom": {"fixtures": [{"id": "changed"}]},
                             "selectors": [{"fixture_id": "changed", "id": "selector"}],
+                            "tokenizer": {"fixtures": [{"id": "changed"}]},
                         }
                     )
                 ),
@@ -709,6 +713,48 @@ class RunDriftTests(unittest.TestCase):
                 mutate(root)
                 with self.assertRaises(bench.BenchError):
                     bench.assert_run_inputs_unchanged(root, initial)
+
+    def test_semantic_contract_requires_tokenizer_fixtures(self):
+        valid = {
+            "schema_version": 1,
+            "canonical_dom": {"fixtures": [{"id": "fixture"}]},
+            "selectors": [{"fixture_id": "fixture", "id": "selector"}],
+        }
+        for tokenizer in (None, [], {}, {"fixtures": []}, {"fixtures": {"id": "x"}}):
+            with self.subTest(tokenizer=tokenizer), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                document = dict(valid)
+                if tokenizer is not None:
+                    document["tokenizer"] = tokenizer
+                write_json(root / "benchmarks" / "contracts.json", document)
+                with self.assertRaisesRegex(bench.BenchError, "tokenizer.fixtures"):
+                    bench.semantic_contract_sha256(root)
+
+    def test_repository_tokenizer_contract_digests_only_full_token_rows(self):
+        root = bench.repository_root()
+        bench.semantic_contract_sha256(root)
+        document = json.loads(
+            (root / "benchmarks" / "contracts.json").read_text(encoding="utf-8")
+        )
+        fixtures = document["tokenizer"]["fixtures"]
+        self.assertEqual(
+            [fixture["id"] for fixture in fixtures],
+            [
+                "realworld_hackernews_34kb",
+                "realworld_github_301kb",
+                "realworld_stackoverflow_415kb",
+                "realworld_wikipedia_590kb",
+                "synthetic_5mb",
+            ],
+        )
+        full_token = ("fhp_", "html5gum_", "html5ever_")
+        for fixture in fixtures:
+            for name, entry in fixture["implementations"].items():
+                with self.subTest(fixture=fixture["id"], implementation=name):
+                    self.assertIsInstance(entry["count"], int)
+                    # lol_html and tl do different work, so they never carry
+                    # the token stream that makes a row contract-equal.
+                    self.assertEqual("token_stream" in entry, name.startswith(full_token))
 
 
 class MarkdownTests(unittest.TestCase):
@@ -789,6 +835,57 @@ class MarkdownTests(unittest.TestCase):
         self.assertEqual(result.lower, 2.0)
         self.assertEqual(result.upper, 7.0)
         self.assertEqual(result.run_count, 6)
+
+    TOKENIZER_GROUP = (
+        "comparison/fhp-tokenizer/tokenizer_comparison_bench/realworld/"
+        "hackernews_34kb/tokenize/contract_equal/push_callback"
+    )
+
+    def test_tokenizer_ratios_use_the_fhp_member_of_each_group(self):
+        group = self.TOKENIZER_GROUP
+        reference = group.replace("contract_equal/push_callback", "semantic_reference")
+        estimates = []
+        for rotation in bench.ORDER_ROTATIONS:
+            estimates.append(self.raw(group + "/fhp", 10.0, rotation))
+            estimates.append(self.raw(group + "/html5gum_callback", 25.0, rotation))
+            estimates.append(self.raw(group + "/html5ever_tokenizer", 40.0, rotation))
+            # Absolute rows, including less-work references, never form ratios.
+            estimates.append(self.raw(reference + "/full_token/fhp_tokenize_with", 10.0, rotation))
+            estimates.append(
+                self.raw(reference + "/lazy_rewriter/lol_html_noop_passthrough", 1.0, rotation)
+            )
+            estimates.append(self.raw(reference + "/nonspec_dom/tl_parse", 5.0, rotation))
+        ratios = bench.contract_equal_ratios(estimates)
+        self.assertEqual(
+            [(ratio.group, ratio.competitor, ratio.ratio, ratio.run_count) for ratio in ratios],
+            [
+                (group, "html5ever_tokenizer", 4.0, 6),
+                (group, "html5gum_callback", 2.5, 6),
+            ],
+        )
+
+    def test_tokenizer_ratios_stay_out_of_the_root_readme_summary(self):
+        group = self.TOKENIZER_GROUP
+        ratio = bench.ContractRatio(group, "html5gum_callback", 2.5, 2.4, 2.6, 6)
+        summary = bench.generate_readme_summary(
+            sample_metadata(),
+            [
+                self.published(group + "/fhp", 10.0),
+                self.published(group + "/html5gum_callback", 25.0),
+            ],
+            [ratio],
+            Path("benchmarks/results/report.md"),
+        )
+        self.assertNotIn("html5gum", summary)
+        report = bench.generate_report_markdown(
+            sample_metadata(),
+            [
+                self.published(group + "/fhp", 10.0),
+                self.published(group + "/html5gum_callback", 25.0),
+            ],
+            [ratio],
+        )
+        self.assertIn(f"| `{group}` | `html5gum_callback` | 2.500× |", report)
 
     def test_report_keeps_absolute_rows_and_marks_ratios(self):
         metadata = sample_metadata()
@@ -987,6 +1084,15 @@ class MatrixAndCommandTests(unittest.TestCase):
                 "measurement_time_seconds": 10.0,
             },
         )
+        override = criterion["settings"]["overrides"]["tokenize_contract_equal"]
+        self.assertEqual(
+            override,
+            {
+                "benchmark_group_pattern": "*/tokenize/contract_equal/*",
+                "sampling_mode": "flat",
+                "measurement_time_seconds": 10.0,
+            },
+        )
 
     def test_production_matrix_enables_simd_explicitly(self):
         by_id = {harness.id: harness for harness in bench.FULL_MATRIX}
@@ -1056,8 +1162,19 @@ class MatrixAndCommandTests(unittest.TestCase):
             [
                 ("comparison_bench", "fast-html-parser/comparison"),
                 ("realworld_bench", "fast-html-parser/realworld"),
+                ("tokenizer_comparison_bench", "fhp-tokenizer/comparison"),
             ],
         )
+
+    def test_tokenizer_comparison_harness_runs_unfiltered_outside_quick(self):
+        by_id = {harness.id: harness for harness in bench.FULL_MATRIX}
+        harness = by_id["fhp-tokenizer/comparison"]
+        self.assertEqual(harness.package, "fhp-tokenizer")
+        self.assertEqual(harness.features, ("entity-decode", "simd"))
+        self.assertIsNone(harness.filter_pattern)
+        self.assertEqual(harness.quick_filter, bench.TOKENIZER_COMPARISON_QUICK_FILTER)
+        self.assertTrue(bench.TOKENIZER_COMPARISON_QUICK_FILTER.startswith("comparison/"))
+        self.assertNotIn("quick_filter", harness.as_metadata())
 
     def test_quick_matrix_contains_only_regression_slices(self):
         quick = bench._quick_matrix()
@@ -1068,6 +1185,59 @@ class MatrixAndCommandTests(unittest.TestCase):
                 harness.filter_pattern in {"regression/", "streaming/async"}
                 for harness in quick
             )
+        )
+
+    def test_quick_run_adds_comparison_smoke_slices_to_regression_slices(self):
+        regression = bench._quick_matrix()
+        run = bench._quick_run_matrix()
+        self.assertEqual(run[: len(regression)], regression)
+        smoke = run[len(regression) :]
+        self.assertEqual(
+            [(harness.id, harness.filter_pattern) for harness in smoke],
+            [("fhp-tokenizer/comparison", bench.TOKENIZER_COMPARISON_QUICK_FILTER)],
+        )
+        self.assertNotIn("fhp-tokenizer/comparison", {harness.id for harness in regression})
+
+    def test_quick_command_runs_smoke_slices_in_the_default_order(self):
+        calls = []
+
+        def fake_run(root, harness, home, criterion_args, order=None):
+            calls.append((harness.id, tuple(criterion_args), order))
+            return {"harness": harness.id}
+
+        def fake_parse(home, harness, rotation=None):
+            prefix = "comparison/" if harness.quick_filter else "regression/"
+            return [
+                bench.Estimate(
+                    benchmark=prefix + harness.id,
+                    mean_ns=1.0,
+                    lower_ns=1.0,
+                    upper_ns=1.0,
+                    throughput_kind=None,
+                    throughput_value=None,
+                    harness=harness.id,
+                )
+            ]
+
+        output = io.StringIO()
+        with (
+            mock.patch.object(bench, "validate_fixture_manifest", return_value=[]),
+            mock.patch.object(bench, "run_harness", side_effect=fake_run),
+            mock.patch.object(bench, "parse_new_estimates", side_effect=fake_parse),
+            mock.patch.object(bench, "capture_metadata", return_value={}),
+            mock.patch.object(bench, "_atomic_write_json") as write,
+            contextlib.redirect_stdout(output),
+        ):
+            self.assertEqual(bench.command_quick(Path(".")), 0)
+
+        orders = {harness_id: order for harness_id, _, order in calls}
+        self.assertEqual(orders.pop("fhp-tokenizer/comparison"), bench.DEFAULT_ORDER)
+        self.assertTrue(all(order is None for order in orders.values()))
+        self.assertTrue(all(args == bench.QUICK_RUN_ARGS for _, args, _ in calls))
+        self.assertEqual(len(write.call_args.args[1]["estimates"]), len(calls))
+        self.assertIn(
+            f"{len(calls) - 1} regression estimates, 1 comparison smoke estimates",
+            output.getvalue(),
         )
 
     def test_save_and_compare_cli_accept_quick_flag(self):

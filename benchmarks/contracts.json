@@ -69,5 +69,89 @@
     { "fixture_id": "realworld_wikipedia_590kb", "id": "link_with_href", "css": "a[href]", "counts": { "fast_html_parser": 1908, "scraper": 1908, "tl": 1905 } },
     { "fixture_id": "realworld_wikipedia_590kb", "id": "class_mw_body", "css": "main.mw-body", "counts": { "fast_html_parser": 1, "scraper": 1, "tl": 1 } },
     { "fixture_id": "realworld_wikipedia_590kb", "id": "descendant_table_td", "css": "table td", "counts": { "fast_html_parser": 60, "scraper": 60, "tl": 0 } }
-  ]
+  ],
+  "tokenizer": {
+    "algorithm": "fnv1a-128-length-prefixed-v1",
+    "token_stream": "lowercase start tags with first-kept, name-sorted attributes and self-closing flag; lowercase end tags; decoded text with adjacent runs merged; comments; one marker per doctype",
+    "excluded": "parse errors, EOF tokens, doctype identifiers",
+    "raw_text_elements": "script data: script; raw text: style, iframe, xmp, noembed, noframes; RCDATA: title, textarea; plaintext; noscript is markup",
+    "count": "native tokens or events returned by the timed adapter",
+    "fixtures": [
+      {
+        "id": "realworld_hackernews_34kb",
+        "implementations": {
+          "fhp_tokenize": { "count": 2077, "token_stream": { "event_count": 2077, "canonical_bytes": 85214, "fnv1a_128": "201419901944705366986719562645362439137" } },
+          "fhp_tokenize_with": { "count": 2077, "token_stream": { "event_count": 2077, "canonical_bytes": 85214, "fnv1a_128": "201419901944705366986719562645362439137" } },
+          "fhp_stream_feed_64k": { "count": 2077, "token_stream": { "event_count": 2077, "canonical_bytes": 85214, "fnv1a_128": "201419901944705366986719562645362439137" } },
+          "fhp_stream_feed_str_with_64k": { "count": 2077, "token_stream": { "event_count": 2077, "canonical_bytes": 85214, "fnv1a_128": "201419901944705366986719562645362439137" } },
+          "html5gum_iterator": { "count": 2077, "token_stream": { "event_count": 2077, "canonical_bytes": 85214, "fnv1a_128": "201419901944705366986719562645362439137" } },
+          "html5gum_callback": { "count": 5021, "token_stream": { "event_count": 2077, "canonical_bytes": 85214, "fnv1a_128": "201419901944705366986719562645362439137" } },
+          "html5ever_tokenizer": { "count": 2182, "token_stream": { "event_count": 2077, "canonical_bytes": 85214, "fnv1a_128": "201419901944705366986719562645362439137" } },
+          "lol_html_noop_passthrough": { "count": 34284 },
+          "lol_html_element_text_comment_handlers": { "count": 1762 },
+          "tl_parse": { "count": 1284 }
+        }
+      },
+      {
+        "id": "realworld_github_301kb",
+        "implementations": {
+          "fhp_tokenize": { "count": 3358, "token_stream": { "event_count": 3358, "canonical_bytes": 384491, "fnv1a_128": "288554672232315050379948442271888136438" } },
+          "fhp_tokenize_with": { "count": 3358, "token_stream": { "event_count": 3358, "canonical_bytes": 384491, "fnv1a_128": "288554672232315050379948442271888136438" } },
+          "fhp_stream_feed_64k": { "count": 3358, "token_stream": { "event_count": 3358, "canonical_bytes": 384491, "fnv1a_128": "288554672232315050379948442271888136438" } },
+          "fhp_stream_feed_str_with_64k": { "count": 3358, "token_stream": { "event_count": 3358, "canonical_bytes": 384491, "fnv1a_128": "288554672232315050379948442271888136438" } },
+          "html5gum_iterator": { "count": 3360, "token_stream": { "event_count": 3358, "canonical_bytes": 384491, "fnv1a_128": "288554672232315050379948442271888136438" } },
+          "html5gum_callback": { "count": 10241, "token_stream": { "event_count": 3358, "canonical_bytes": 384491, "fnv1a_128": "288554672232315050379948442271888136438" } },
+          "html5ever_tokenizer": { "count": 4369, "token_stream": { "event_count": 3358, "canonical_bytes": 384491, "fnv1a_128": "288554672232315050379948442271888136438" } },
+          "lol_html_noop_passthrough": { "count": 301093 },
+          "lol_html_element_text_comment_handlers": { "count": 3581 },
+          "tl_parse": { "count": 2360 }
+        }
+      },
+      {
+        "id": "realworld_stackoverflow_415kb",
+        "implementations": {
+          "fhp_tokenize": { "count": 9779, "token_stream": { "event_count": 9779, "canonical_bytes": 637434, "fnv1a_128": "244344779965266848081574591068468097869" } },
+          "fhp_tokenize_with": { "count": 9779, "token_stream": { "event_count": 9779, "canonical_bytes": 637434, "fnv1a_128": "244344779965266848081574591068468097869" } },
+          "fhp_stream_feed_64k": { "count": 9779, "token_stream": { "event_count": 9779, "canonical_bytes": 637434, "fnv1a_128": "244344779965266848081574591068468097869" } },
+          "fhp_stream_feed_str_with_64k": { "count": 9779, "token_stream": { "event_count": 9779, "canonical_bytes": 637434, "fnv1a_128": "244344779965266848081574591068468097869" } },
+          "html5gum_iterator": { "count": 9780, "token_stream": { "event_count": 9779, "canonical_bytes": 637434, "fnv1a_128": "244344779965266848081574591068468097869" } },
+          "html5gum_callback": { "count": 25499, "token_stream": { "event_count": 9779, "canonical_bytes": 637434, "fnv1a_128": "244344779965266848081574591068468097869" } },
+          "html5ever_tokenizer": { "count": 14702, "token_stream": { "event_count": 9779, "canonical_bytes": 637434, "fnv1a_128": "244344779965266848081574591068468097869" } },
+          "lol_html_noop_passthrough": { "count": 415096 },
+          "lol_html_element_text_comment_handlers": { "count": 11604 },
+          "tl_parse": { "count": 7243 }
+        }
+      },
+      {
+        "id": "realworld_wikipedia_590kb",
+        "implementations": {
+          "fhp_tokenize": { "count": 26401, "token_stream": { "event_count": 26401, "canonical_bytes": 1159564, "fnv1a_128": "109985071599104834202915723299544897292" } },
+          "fhp_tokenize_with": { "count": 26401, "token_stream": { "event_count": 26401, "canonical_bytes": 1159564, "fnv1a_128": "109985071599104834202915723299544897292" } },
+          "fhp_stream_feed_64k": { "count": 26401, "token_stream": { "event_count": 26401, "canonical_bytes": 1159564, "fnv1a_128": "109985071599104834202915723299544897292" } },
+          "fhp_stream_feed_str_with_64k": { "count": 26401, "token_stream": { "event_count": 26401, "canonical_bytes": 1159564, "fnv1a_128": "109985071599104834202915723299544897292" } },
+          "html5gum_iterator": { "count": 26401, "token_stream": { "event_count": 26401, "canonical_bytes": 1159564, "fnv1a_128": "109985071599104834202915723299544897292" } },
+          "html5gum_callback": { "count": 57229, "token_stream": { "event_count": 26401, "canonical_bytes": 1159564, "fnv1a_128": "109985071599104834202915723299544897292" } },
+          "html5ever_tokenizer": { "count": 28024, "token_stream": { "event_count": 26401, "canonical_bytes": 1159564, "fnv1a_128": "109985071599104834202915723299544897292" } },
+          "lol_html_noop_passthrough": { "count": 589673 },
+          "lol_html_element_text_comment_handlers": { "count": 26798 },
+          "tl_parse": { "count": 17815 }
+        }
+      },
+      {
+        "id": "synthetic_5mb",
+        "implementations": {
+          "fhp_tokenize": { "count": 214722, "token_stream": { "event_count": 214722, "canonical_bytes": 9769718, "fnv1a_128": "46851621720247947321364724185920982811" } },
+          "fhp_tokenize_with": { "count": 214722, "token_stream": { "event_count": 214722, "canonical_bytes": 9769718, "fnv1a_128": "46851621720247947321364724185920982811" } },
+          "fhp_stream_feed_64k": { "count": 214722, "token_stream": { "event_count": 214722, "canonical_bytes": 9769718, "fnv1a_128": "46851621720247947321364724185920982811" } },
+          "fhp_stream_feed_str_with_64k": { "count": 214722, "token_stream": { "event_count": 214722, "canonical_bytes": 9769718, "fnv1a_128": "46851621720247947321364724185920982811" } },
+          "html5gum_iterator": { "count": 214722, "token_stream": { "event_count": 214722, "canonical_bytes": 9769718, "fnv1a_128": "46851621720247947321364724185920982811" } },
+          "html5gum_callback": { "count": 454363, "token_stream": { "event_count": 214722, "canonical_bytes": 9769718, "fnv1a_128": "46851621720247947321364724185920982811" } },
+          "html5ever_tokenizer": { "count": 318447, "token_stream": { "event_count": 214722, "canonical_bytes": 9769718, "fnv1a_128": "46851621720247947321364724185920982811" } },
+          "lol_html_noop_passthrough": { "count": 5395593 },
+          "lol_html_element_text_comment_handlers": { "count": 251097 },
+          "tl_parse": { "count": 155276 }
+        }
+      }
+    ]
+  }
 }

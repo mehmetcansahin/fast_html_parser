@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- A contract-checked tokenizer comparison benchmark against html5gum,
+  html5ever, lol_html and tl. Ratios are formed only where a competitor's
+  canonical token stream matches fhp-tokenizer's; lol_html and tl rows are
+  labelled as less work or non-spec references. See
+  [benchmarks/README.md](benchmarks/README.md#tokenizer-comparison).
+
 ### Performance
 
 - `StreamTokenizer::feed_str_with` is 1.9–3.0x faster and within 7% of

@@ -69,7 +69,12 @@ CRITERION_DEFAULT_SETTINGS = {
             "benchmark_group_pattern": "*/parse/contract_equal/*",
             "sampling_mode": "flat",
             "measurement_time_seconds": 10.0,
-        }
+        },
+        "tokenize_contract_equal": {
+            "benchmark_group_pattern": "*/tokenize/contract_equal/*",
+            "sampling_mode": "flat",
+            "measurement_time_seconds": 10.0,
+        },
     },
 }
 STABILITY_POLICY = {
@@ -105,6 +110,9 @@ class Harness:
     features: Tuple[str, ...] = ()
     filter_pattern: Optional[str] = None
     order_sensitive: bool = False
+    # Criterion filter for a comparison smoke slice in `bench.py quick`.
+    # `save --quick` and `compare --quick` never run these slices.
+    quick_filter: Optional[str] = None
 
     def as_metadata(self) -> Dict[str, Any]:
         return {
@@ -119,6 +127,7 @@ class Harness:
 
 
 FACADE_FEATURES = ("css-selector", "encoding", "entity-decode", "simd")
+TOKENIZER_COMPARISON_QUICK_FILTER = "comparison/fhp-tokenizer/tokenizer_comparison_bench/"
 
 # Each binary has an isolated Criterion output tree.  The async-only e2e slice
 # is separate so enabling Tokio does not duplicate all synchronous samples.
@@ -170,6 +179,14 @@ FULL_MATRIX: Tuple[Harness, ...] = (
         "realworld_bench",
         FACADE_FEATURES,
         order_sensitive=True,
+    ),
+    Harness(
+        "fhp-tokenizer/comparison",
+        "fhp-tokenizer",
+        "tokenizer_comparison_bench",
+        ("entity-decode", "simd"),
+        order_sensitive=True,
+        quick_filter=TOKENIZER_COMPARISON_QUICK_FILTER,
     ),
 )
 
@@ -448,6 +465,13 @@ def semantic_contract_sha256(root: Path) -> str:
         raise BenchError("benchmarks/contracts.json has no canonical_dom.fixtures array")
     if not canonical["fixtures"] or not isinstance(selectors, list) or not selectors:
         raise BenchError("benchmarks/contracts.json contract arrays cannot be empty")
+    tokenizer = document.get("tokenizer")
+    if (
+        not isinstance(tokenizer, dict)
+        or not isinstance(tokenizer.get("fixtures"), list)
+        or not tokenizer["fixtures"]
+    ):
+        raise BenchError("benchmarks/contracts.json has no non-empty tokenizer.fixtures array")
     return _sha256_file(path)
 
 
@@ -1494,6 +1518,21 @@ def _quick_matrix() -> Tuple[Harness, ...]:
     return tuple(quick)
 
 
+def _quick_run_matrix() -> Tuple[Harness, ...]:
+    """Regression slices plus the comparison smoke slices run by ``quick``.
+
+    Smoke slices stay out of ``save --quick`` and ``compare --quick``: they
+    never gate, and their contract-equal stability checks need full sampling.
+    """
+
+    smoke = tuple(
+        dataclasses.replace(harness, filter_pattern=harness.quick_filter)
+        for harness in FULL_MATRIX
+        if harness.quick_filter is not None
+    )
+    return _quick_matrix() + smoke
+
+
 def _run_namespace() -> str:
     timestamp = datetime_module.datetime.now(datetime_module.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     return f"{timestamp}-{os.getpid()}"
@@ -1520,24 +1559,29 @@ def command_verify(root: Path) -> int:
 
 def command_quick(root: Path) -> int:
     fixtures = validate_fixture_manifest(root)
-    matrix = _quick_matrix()
+    matrix = _quick_run_matrix()
     namespace = "quick/" + _run_namespace()
-    result_count = 0
     commands = []
     estimates = []
     for harness in matrix:
         home = _criterion_home(root, namespace, harness)
-        commands.append(run_harness(root, harness, home, QUICK_RUN_ARGS))
+        order = DEFAULT_ORDER if harness.order_sensitive else None
+        commands.append(run_harness(root, harness, home, QUICK_RUN_ARGS, order))
         parsed = parse_new_estimates(home, harness)
         if not parsed:
             raise BenchError(f"quick harness produced no Criterion estimates: {harness.id}")
-        result_count += len(parsed)
         estimates.extend(parsed)
     metadata = capture_metadata(root, "quick", matrix, fixtures, "quick")
     metadata["commands"] = commands
     metadata["estimates"] = [estimate.as_metadata() for estimate in estimates]
     _atomic_write_json(root / "target" / "criterion" / namespace / "metadata.json", metadata)
-    print(f"quick suite completed: {result_count} regression estimates")
+    regression_count = sum(
+        estimate.benchmark.startswith("regression/") for estimate in estimates
+    )
+    print(
+        f"quick suite completed: {regression_count} regression estimates, "
+        f"{len(estimates) - regression_count} comparison smoke estimates"
+    )
     return 0
 
 
@@ -2276,7 +2320,7 @@ def generate_report_markdown(
     ]
     attempt_count = int(metadata.get("attempt_count", 1))
     range_note = (
-        "Single-run rows show Criterion's 95% confidence interval. The two "
+        "Single-run rows show Criterion's 95% confidence interval. The "
         "order-sensitive comparison harnesses use all six parser permutations"
         f" across {attempt_count} full attempt(s); their estimate is the median of "
         "run means and the range is min–max. Lower time is better."
@@ -2565,7 +2609,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands = parser.add_subparsers(dest="command", required=True)
     commands.add_parser("verify", help="validate fixtures and execute every harness once")
-    commands.add_parser("quick", help="run the regression namespace in Criterion quick mode")
+    commands.add_parser(
+        "quick",
+        help="run the regression namespace and comparison smoke slices in Criterion quick mode",
+    )
     save = commands.add_parser("save", help="save a named machine-local Criterion baseline")
     save.add_argument("name")
     save.add_argument(
