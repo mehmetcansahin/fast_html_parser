@@ -100,6 +100,104 @@ pub fn extract_tokens_bytes<'a>(
     Ok(extract_tokens(input, index))
 }
 
+/// Where [`tokenize_prefix`] stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PrefixEnd {
+    /// A start tag entered the text element `Tag` (or [`Tag::Plaintext`]);
+    /// its text starts at the stop's `consumed` offset.
+    TextElement(Tag),
+    /// The `<` at this offset needs more input to classify. The bytes before
+    /// it, from `consumed`, are text.
+    Undecided(usize),
+    /// Every delimiter was processed. Unfinished markup starts at `consumed`
+    /// when `in_markup` is set; otherwise the rest of the input is text.
+    End { in_markup: bool },
+}
+
+/// Result of [`tokenize_prefix`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct PrefixStop {
+    /// Length of the input prefix whose tokens have all been emitted.
+    pub(crate) consumed: usize,
+    pub(crate) end: PrefixEnd,
+}
+
+/// Tokenize the complete markup at the start of `input`, which is followed by
+/// more input that has not arrived yet.
+///
+/// This is the fused single-pass loop of [`crate::tokenize_with`] without the
+/// end-of-input assumption: a `<` is only classified once enough bytes follow
+/// it, trailing text is not flushed, and an unfinished construct is left
+/// unemitted. It stops early when a start tag enters a text element, because
+/// the streaming tokenizer bounds that text itself. The emitted tokens are
+/// the leading tokens the one-shot tokenizer emits for any document that
+/// starts with `input`.
+pub(crate) fn tokenize_prefix<'a>(input: &'a str, emit: &mut impl FnMut(Token<'a>)) -> PrefixStop {
+    const BLOCK_SIZE: usize = 64;
+
+    let bytes = input.as_bytes();
+    let compute = fhp_simd::dispatch::ops().compute_all_masks;
+    let mut parser = Parser::new(input);
+
+    let mut block_start = 0;
+    while block_start < bytes.len() {
+        let block_end = (block_start + BLOCK_SIZE).min(bytes.len());
+        // SAFETY: dispatch function pointer matches detected CPU features.
+        let masks = unsafe { compute(&bytes[block_start..block_end]) };
+        let combined = masks.lt | masks.gt | masks.quot | masks.apos;
+        let valid_bits = block_end - block_start;
+        let mut bits = if valid_bits < 64 {
+            combined & ((1u64 << valid_bits) - 1)
+        } else {
+            combined
+        };
+        while bits != 0 {
+            let pos = block_start + bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let byte = bytes[pos];
+
+            if parser.mode == Mode::Data {
+                if byte != b'<' {
+                    continue;
+                }
+                match classify_lt(&bytes[pos..], false) {
+                    None => {
+                        return PrefixStop {
+                            consumed: parser.cursor,
+                            end: PrefixEnd::Undecided(pos),
+                        };
+                    }
+                    Some(LtKind::Text) => {}
+                    Some(kind) => {
+                        parser.flush_text_impl(pos, emit);
+                        parser.enter_markup(pos, kind);
+                    }
+                }
+                continue;
+            }
+
+            parser.on_delimiter_impl(pos, byte, emit);
+            let text_element = match parser.mode {
+                Mode::InRawText | Mode::InRcData => parser.raw_text_tag,
+                Mode::InPlainText => Tag::Plaintext,
+                _ => continue,
+            };
+            return PrefixStop {
+                consumed: parser.cursor,
+                end: PrefixEnd::TextElement(text_element),
+            };
+        }
+        block_start = block_end;
+    }
+
+    PrefixStop {
+        consumed: parser.cursor,
+        end: PrefixEnd::End {
+            in_markup: parser.mode != Mode::Data,
+        },
+    }
+}
+
 /// Parsing mode — tracks what the parser is currently inside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {

@@ -5,8 +5,52 @@
 
 use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use fhp_tokenizer::extract::extract_tokens;
+use fhp_tokenizer::streaming::StreamTokenizer;
 use fhp_tokenizer::structural::StructuralIndexer;
-use fhp_tokenizer::tokenize;
+use fhp_tokenizer::{tokenize, tokenize_with};
+
+/// Repository fixtures used by the streaming comparison.
+const FIXTURES: &[(&str, &str)] = &[
+    (
+        "hackernews",
+        include_str!("../../../testdata/hackernews.html"),
+    ),
+    (
+        "medium_100kb",
+        include_str!("../../../testdata/medium_100kb.html"),
+    ),
+    ("github", include_str!("../../../testdata/github.html")),
+    (
+        "stackoverflow",
+        include_str!("../../../testdata/stackoverflow.html"),
+    ),
+    (
+        "wikipedia",
+        include_str!("../../../testdata/wikipedia.html"),
+    ),
+    (
+        "large_5mb",
+        include_str!("../../../testdata/large_5mb.html"),
+    ),
+];
+
+/// Streaming chunk size: a typical network or file read buffer.
+const STREAM_CHUNK: usize = 64 * 1024;
+
+/// Split `input` into chunks of at most `size` bytes on character boundaries.
+fn str_chunks(input: &str, size: usize) -> Vec<&str> {
+    let mut chunks = Vec::new();
+    let mut start = 0;
+    while start < input.len() {
+        let mut end = (start + size).min(input.len());
+        while !input.is_char_boundary(end) {
+            end -= 1;
+        }
+        chunks.push(&input[start..end]);
+        start = end;
+    }
+    chunks
+}
 
 /// Generate a realistic HTML body of approximately `target_bytes` length.
 fn generate_html(target_bytes: usize) -> String {
@@ -83,10 +127,69 @@ fn bench_tokenize_e2e(c: &mut Criterion) {
     group.finish();
 }
 
+/// One-shot callback tokenization against both streaming entry points, all
+/// fed the same fixture in 64 KiB chunks.
+fn bench_streaming(c: &mut Criterion) {
+    let mut group = c.benchmark_group("regression/fhp-tokenizer/tokenizer_bench/streaming");
+    group.sample_size(20);
+
+    for &(name, html) in FIXTURES {
+        let chunks = str_chunks(html, STREAM_CHUNK);
+        group.throughput(Throughput::Bytes(html.len() as u64));
+
+        group.bench_with_input(BenchmarkId::new("tokenize_with", name), html, |b, input| {
+            b.iter(|| {
+                let mut count = 0usize;
+                tokenize_with(std::hint::black_box(input), |token| {
+                    std::hint::black_box(&token);
+                    count += 1;
+                });
+                count
+            });
+        });
+        group.bench_with_input(BenchmarkId::new("feed", name), &chunks, |b, chunks| {
+            b.iter(|| {
+                let mut tokenizer = StreamTokenizer::new();
+                let mut count = 0usize;
+                for chunk in chunks {
+                    let tokens = tokenizer.feed(std::hint::black_box(chunk.as_bytes()));
+                    count += tokens.len();
+                    drop(std::hint::black_box(tokens));
+                }
+                count + tokenizer.finish().len()
+            });
+        });
+        group.bench_with_input(
+            BenchmarkId::new("feed_str_with", name),
+            &chunks,
+            |b, chunks| {
+                b.iter(|| {
+                    let mut tokenizer = StreamTokenizer::new();
+                    let mut count = 0usize;
+                    for chunk in chunks {
+                        tokenizer.feed_str_with(std::hint::black_box(chunk), |token| {
+                            std::hint::black_box(token);
+                            count += 1;
+                        });
+                    }
+                    tokenizer.finish_with(|token| {
+                        std::hint::black_box(token);
+                        count += 1;
+                    });
+                    count
+                });
+            },
+        );
+    }
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_structural_index,
     bench_extract_tokens,
     bench_tokenize_e2e,
+    bench_streaming,
 );
 criterion_main!(benches);

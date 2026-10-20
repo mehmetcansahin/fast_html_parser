@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+- `StreamTokenizer::feed_str_with` is 1.9–3.0x faster and within 7% of
+  one-shot `tokenize_with` on the repository fixtures in 64 KiB chunks;
+  `feed` is 1.5–2.1x faster. Complete markup is now tokenized in a single
+  SIMD pass from each safe boundary, instead of a byte-at-a-time boundary
+  scan followed by re-indexing and re-extracting every segment, and the
+  boundary scanner skips bytes that cannot change its state. Tokens are
+  unchanged; `feed` returns canonically spelled known tag names as static
+  strings instead of allocating them. The new `streaming` group in
+  `tokenizer_bench` measures both entry points against `tokenize_with`.
+- `StreamTokenizer::feed` is a further 8–17% faster on the repository
+  fixtures: attribute names spelled exactly like one of 35 common names are
+  returned as static strings instead of allocated. Tokens are unchanged.
+
 ## [0.2.0] - 2026-10-14
 
 ### Added

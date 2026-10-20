@@ -7,11 +7,11 @@
 //! [`StreamTokenizer`]: crate::streaming::StreamTokenizer
 
 use crate::extract::{
-    LtKind, ScriptEscape, classify_lt, extract_tokens, is_end_tag_at, script_gt_event,
-    script_lt_event,
+    LtKind, PrefixEnd, ScriptEscape, classify_lt, is_end_tag_at, script_gt_event, script_lt_event,
+    tokenize_prefix,
 };
-use crate::structural::StructuralIndexer;
 use crate::token::Token;
+use crate::tokenize_with;
 use fhp_core::attr::{TagScanState, tag_name_offset};
 use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
@@ -65,7 +65,6 @@ pub const MAX_RAW_TEXT_RESIDUAL: usize = 2 * 1024 * 1024;
 /// assert!(all_tokens.iter().any(|t| matches!(t, Token::OpenTag { .. })));
 /// ```
 pub struct StreamTokenizer {
-    indexer: StructuralIndexer,
     /// Residual bytes from the previous chunk (partial tag).
     residual: Vec<u8>,
     /// Incremental safe-boundary scanner. Keeping this state avoids rescanning
@@ -162,6 +161,36 @@ enum TextFlushPlan {
     },
 }
 
+/// Per-feed state of [`StreamTokenizer::run_fast_path`].
+struct FastPath<'b> {
+    /// Offset into the feed's buffer where `text`, the valid UTF-8 prefix
+    /// of the rest of the buffer, starts. Validated once per feed.
+    text: Option<(usize, &'b str)>,
+    /// Cleared once the single pass cannot progress until more input arrives.
+    enabled: bool,
+}
+
+impl Default for FastPath<'_> {
+    fn default() -> Self {
+        Self {
+            text: None,
+            enabled: true,
+        }
+    }
+}
+
+/// Where [`SplitScanner::scan`] stops after reaching a safe boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScanStop {
+    /// Scan all input and split at the last safe boundary.
+    Last,
+    /// Split at the first safe boundary, where the fast path takes over.
+    First,
+    /// Split where the construct cut by a syntax overflow ends. Its retained
+    /// tail is truncated, so a tag there cannot name a text element.
+    Overflow,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SplitScan {
     split: usize,
@@ -202,7 +231,6 @@ impl StreamTokenizer {
     /// Create a new streaming tokenizer.
     pub fn new() -> Self {
         Self {
-            indexer: StructuralIndexer::new(),
             residual: Vec::with_capacity(256),
             scanner: SplitScanner::default(),
             syntax_overflow: false,
@@ -223,7 +251,9 @@ impl StreamTokenizer {
     /// Feed a chunk of UTF-8 input and return any complete tokens.
     ///
     /// Tokens are returned as owned (`'static` lifetime) since the chunk
-    /// data may not live long enough. Text content is cloned into `Cow::Owned`.
+    /// data may not live long enough. Text content is cloned into `Cow::Owned`;
+    /// a tag name spelled exactly like its known [`Tag`] borrows that tag's
+    /// static name instead.
     pub fn feed(&mut self, chunk: &[u8]) -> Vec<Token<'static>> {
         if chunk.is_empty() {
             return Vec::new();
@@ -240,10 +270,13 @@ impl StreamTokenizer {
         // so many small tokens in one feed stay linear.
         let mut buffered = std::mem::take(&mut self.residual);
         let mut consumed = 0;
+        let mut fast = FastPath::default();
         loop {
-            let scan = self
-                .scanner
-                .scan(&buffered[consumed..], self.syntax_overflow);
+            consumed += self.run_fast_path(&mut fast, &buffered, consumed, &mut |token| {
+                tokens.push(to_owned_token(token));
+            });
+            let stop = self.scan_stop(&fast);
+            let scan = self.scanner.scan(&buffered[consumed..], stop);
             if scan.split == 0 {
                 break;
             }
@@ -266,9 +299,9 @@ impl StreamTokenizer {
                         Some(TextContext::element(tag)),
                     ));
                 }
-                tokens.extend(self.process_chunk(&pending[close_start..]));
+                process_chunk(&pending[close_start..], &mut tokens);
             } else {
-                tokens.extend(self.process_chunk(pending));
+                process_chunk(pending, &mut tokens);
             }
 
             self.scanner.discard_prefix(split);
@@ -302,10 +335,13 @@ impl StreamTokenizer {
         // so many small tokens in one feed stay linear.
         let mut buffered = std::mem::take(&mut self.residual);
         let mut consumed = 0;
+        let mut fast = FastPath::default();
         loop {
-            let scan = self
-                .scanner
-                .scan(&buffered[consumed..], self.syntax_overflow);
+            consumed += self.run_fast_path(&mut fast, &buffered, consumed, &mut |token| {
+                on_token(&token);
+            });
+            let stop = self.scan_stop(&fast);
+            let scan = self.scanner.scan(&buffered[consumed..], stop);
             if scan.split == 0 {
                 break;
             }
@@ -329,9 +365,9 @@ impl StreamTokenizer {
                         &mut on_token,
                     );
                 }
-                self.process_chunk_with(&pending[close_start..], &mut on_token);
+                process_chunk_with(&pending[close_start..], &mut on_token);
             } else {
-                self.process_chunk_with(pending, &mut on_token);
+                process_chunk_with(pending, &mut on_token);
             }
 
             self.scanner.discard_prefix(split);
@@ -371,7 +407,7 @@ impl StreamTokenizer {
                 tokens.push(owned_text_token(&remaining, Some(context)));
             }
         } else if !remaining.is_empty() {
-            tokens.extend(self.process_chunk(&remaining));
+            process_chunk(&remaining, &mut tokens);
         }
         self.scanner.reset();
         self.syntax_overflow = false;
@@ -405,7 +441,7 @@ impl StreamTokenizer {
                 emit_text_token_with(&remaining, Some(context), &mut on_token);
             }
         } else if !remaining.is_empty() {
-            self.process_chunk_with(&remaining, &mut on_token);
+            process_chunk_with(&remaining, &mut on_token);
         }
         self.scanner.reset();
         self.syntax_overflow = false;
@@ -461,43 +497,76 @@ impl StreamTokenizer {
         &chunk[consumed..]
     }
 
-    /// Process a complete chunk through the structural indexer + extractor.
-    fn process_chunk(&mut self, data: &[u8]) -> Vec<Token<'static>> {
-        match std::str::from_utf8(data) {
-            Ok(text) => {
-                let index = self.indexer.index(text.as_bytes());
-                let tokens = extract_tokens(text, &index);
-                tokens.into_iter().map(to_owned_token).collect()
-            }
-            Err(_) => {
-                let text = String::from_utf8_lossy(data).into_owned();
-                let index = self.indexer.index(text.as_bytes());
-                let tokens = extract_tokens(&text, &index);
-                tokens.into_iter().map(to_owned_token).collect()
-            }
+    /// Tokenize from the scanner's current safe boundary in a single pass and
+    /// return how many bytes of `buffered[consumed..]` were consumed.
+    ///
+    /// The split scanner then resumes from the stop: inside the text element
+    /// the prefix entered, at a `<` that needs more input, or over the
+    /// unfinished markup or text at the end. Splitting there instead of
+    /// scanning first and tokenizing the segments afterwards visits each
+    /// byte once.
+    fn run_fast_path<'b>(
+        &mut self,
+        fast: &mut FastPath<'b>,
+        buffered: &'b [u8],
+        consumed: usize,
+        emit: &mut impl FnMut(Token<'b>),
+    ) -> usize {
+        if !fast.enabled
+            || !self.scanner.is_fresh()
+            || self.syntax_overflow
+            || self.raw_close_overflow.is_some()
+        {
+            return 0;
         }
+        let (base, text) = *fast
+            .text
+            .get_or_insert_with(|| (consumed, utf8_prefix(&buffered[consumed..])));
+        // Bytes the split scanner consumed past the valid prefix stay on its
+        // path, which decodes them lossily.
+        let input = match consumed
+            .checked_sub(base)
+            .and_then(|offset| text.get(offset..))
+        {
+            Some(input) if !input.is_empty() => input,
+            _ => {
+                fast.enabled = false;
+                return 0;
+            }
+        };
+
+        let stop = tokenize_prefix(input, emit);
+        let (scanned, text_context) = match stop.end {
+            PrefixEnd::TextElement(Tag::Plaintext) => (0, Some(TextContext::Plaintext)),
+            PrefixEnd::TextElement(tag) => (0, Some(TextContext::element(tag))),
+            PrefixEnd::Undecided(lt) => {
+                fast.enabled = false;
+                (lt - stop.consumed, None)
+            }
+            PrefixEnd::End { in_markup } => {
+                fast.enabled = false;
+                // Unfinished markup is rescanned from its `<`; trailing text
+                // contains nothing the scanner must revisit.
+                let scanned = if in_markup {
+                    0
+                } else {
+                    input.len() - stop.consumed
+                };
+                (scanned, None)
+            }
+        };
+        self.scanner.resume(scanned, text_context);
+        stop.consumed
     }
 
-    /// Process a complete chunk and expose borrowed tokens for the duration of
-    /// the callback. Valid UTF-8 takes the zero-clone path; mixed use with the
-    /// byte-oriented API still degrades safely through lossy decoding.
-    fn process_chunk_with(&mut self, data: &[u8], on_token: &mut impl FnMut(&Token<'_>)) {
-        match std::str::from_utf8(data) {
-            Ok(text) => {
-                let index = self.indexer.index(text.as_bytes());
-                let tokens = extract_tokens(text, &index);
-                for token in &tokens {
-                    on_token(token);
-                }
-            }
-            Err(_) => {
-                let text = String::from_utf8_lossy(data).into_owned();
-                let index = self.indexer.index(text.as_bytes());
-                let tokens = extract_tokens(&text, &index);
-                for token in &tokens {
-                    on_token(token);
-                }
-            }
+    /// How far the split scanner runs before reporting a split.
+    fn scan_stop(&self, fast: &FastPath<'_>) -> ScanStop {
+        if self.syntax_overflow {
+            ScanStop::Overflow
+        } else if fast.enabled {
+            ScanStop::First
+        } else {
+            ScanStop::Last
         }
     }
 
@@ -730,15 +799,27 @@ impl Default for SplitScanner {
 }
 
 impl SplitScanner {
-    fn scan(&mut self, data: &[u8], stop_at_next_boundary: bool) -> SplitScan {
+    fn scan(&mut self, data: &[u8], stop: ScanStop) -> SplitScan {
         let mut i = self.scanned.min(data.len());
         self.text_close = None;
 
+        // Each arm jumps over bytes that cannot change its state.
         while i < data.len() {
             match self.mode {
                 ScanMode::Data => match self.text_context {
                     Some(TextContext::Plaintext) => i = data.len(),
                     Some(TextContext::Element { tag, escape }) => {
+                        // `>` only matters inside an escaped script.
+                        let next = if tag == Tag::Script && escape != ScriptEscape::None {
+                            memchr::memchr2(b'<', b'>', &data[i..])
+                        } else {
+                            memchr::memchr(b'<', &data[i..])
+                        };
+                        let Some(offset) = next else {
+                            i = data.len();
+                            continue;
+                        };
+                        i += offset;
                         match data[i] {
                             b'<' => {
                                 if is_incomplete_text_close(data, i, tag, escape) {
@@ -773,10 +854,11 @@ impl SplitScanner {
                         i += 1;
                     }
                     None => {
-                        if data[i] != b'<' {
-                            i += 1;
+                        let Some(offset) = memchr::memchr(b'<', &data[i..]) else {
+                            i = data.len();
                             continue;
-                        }
+                        };
+                        i += offset;
                         match classify_lt(&data[i..], false) {
                             None => break,
                             Some(LtKind::Text) => i += 1,
@@ -813,6 +895,9 @@ impl SplitScanner {
                                 // `</>` emits nothing and ends the text before it.
                                 i += 3;
                                 self.last_safe = i;
+                                if stop == ScanStop::First {
+                                    break;
+                                }
                             }
                         }
                     }
@@ -822,8 +907,33 @@ impl SplitScanner {
                     open,
                     text_close,
                 } => {
-                    let byte = data[i];
-                    i += 1;
+                    // Without a quote the attribute grammar cannot enter a
+                    // quoted value, so only quotes and `>` need the exact
+                    // state; inside a value only its closing quote matters.
+                    let rest = &data[i..];
+                    let (scan, offset) = match scan {
+                        TagScanState::Quoted(quote) => match memchr::memchr(quote, rest) {
+                            Some(offset) => (scan, offset),
+                            None => {
+                                i = data.len();
+                                continue;
+                            }
+                        },
+                        _ => match memchr::memchr3(b'>', b'"', b'\'', rest) {
+                            Some(offset) => (scan.advance(&rest[..offset]), offset),
+                            None => {
+                                self.mode = ScanMode::Tag {
+                                    scan: scan.advance(rest),
+                                    open,
+                                    text_close,
+                                };
+                                i = data.len();
+                                continue;
+                            }
+                        },
+                    };
+                    let byte = rest[offset];
+                    i += offset + 1;
                     if byte != b'>' || scan.gt_is_literal() {
                         self.mode = ScanMode::Tag {
                             scan: scan.step(byte),
@@ -842,7 +952,7 @@ impl SplitScanner {
                     }
                     // After a syntax overflow the retained tag body is a
                     // truncated tail, so it cannot name a text element.
-                    if stop_at_next_boundary {
+                    if stop == ScanStop::Overflow {
                         break;
                     }
                     if let Some(context) = text_open_context(&data[open + 1..i - 1]) {
@@ -851,23 +961,27 @@ impl SplitScanner {
                         // potentially very large text body.
                         break;
                     }
+                    if stop == ScanStop::First {
+                        break;
+                    }
                 }
                 ScanMode::Declaration => match memchr::memchr(b'>', &data[i..]) {
                     Some(offset) => {
                         i += offset + 1;
                         self.last_safe = i;
                         self.mode = ScanMode::Data;
-                        if stop_at_next_boundary {
+                        if stop != ScanStop::Last {
                             break;
                         }
                     }
                     None => i = data.len(),
                 },
                 ScanMode::Comment { content_start } => {
-                    if data[i] != b'-' {
-                        i += 1;
+                    let Some(offset) = memchr::memchr(b'-', &data[i..]) else {
+                        i = data.len();
                         continue;
-                    }
+                    };
+                    i += offset;
                     let rest = &data[i..];
                     let bang_allowed = i >= content_start;
                     let terminator_len = if rest.starts_with(b"-->") {
@@ -887,23 +1001,24 @@ impl SplitScanner {
                     i += terminator_len;
                     self.last_safe = i;
                     self.mode = ScanMode::Data;
-                    if stop_at_next_boundary {
+                    if stop != ScanStop::Last {
                         break;
                     }
                 }
                 ScanMode::CData => {
-                    if i + 2 < data.len()
-                        && data[i] == b']'
-                        && data[i + 1] == b']'
-                        && data[i + 2] == b'>'
-                    {
+                    let Some(offset) = memchr::memchr(b']', &data[i..]) else {
+                        i = data.len();
+                        continue;
+                    };
+                    i += offset;
+                    if i + 2 < data.len() && data[i + 1] == b']' && data[i + 2] == b'>' {
                         self.last_safe = i + 3;
                         self.mode = ScanMode::Data;
                         i += 3;
-                        if stop_at_next_boundary {
+                        if stop != ScanStop::Last {
                             break;
                         }
-                    } else if data[i] == b']' && data.len() - i < 3 {
+                    } else if data.len() - i < 3 {
                         // Keep a possible split `]]>` terminator.
                         break;
                     } else {
@@ -918,6 +1033,22 @@ impl SplitScanner {
             split: self.last_safe,
             text_close: self.text_close,
         }
+    }
+
+    /// Whether the scanner sits at a safe boundary in the data state, with
+    /// nothing after it scanned yet.
+    fn is_fresh(&self) -> bool {
+        self.is_plain_data() && self.scanned == 0 && self.last_safe == 0
+    }
+
+    /// Continue after the fast path consumed input up to a safe boundary:
+    /// `scanned` bytes of plain text follow it, or the text element
+    /// `text_context` starts there.
+    fn resume(&mut self, scanned: usize, text_context: Option<TextContext>) {
+        debug_assert!(self.is_fresh());
+        debug_assert!(scanned == 0 || text_context.is_none());
+        self.scanned = scanned;
+        self.text_context = text_context;
     }
 
     fn discard_prefix(&mut self, len: usize) {
@@ -976,7 +1107,7 @@ impl SplitScanner {
 
 #[cfg(test)]
 fn scan_safe_split(data: &[u8]) -> SplitScan {
-    SplitScanner::default().scan(data, false)
+    SplitScanner::default().scan(data, ScanStop::Last)
 }
 
 fn discard_prefix(buffer: &mut Vec<u8>, len: usize) {
@@ -1076,6 +1207,39 @@ fn numeric_entity_prefix(data: &[u8], amp: usize) -> Option<(NumericEntityState,
         cursor += 1;
     }
     (cursor > digits_start).then_some((state, cursor))
+}
+
+/// Longest prefix of `data` that is valid UTF-8.
+fn utf8_prefix(data: &[u8]) -> &str {
+    match std::str::from_utf8(data) {
+        Ok(text) => text,
+        // SAFETY: `from_utf8` validated every byte before `valid_up_to`.
+        Err(error) => unsafe { std::str::from_utf8_unchecked(&data[..error.valid_up_to()]) },
+    }
+}
+
+/// Tokenize a complete segment into owned tokens.
+fn process_chunk(data: &[u8], tokens: &mut Vec<Token<'static>>) {
+    match std::str::from_utf8(data) {
+        Ok(text) => tokenize_with(text, |token| tokens.push(to_owned_token(token))),
+        Err(_) => {
+            let text = String::from_utf8_lossy(data);
+            tokenize_with(&text, |token| tokens.push(to_owned_token(token)));
+        }
+    }
+}
+
+/// Tokenize a complete segment and expose borrowed tokens for the duration of
+/// the callback. Valid UTF-8 takes the zero-clone path; mixed use with the
+/// byte-oriented API still degrades safely through lossy decoding.
+fn process_chunk_with(data: &[u8], on_token: &mut impl FnMut(&Token<'_>)) {
+    match std::str::from_utf8(data) {
+        Ok(text) => tokenize_with(text, |token| on_token(&token)),
+        Err(_) => {
+            let text = String::from_utf8_lossy(data);
+            tokenize_with(&text, |token| on_token(&token));
+        }
+    }
 }
 
 fn owned_text_token(data: &[u8], context: Option<TextContext>) -> Token<'static> {
@@ -1221,13 +1385,13 @@ fn to_owned_token(token: Token<'_>) -> Token<'static> {
             self_closing,
         } => Token::OpenTag {
             tag,
-            name: std::borrow::Cow::Owned(name.into_owned()),
+            name: owned_tag_name(tag, name),
             attributes: attributes.into_iter().map(to_owned_attr).collect(),
             self_closing,
         },
         Token::CloseTag { tag, name } => Token::CloseTag {
             tag,
-            name: std::borrow::Cow::Owned(name.into_owned()),
+            name: owned_tag_name(tag, name),
         },
         Token::Text { content } => Token::Text {
             content: std::borrow::Cow::Owned(content.into_owned()),
@@ -1244,12 +1408,58 @@ fn to_owned_token(token: Token<'_>) -> Token<'static> {
     }
 }
 
+/// A `'static` tag name. Names spelled exactly like their known tag share its
+/// static string instead of allocating.
+fn owned_tag_name(tag: Tag, name: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'static, str> {
+    match tag.as_str() {
+        Some(known) if known == name => std::borrow::Cow::Borrowed(known),
+        _ => std::borrow::Cow::Owned(name.into_owned()),
+    }
+}
+
 /// Convert a borrowed attribute to owned.
 fn to_owned_attr(attr: crate::token::Attribute<'_>) -> crate::token::Attribute<'static> {
     crate::token::Attribute {
-        name: std::borrow::Cow::Owned(attr.name.into_owned()),
+        name: owned_attr_name(attr.name),
         value: attr.value.map(|v| std::borrow::Cow::Owned(v.into_owned())),
     }
+}
+
+/// A `'static` attribute name. Names spelled exactly like a common attribute
+/// share its static string instead of allocating.
+fn owned_attr_name(name: std::borrow::Cow<'_, str>) -> std::borrow::Cow<'static, str> {
+    match static_attr_name(&name) {
+        Some(known) => std::borrow::Cow::Borrowed(known),
+        None => std::borrow::Cow::Owned(name.into_owned()),
+    }
+}
+
+/// The static spelling of a common attribute name, matched exactly
+/// (case-sensitive) after dispatching on length, most frequent first.
+///
+/// The table holds every non-`data-*` name that makes up at least 0.25% of
+/// attributes on average across the real-world snapshots in `testdata/`
+/// (hackernews, github, stackoverflow, wikipedia). Together they cover
+/// 80-98% of the attributes in each repository fixture.
+fn static_attr_name(name: &str) -> Option<&'static str> {
+    let candidates: &[&'static str] = match name.len() {
+        1 => &["d"],
+        2 => &["id"],
+        3 => &["rel", "src", "dir", "alt"],
+        4 => &["href", "type", "name", "fill", "role"],
+        5 => &[
+            "class", "title", "style", "width", "align", "defer", "media",
+        ],
+        6 => &["height", "valign"],
+        7 => &["content", "viewBox", "colspan", "version", "display"],
+        8 => &["itemprop", "itemtype", "overflow", "property"],
+        9 => &["itemscope", "focusable"],
+        10 => &["aria-label"],
+        11 => &["aria-hidden", "crossorigin"],
+        15 => &["aria-labelledby"],
+        _ => return None,
+    };
+    candidates.iter().copied().find(|&known| known == name)
 }
 
 #[cfg(test)]
@@ -2030,6 +2240,83 @@ mod tests {
             })
             .collect();
         assert_eq!(text, "\u{FFFD}".repeat(1 << 20));
+    }
+
+    /// Concatenate adjacent text tokens: streaming may split a text run at
+    /// any chunk boundary.
+    fn merge_text(tokens: Vec<Token<'_>>) -> Vec<Token<'static>> {
+        let mut merged: Vec<Token<'static>> = Vec::new();
+        for token in tokens.into_iter().map(to_owned_token) {
+            if let (Token::Text { content }, Some(Token::Text { content: previous })) =
+                (&token, merged.last_mut())
+            {
+                previous.to_mut().push_str(content);
+                continue;
+            }
+            merged.push(token);
+        }
+        merged
+    }
+
+    #[test]
+    fn invalid_utf8_inside_markup_matches_lossy_one_shot() {
+        // Invalid sequences in text, an attribute value, and script text end
+        // the single-pass prefix; the bytes after them take the lossy path.
+        let mut html = Vec::new();
+        for i in 0..64 {
+            html.extend_from_slice(format!("<p class=\"c{i}\">text {i}").as_bytes());
+            match i % 4 {
+                0 => html.extend_from_slice(b"\xFF\xC3 more"),
+                1 => html.extend_from_slice(b"<a title=\"\x80\xE2\x82\">link</a>"),
+                2 => html.extend_from_slice(b"<script>if (a < b) { x = '\xF0\x9F'; }</script>"),
+                _ => html.extend_from_slice("caf\u{e9} &amp; <b>ok</b>".as_bytes()),
+            }
+            html.extend_from_slice(b"</p>\n");
+        }
+        let expected = merge_text(crate::tokenize(&String::from_utf8_lossy(&html)));
+
+        for chunk_size in [1, 3, 61, 1000, html.len()] {
+            let mut tokenizer = StreamTokenizer::new();
+            let mut actual = Vec::new();
+            for chunk in html.chunks(chunk_size) {
+                actual.extend(tokenizer.feed(chunk));
+            }
+            actual.extend(tokenizer.finish());
+
+            assert_eq!(merge_text(actual), expected, "chunk_size={chunk_size}");
+        }
+    }
+
+    #[test]
+    fn owned_attribute_names_share_static_strings_only_on_an_exact_match() {
+        let mut tok = StreamTokenizer::new();
+        let mut tokens = tok
+            .feed(b"<a href=x class=y Style=z data-id=1 aria-labelledby=l titles=t viewbox=v d>");
+        tokens.extend(tok.finish());
+        let Some(Token::OpenTag { attributes, .. }) = tokens.first() else {
+            panic!("expected an open tag, got {tokens:?}");
+        };
+
+        let names: Vec<(&str, bool)> = attributes
+            .iter()
+            .map(|attr| {
+                let borrowed = matches!(attr.name, std::borrow::Cow::Borrowed(_));
+                (attr.name.as_ref(), borrowed)
+            })
+            .collect();
+        assert_eq!(
+            names,
+            [
+                ("href", true),
+                ("class", true),
+                ("Style", false),
+                ("data-id", false),
+                ("aria-labelledby", true),
+                ("titles", false),
+                ("viewbox", false),
+                ("d", true),
+            ]
+        );
     }
 
     #[test]
