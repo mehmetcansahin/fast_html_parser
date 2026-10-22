@@ -15,6 +15,10 @@
 //!   `A ~ B` (general sibling)
 //! - Comma-separated selector lists: `div, span`
 //!
+//! Names may contain non-ASCII characters and CSS escapes (`#ürün`,
+//! `.md\:flex`, `#\31 23`), and quoted attribute values may contain escapes.
+//! Pseudo-class names are ASCII case-insensitive.
+//!
 //! [`ast::SelectorList`]: crate::ast::SelectorList
 
 use fhp_core::error::SelectorError;
@@ -57,25 +61,19 @@ fn limit_error(reason: String) -> SelectorError {
 /// # Errors
 ///
 /// Returns [`SelectorError::Invalid`] if the input is not a valid CSS selector.
+/// Positions in the error reason are byte offsets into `input`.
 pub fn parse_selector(input: &str) -> Result<SelectorList, SelectorError> {
     check_input_len(input)?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+    let mut parser = Parser::new(input);
+    if parser.is_eof() {
         return Err(SelectorError::Invalid {
             reason: "empty selector".to_string(),
         });
     }
-    let mut parser = Parser::new(trimmed);
     let list = parser.parse_selector_list()?;
     parser.skip_whitespace();
     if !parser.is_eof() {
-        return Err(SelectorError::Invalid {
-            reason: format!(
-                "unexpected character '{}' at position {}",
-                parser.peek().unwrap() as char,
-                parser.pos
-            ),
-        });
+        return Err(parser.unexpected_character());
     }
     Ok(list)
 }
@@ -83,29 +81,25 @@ pub fn parse_selector(input: &str) -> Result<SelectorList, SelectorError> {
 /// Parse a single CSS selector (no commas).
 pub fn parse_single_selector(input: &str) -> Result<Selector, SelectorError> {
     check_input_len(input)?;
-    let trimmed = input.trim();
-    if trimmed.is_empty() {
+    let mut parser = Parser::new(input);
+    if parser.is_eof() {
         return Err(SelectorError::Invalid {
             reason: "empty selector".to_string(),
         });
     }
-    let mut parser = Parser::new(trimmed);
     let sel = parser.parse_complex_selector()?;
     parser.skip_whitespace();
     if !parser.is_eof() {
-        return Err(SelectorError::Invalid {
-            reason: format!(
-                "unexpected character '{}' at position {}",
-                parser.peek().unwrap() as char,
-                parser.pos
-            ),
-        });
+        return Err(parser.unexpected_character());
     }
     Ok(sel)
 }
 
 /// Recursive-descent parser for CSS selectors.
+///
+/// `pos` is a byte offset that always lies on a character boundary of `src`.
 struct Parser<'a> {
+    src: &'a str,
     input: &'a [u8],
     pos: usize,
     simple_parts: usize,
@@ -113,10 +107,14 @@ struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
+    /// Create a parser over `input` without its surrounding whitespace, keeping
+    /// positions relative to the untrimmed input for error messages.
     fn new(input: &'a str) -> Self {
+        let src = input.trim_end();
         Self {
-            input: input.as_bytes(),
-            pos: 0,
+            src,
+            input: src.as_bytes(),
+            pos: src.len() - src.trim_start().len(),
             simple_parts: 0,
             not_depth: 0,
         }
@@ -158,10 +156,30 @@ impl<'a> Parser<'a> {
         self.input.get(self.pos).copied()
     }
 
+    /// The character at the current position.
+    fn peek_char(&self) -> Option<char> {
+        self.src[self.pos..].chars().next()
+    }
+
     fn advance(&mut self) -> Option<u8> {
         let b = self.input.get(self.pos).copied()?;
         self.pos += 1;
         Some(b)
+    }
+
+    /// Consume and return the character at the current position.
+    fn next_char(&mut self) -> Option<char> {
+        let c = self.peek_char()?;
+        self.pos += c.len_utf8();
+        Some(c)
+    }
+
+    fn unexpected_character(&self) -> SelectorError {
+        let reason = match self.peek_char() {
+            Some(c) => format!("unexpected character '{c}' at position {}", self.pos),
+            None => "unexpected end of input".to_string(),
+        };
+        SelectorError::Invalid { reason }
     }
 
     fn skip_whitespace(&mut self) {
@@ -178,32 +196,97 @@ impl<'a> Parser<'a> {
     }
 
     fn expect(&mut self, expected: u8) -> Result<(), SelectorError> {
-        match self.advance() {
-            Some(b) if b == expected => Ok(()),
-            Some(b) => Err(SelectorError::Invalid {
+        match self.peek_char() {
+            Some(c) if c == char::from(expected) => {
+                self.pos += 1;
+                Ok(())
+            }
+            Some(c) => Err(SelectorError::Invalid {
                 reason: format!(
-                    "expected '{}', found '{}' at position {}",
-                    expected as char,
-                    b as char,
-                    self.pos - 1
+                    "expected '{}', found '{c}' at position {}",
+                    char::from(expected),
+                    self.pos
                 ),
             }),
             None => Err(SelectorError::Invalid {
-                reason: format!("expected '{}', found end of input", expected as char),
+                reason: format!("expected '{}', found end of input", char::from(expected)),
             }),
         }
     }
 
-    /// Read a CSS identifier (alphanumeric, `-`, `_`).
+    /// Whether the input at the current position is a CSS escape: a `\` not
+    /// followed by a newline. A trailing `\` is not treated as an escape.
+    fn starts_escape(&self) -> bool {
+        self.peek() == Some(b'\\')
+            && self
+                .input
+                .get(self.pos + 1)
+                .is_some_and(|&b| !matches!(b, b'\n' | b'\r' | b'\x0C'))
+    }
+
+    /// Whether the current position starts a type selector: an ASCII letter,
+    /// `_`, a non-ASCII character, or an escape.
+    fn starts_type_selector(&self) -> bool {
+        match self.peek() {
+            Some(b) => {
+                b.is_ascii_alphabetic() || b == b'_' || !b.is_ascii() || self.starts_escape()
+            }
+            None => false,
+        }
+    }
+
+    /// Consume the code point escaped by the `\` just consumed (CSS Syntax
+    /// "consume an escaped code point"). The caller has checked that a
+    /// non-newline character follows.
+    fn read_escape(&mut self) -> char {
+        let start = self.pos;
+        while self.pos < self.input.len()
+            && self.pos - start < 6
+            && self.input[self.pos].is_ascii_hexdigit()
+        {
+            self.pos += 1;
+        }
+        if self.pos == start {
+            return self.next_char().unwrap_or(char::REPLACEMENT_CHARACTER);
+        }
+
+        let hex = &self.src[start..self.pos];
+        // One whitespace character after the hex digits ends the escape.
+        if self.input[self.pos..].starts_with(b"\r\n") {
+            self.pos += 2;
+        } else if self.peek().is_some_and(is_html_whitespace) {
+            self.pos += 1;
+        }
+        match u32::from_str_radix(hex, 16) {
+            Ok(0) | Err(_) => char::REPLACEMENT_CHARACTER,
+            Ok(code) => char::from_u32(code).unwrap_or(char::REPLACEMENT_CHARACTER),
+        }
+    }
+
+    /// Read a CSS identifier.
+    ///
+    /// Accepts ASCII alphanumerics, `-`, `_`, non-ASCII characters, and
+    /// escapes such as `\:` or `\31 `. Unlike strict CSS, an identifier may
+    /// start with a digit or `-`.
     fn read_ident(&mut self) -> Result<String, SelectorError> {
         let start = self.pos;
-        // CSS identifiers can start with `-` or `_` or alpha
-        while self.pos < self.input.len() {
-            let b = self.input[self.pos];
-            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
-                self.pos += 1;
-            } else {
-                break;
+        let mut ident = String::new();
+        loop {
+            match self.peek() {
+                Some(b) if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' => {
+                    ident.push(char::from(b));
+                    self.pos += 1;
+                }
+                Some(b) if !b.is_ascii() => {
+                    if let Some(c) = self.next_char() {
+                        ident.push(c);
+                    }
+                }
+                Some(b'\\') if self.starts_escape() => {
+                    self.pos += 1;
+                    ident.push(self.read_escape());
+                }
+                _ => break,
             }
         }
         if self.pos == start {
@@ -211,49 +294,74 @@ impl<'a> Parser<'a> {
                 reason: format!("expected identifier at position {}", self.pos),
             });
         }
-        // SAFETY: input is UTF-8 and we only consumed ASCII bytes.
-        Ok(String::from_utf8_lossy(&self.input[start..self.pos]).into_owned())
+        Ok(ident)
     }
 
-    /// Read a quoted string or bare value.
+    /// Read a quoted string or bare value, decoding escapes.
     ///
     /// Bare values accept any non-whitespace, non-`]` characters — more
     /// lenient than strict CSS identifiers so that `[href$=.html]` works
     /// without quotes.
     fn read_value(&mut self) -> Result<String, SelectorError> {
         self.skip_whitespace();
+        let mut value = String::new();
         match self.peek() {
-            Some(b'"') | Some(b'\'') => {
-                let quote = self.advance().unwrap();
-                let start = self.pos;
-                while self.pos < self.input.len() && self.input[self.pos] != quote {
-                    self.pos += 1;
+            Some(quote @ (b'"' | b'\'')) => {
+                self.pos += 1;
+                loop {
+                    match self.peek() {
+                        None => {
+                            return Err(SelectorError::Invalid {
+                                reason: "unclosed quote in attribute value".to_string(),
+                            });
+                        }
+                        Some(b) if b == quote => {
+                            self.pos += 1;
+                            return Ok(value);
+                        }
+                        Some(b'\\') => {
+                            self.pos += 1;
+                            // An escaped newline continues the string.
+                            if self.input[self.pos..].starts_with(b"\r\n") {
+                                self.pos += 2;
+                            } else if matches!(self.peek(), Some(b'\n' | b'\r' | b'\x0C')) {
+                                self.pos += 1;
+                            } else if !self.is_eof() {
+                                value.push(self.read_escape());
+                            }
+                        }
+                        Some(_) => {
+                            if let Some(c) = self.next_char() {
+                                value.push(c);
+                            }
+                        }
+                    }
                 }
-                if self.is_eof() {
-                    return Err(SelectorError::Invalid {
-                        reason: "unclosed quote in attribute value".to_string(),
-                    });
-                }
-                let value = String::from_utf8_lossy(&self.input[start..self.pos]).into_owned();
-                self.pos += 1; // skip closing quote
-                Ok(value)
             }
             _ => {
                 // Bare value: read until whitespace or ']'.
                 let start = self.pos;
-                while self.pos < self.input.len() {
-                    let b = self.input[self.pos];
-                    if is_html_whitespace(b) || b == b']' {
-                        break;
+                loop {
+                    match self.peek() {
+                        None | Some(b']') => break,
+                        Some(b) if is_html_whitespace(b) => break,
+                        Some(b'\\') if self.starts_escape() => {
+                            self.pos += 1;
+                            value.push(self.read_escape());
+                        }
+                        Some(_) => {
+                            if let Some(c) = self.next_char() {
+                                value.push(c);
+                            }
+                        }
                     }
-                    self.pos += 1;
                 }
                 if self.pos == start {
                     return Err(SelectorError::Invalid {
                         reason: format!("expected value at position {}", self.pos),
                     });
                 }
-                Ok(String::from_utf8_lossy(&self.input[start..self.pos]).into_owned())
+                Ok(value)
             }
         }
     }
@@ -337,13 +445,7 @@ impl<'a> Parser<'a> {
 
     /// Check if the current position starts a compound selector.
     fn is_compound_start(&self) -> bool {
-        matches!(
-            self.peek(),
-            Some(b'#' | b'.' | b'[' | b':' | b'*')
-                | Some(b'a'..=b'z')
-                | Some(b'A'..=b'Z')
-                | Some(b'_')
-        )
+        matches!(self.peek(), Some(b'#' | b'.' | b'[' | b':' | b'*')) || self.starts_type_selector()
     }
 
     /// Parse a compound selector (one or more simple selectors).
@@ -388,7 +490,7 @@ impl<'a> Parser<'a> {
                     self.advance();
                     self.push_simple_part(&mut parts, SimpleSelector::Universal)?;
                 }
-                Some(b) if b.is_ascii_alphabetic() || b == b'_' => {
+                _ if self.starts_type_selector() => {
                     if !parts.is_empty() {
                         return Err(SelectorError::Invalid {
                             reason: format!(
@@ -482,7 +584,8 @@ impl<'a> Parser<'a> {
         self.expect(b':')?;
         let name = self.read_ident()?;
 
-        match name.as_str() {
+        // Pseudo-class names are ASCII case-insensitive.
+        match name.to_ascii_lowercase().as_str() {
             "first-child" => Ok(SimpleSelector::PseudoFirstChild),
             "last-child" => Ok(SimpleSelector::PseudoLastChild),
             "nth-child" => {
@@ -990,5 +1093,57 @@ mod tests {
         );
         let err = parse_single_selector(&over_limit).unwrap_err();
         assert!(err.to_string().contains("exceeds 16 levels"));
+    }
+
+    fn single_id(css: &str) -> String {
+        match &parse_single_selector(css).unwrap().subject.parts[0] {
+            SimpleSelector::Id(id, _) => id.clone(),
+            other => panic!("expected id selector, got {other:?}"),
+        }
+    }
+
+    fn attr_value(css: &str) -> String {
+        match &parse_single_selector(css).unwrap().subject.parts[0] {
+            SimpleSelector::Attr(attr) => attr.value.clone().unwrap(),
+            other => panic!("expected attribute selector, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn identifier_escapes_follow_css_syntax() {
+        // Up to six hex digits, then one optional whitespace character.
+        assert_eq!(single_id("#\\31 23"), "123");
+        assert_eq!(single_id("#\\00003123"), "123");
+        assert_eq!(single_id("#\\31\r\n23"), "123");
+        assert_eq!(single_id("#a\\:b"), "a:b");
+        assert_eq!(single_id("#\\é"), "é");
+        assert_eq!(single_id("#ürün"), "ürün");
+        // Zero, surrogates, and values above U+10FFFF become U+FFFD.
+        assert_eq!(single_id("#\\0"), "\u{FFFD}");
+        assert_eq!(single_id("#\\d800"), "\u{FFFD}");
+        assert_eq!(single_id("#\\110000"), "\u{FFFD}");
+        // A backslash before a newline or at the end is not an escape.
+        assert!(parse_single_selector("#a\\").is_err());
+        assert!(parse_single_selector("#a\\\nb").is_err());
+    }
+
+    #[test]
+    fn attribute_values_decode_escapes() {
+        assert_eq!(attr_value(r#"[a="say \"hi\""]"#), r#"say "hi""#);
+        assert_eq!(attr_value(r"[a='it\'s']"), "it's");
+        assert_eq!(attr_value(r"[a='\41 B']"), "AB");
+        assert_eq!(attr_value("[a='x\\\ny']"), "xy");
+        assert_eq!(attr_value(r"[a=x\]y]"), "x]y");
+        assert_eq!(attr_value("[a='ürün']"), "ürün");
+        assert!(parse_single_selector(r"[a='x\']").is_err());
+    }
+
+    #[test]
+    fn non_ascii_type_selectors_start_compounds() {
+        let sel = parse_single_selector("div ürün-x").unwrap();
+        assert_eq!(sel.chain[0].0, Combinator::Descendant);
+        assert!(
+            matches!(&sel.subject.parts[0], SimpleSelector::UnknownTag(name) if name == "ürün-x")
+        );
     }
 }

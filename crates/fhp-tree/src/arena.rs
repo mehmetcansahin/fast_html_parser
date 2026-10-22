@@ -453,7 +453,9 @@ impl Arena {
     /// Append `child` as the last child of `parent`.
     ///
     /// Updates all tree links: parent, first_child, last_child, prev_sibling,
-    /// next_sibling.
+    /// next_sibling. An element child also gets its 1-based index among its
+    /// element siblings ([`Node::element_index`]), which `:nth-child`
+    /// selectors read.
     ///
     /// `child` must be a freshly allocated, not-yet-linked node, distinct from
     /// `parent` (and therefore from `parent`'s current last child).
@@ -530,6 +532,21 @@ impl Arena {
         }
         self.nodes[parent_index].last_child = child;
         self.nodes[parent_index].flags.set(NodeFlags::HAS_CHILDREN);
+
+        // The tree builder maintains this index itself; trees built through
+        // this API need it too.
+        if self.is_element(child) {
+            let mut previous = last;
+            while !previous.is_null() && !self.is_element(previous) {
+                previous = self.nodes[previous.index()].prev_sibling;
+            }
+            let index = if previous.is_null() {
+                1
+            } else {
+                self.full_element_index(previous).saturating_add(1)
+            };
+            self.set_full_element_index(child, index);
+        }
     }
 
     /// Append a node that was freshly allocated by this arena.
@@ -856,6 +873,28 @@ mod tests {
 
         assert_eq!(arena.get(c3).prev_sibling, c2);
         assert!(arena.get(c3).next_sibling.is_null());
+    }
+
+    #[test]
+    fn append_child_indexes_element_siblings() {
+        let mut arena = Arena::new();
+        let parent = arena.new_element(Tag::Div, 0);
+        let leading_text = arena.new_text(1, "a");
+        let first = arena.new_element(Tag::Span, 1);
+        let comment = arena.new_comment(1, "c");
+        let text = arena.new_text(1, "b");
+        let second = arena.new_element(Tag::P, 1);
+        for child in [leading_text, first, comment, text, second] {
+            arena.append_child(parent, child);
+        }
+
+        assert_eq!(arena.get(first).element_index, 1);
+        assert_eq!(arena.full_element_index(first), 1);
+        assert_eq!(arena.get(second).element_index, 2);
+        assert_eq!(arena.full_element_index(second), 2);
+        for non_element in [leading_text, comment, text] {
+            assert_eq!(arena.get(non_element).element_index, 0);
+        }
     }
 
     #[test]

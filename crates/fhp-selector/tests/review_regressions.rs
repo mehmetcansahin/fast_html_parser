@@ -1,7 +1,10 @@
 use fhp_core::tag::Tag;
+use fhp_selector::matcher::select_all_list;
+use fhp_selector::parser::parse_selector;
 #[cfg(feature = "xpath")]
 use fhp_selector::xpath::ast::XPathResult;
 use fhp_selector::{DocumentIndex, Selectable};
+use fhp_tree::arena::Arena;
 use fhp_tree::parse;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
@@ -512,4 +515,101 @@ fn selection_xpath_positioned_text_scales_across_wide_sibling_roots() {
         panic!("expected string result");
     };
     assert_eq!(texts, ["40000"]);
+}
+
+#[test]
+fn non_ascii_and_escaped_identifiers_are_accepted() {
+    let doc = parse(
+        "<div id='ürün' class='café md:flex'>a</div>\
+         <p id='123' data-k='x]y' title='say \"hi\"'>b</p>\
+         <section><x-ürün>c</x-ürün></section>",
+    )
+    .unwrap();
+
+    for (css, expected) in [
+        ("#ürün", "a"),
+        (".café", "a"),
+        ("div.md\\:flex", "a"),
+        ("\\64 iv", "a"),
+        ("#\\31 23", "b"),
+        ("[data-k='x\\]y']", "b"),
+        ("[data-k=x\\]y]", "b"),
+        ("[title=\"say \\\"hi\\\"\"]", "b"),
+        ("x-ürün", "c"),
+        ("section X-ürün", "c"),
+    ] {
+        assert_eq!(doc.select(css).unwrap().text(), expected, "{css}");
+    }
+}
+
+#[test]
+fn nth_child_matches_in_arenas_built_through_the_public_api() {
+    let mut arena = Arena::new();
+    let root = arena.new_element(Tag::Unknown, 0);
+    let list = arena.new_element(Tag::Ul, 1);
+    arena.append_child(root, list);
+    let mut items = Vec::new();
+    for _ in 0..3 {
+        let text = arena.new_text(2, " ");
+        arena.append_child(list, text);
+        let item = arena.new_element(Tag::Li, 2);
+        arena.append_child(list, item);
+        items.push(item);
+    }
+
+    let select = |css: &str| select_all_list(&arena, root, &parse_selector(css).unwrap());
+    assert_eq!(select("li:nth-child(1)"), [items[0]]);
+    assert_eq!(select("li:nth-child(1)"), select("li:first-child"));
+    assert_eq!(select("li:nth-child(2n+1)"), [items[0], items[2]]);
+    assert_eq!(select("li:nth-child(3)"), select("li:last-child"));
+}
+
+#[test]
+fn find_by_attr_treats_valueless_attributes_as_empty() {
+    let doc = parse("<input disabled><input disabled=''><input disabled='x'>").unwrap();
+
+    let found = doc.find_by_attr("disabled", "");
+    assert_eq!(found.len(), 2);
+    assert_eq!(
+        found.node_ids(),
+        doc.select("[disabled='']").unwrap().node_ids()
+    );
+}
+
+#[test]
+fn pseudo_class_names_are_case_insensitive() {
+    let doc = parse("<ul><li>1</li><li class=x>2</li><li>3</li></ul>").unwrap();
+
+    assert_eq!(doc.select("li:First-Child").unwrap().text(), "1");
+    assert_eq!(doc.select("li:LAST-CHILD").unwrap().text(), "3");
+    assert_eq!(doc.select("li:Nth-Child(2)").unwrap().text(), "2");
+    assert_eq!(doc.select("li:NOT(.x)").unwrap().text(), "13");
+}
+
+#[test]
+fn selector_errors_report_the_character_at_its_input_offset() {
+    // Positions are byte offsets into the untrimmed input.
+    let err = parse_selector("  #ürün !").unwrap_err().to_string();
+    assert!(
+        err.contains("unexpected character '!' at position 10"),
+        "{err}"
+    );
+
+    let err = parse_selector("  [a=b é").unwrap_err().to_string();
+    assert!(
+        err.contains("expected ']', found 'é' at position 7"),
+        "{err}"
+    );
+}
+
+#[cfg(feature = "xpath")]
+#[test]
+fn xpath_errors_report_the_character_at_its_input_offset() {
+    let doc = parse("<p></p>").unwrap();
+
+    let err = doc.xpath("//p[@a='x'é]").unwrap_err().to_string();
+    assert!(err.contains("expected ']', got 'é'"), "{err}");
+
+    let err = doc.xpath("  //[").unwrap_err().to_string();
+    assert!(err.contains("expected identifier at position 4"), "{err}");
 }

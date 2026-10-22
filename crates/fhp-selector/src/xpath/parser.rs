@@ -23,15 +23,15 @@ use fhp_core::error::XPathError;
 /// # Errors
 ///
 /// Returns [`XPathError::Invalid`] if the expression syntax is invalid.
+/// Positions in the error reason are byte offsets into `input`.
 pub fn parse_xpath(input: &str) -> Result<XPathExpr, XPathError> {
-    let input = input.trim();
-    if input.is_empty() {
+    let mut parser = XPathParser::new(input);
+    if parser.is_eof() {
         return Err(XPathError::Invalid {
             reason: "empty xpath expression".to_string(),
         });
     }
 
-    let mut parser = XPathParser::new(input);
     let expr = parser.parse()?;
 
     // Check for trailing /text()
@@ -62,8 +62,22 @@ struct XPathParser<'a> {
 }
 
 impl<'a> XPathParser<'a> {
+    /// Create a parser over `input` without its surrounding whitespace, keeping
+    /// positions relative to the untrimmed input for error messages.
     fn new(input: &'a str) -> Self {
-        Self { input, pos: 0 }
+        let input = input.trim_end();
+        Self {
+            input,
+            pos: input.len() - input.trim_start().len(),
+        }
+    }
+
+    /// The character at the current position, for error messages.
+    fn describe_next(&self) -> String {
+        self.remaining()
+            .chars()
+            .next()
+            .map_or_else(|| "EOF".to_string(), String::from)
     }
 
     fn remaining(&self) -> &'a str {
@@ -311,7 +325,7 @@ impl<'a> XPathParser<'a> {
 
         if quote != b'\'' && quote != b'"' {
             return Err(XPathError::Invalid {
-                reason: format!("expected quote, got '{}'", quote as char),
+                reason: format!("expected quote, got '{}'", self.describe_next()),
             });
         }
 
@@ -357,9 +371,8 @@ impl<'a> XPathParser<'a> {
             Err(XPathError::Invalid {
                 reason: format!(
                     "expected '{}', got '{}'",
-                    expected as char,
-                    self.peek()
-                        .map_or("EOF".to_string(), |b| (b as char).to_string())
+                    char::from(expected),
+                    self.describe_next()
                 ),
             })
         }

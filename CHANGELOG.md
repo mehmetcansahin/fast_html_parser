@@ -38,6 +38,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The `detect` documentation states that the first declaring `<meta>`
   element wins; the `charset` attribute takes precedence only within one
   element.
+- CSS selectors accept non-ASCII names and CSS escapes (`#ürün`, `.café`,
+  `.md\:flex`, `#\31 23`), and quoted attribute values decode escapes such
+  as `\"`. Pseudo-class names are now ASCII case-insensitive
+  (`:First-Child`).
+- `:nth-child` matches in trees built with `Arena::append_child`, which now
+  records each element's sibling index the way the parser does.
+- `find_by_attr(name, "")` matches valueless attributes such as `disabled`,
+  like `[disabled='']` and XPath `@disabled=''`.
+- Selector and XPath error messages show the offending character instead of
+  its first UTF-8 byte, and report byte offsets into the untrimmed input.
 
 ### Performance
 
