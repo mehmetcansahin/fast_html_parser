@@ -13,7 +13,10 @@ use encoding_rs::{CoderResult, Decoder, Encoding};
 /// A streaming decoder that wraps a byte source and produces UTF-8 output.
 ///
 /// Reads chunks from the inner reader, decodes them using the configured
-/// encoding, and writes UTF-8 bytes into the caller's buffer.
+/// encoding, and writes UTF-8 bytes into the caller's buffer. BOMs and
+/// malformed sequences are handled exactly like [`decode`](crate::decode()): a
+/// BOM matching the encoding is stripped, and any other BOM is decoded as
+/// content with the configured encoding rather than re-sniffed.
 ///
 /// # Example
 ///
@@ -30,16 +33,20 @@ use encoding_rs::{CoderResult, Decoder, Encoding};
 pub struct DecodingReader<R> {
     inner: R,
     decoder: Decoder,
-    /// Raw bytes read from `inner` but not yet consumed by the decoder.
+    /// Raw bytes read from `inner`; `raw_buf[raw_pos..raw_len]` is not yet
+    /// consumed by the decoder.
     raw_buf: Vec<u8>,
-    /// Number of valid bytes in `raw_buf`.
+    /// Start of the unconsumed bytes in `raw_buf`.
+    raw_pos: usize,
+    /// End of the valid bytes in `raw_buf`.
     raw_len: usize,
-    /// Decoded UTF-8 bytes ready to be returned to the caller.
-    decoded_buf: Vec<u8>,
-    /// Read cursor into `decoded_buf`.
-    decoded_pos: usize,
-    /// Number of valid decoded bytes in `decoded_buf`.
-    decoded_len: usize,
+    /// Decoded output for a caller buffer smaller than `MIN_DIRECT_OUTPUT`
+    /// that has not been returned yet.
+    pending: [u8; MIN_DIRECT_OUTPUT],
+    /// Read cursor into `pending`.
+    pending_pos: usize,
+    /// Number of valid bytes in `pending`.
+    pending_len: usize,
     /// Whether the inner reader has reached EOF.
     eof: bool,
     /// Whether the decoder accepted the final input and must not be called again.
@@ -49,105 +56,83 @@ pub struct DecodingReader<R> {
 /// Default chunk size for reading from the inner source (8 KB).
 const CHUNK_SIZE: usize = 8192;
 
+/// Smallest output buffer `encoding_rs` accepts when decoding to UTF-8. It
+/// always fits at least one decoded character, so a pass into it that writes
+/// nothing has consumed all of its input.
+const MIN_DIRECT_OUTPUT: usize = 4;
+
 impl<R: Read> DecodingReader<R> {
     /// Create a new streaming decoder with the given encoding.
     pub fn new(inner: R, encoding: &'static Encoding) -> Self {
         Self {
             inner,
-            decoder: encoding.new_decoder(),
+            decoder: encoding.new_decoder_with_bom_removal(),
             raw_buf: vec![0u8; CHUNK_SIZE],
+            raw_pos: 0,
             raw_len: 0,
-            decoded_buf: vec![0u8; CHUNK_SIZE * 4], // worst case: 4 bytes per input byte
-            decoded_pos: 0,
-            decoded_len: 0,
+            pending: [0; MIN_DIRECT_OUTPUT],
+            pending_pos: 0,
+            pending_len: 0,
             eof: false,
             finished: false,
         }
     }
 
-    /// Fill the decoded buffer by reading from the inner source and decoding.
-    fn fill_decoded(&mut self) -> io::Result<()> {
-        // If there's still data in the decoded buffer, don't refill.
-        if self.decoded_pos < self.decoded_len {
-            return Ok(());
-        }
-
-        // Reset decoded buffer.
-        self.decoded_pos = 0;
-        self.decoded_len = 0;
-
-        if self.finished {
-            return Ok(());
-        }
-
-        // Decode buffered bytes, reading more whenever a pass produces no
-        // output. A single pass can yield zero bytes when the only buffered
-        // bytes are an incomplete multi-byte sequence straddling a read
-        // boundary (the decoder buffers them internally and emits nothing); in
-        // that case we must read more from `inner` and decode again rather than
-        // reporting a premature EOF.
-        loop {
+    /// Decode into `out` (at least `MIN_DIRECT_OUTPUT` bytes), reading from
+    /// the inner source as needed. Returns 0 only at the end of the stream.
+    fn decode_into(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        debug_assert!(out.len() >= MIN_DIRECT_OUTPUT);
+        // A pass can yield zero bytes when the only buffered bytes are an
+        // incomplete multi-byte sequence straddling a read boundary (the
+        // decoder buffers them internally and emits nothing); then read more
+        // from `inner` and decode again rather than reporting a premature EOF.
+        while !self.finished {
             let (result, read, written, _had_errors) = self.decoder.decode_to_utf8(
-                &self.raw_buf[..self.raw_len],
-                &mut self.decoded_buf,
+                &self.raw_buf[self.raw_pos..self.raw_len],
+                out,
                 self.eof,
             );
-
-            // Shift any unconsumed trailing bytes (e.g. an output-full
-            // remainder) to the front of the raw buffer.
-            if read < self.raw_len {
-                self.raw_buf.copy_within(read..self.raw_len, 0);
-                self.raw_len -= read;
-            } else {
-                self.raw_len = 0;
+            self.raw_pos += read;
+            if result == CoderResult::InputEmpty {
+                self.finished = self.eof;
             }
-
-            if self.eof && result == CoderResult::InputEmpty {
-                self.finished = true;
-            }
-
             if written > 0 {
-                self.decoded_len = written;
-                return Ok(());
+                return Ok(written);
             }
 
-            // No output this pass. If the input is exhausted, we are done.
-            if self.finished {
-                return Ok(());
-            }
-
-            // Read more, appending after any leftover partial sequence so it
-            // can be completed by the following bytes.
-            if self.raw_len == self.raw_buf.len() {
-                // Buffer full without a complete sequence (pathological): grow
-                // it so the next read can make progress.
-                self.raw_buf.resize(self.raw_buf.len() * 2, 0);
-            }
-            let n = self.inner.read(&mut self.raw_buf[self.raw_len..])?;
-            if n == 0 {
-                self.eof = true;
-            } else {
-                self.raw_len += n;
+            debug_assert_eq!(result, CoderResult::InputEmpty);
+            if !self.finished {
+                let n = self.inner.read(&mut self.raw_buf)?;
+                self.raw_pos = 0;
+                self.raw_len = n;
+                self.eof = n == 0;
             }
         }
+        Ok(0)
     }
 }
 
 impl<R: Read> Read for DecodingReader<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.decoded_pos >= self.decoded_len {
-            self.fill_decoded()?;
+        if buf.is_empty() {
+            return Ok(0);
         }
 
-        if self.decoded_pos >= self.decoded_len {
-            return Ok(0); // EOF
+        if self.pending_pos == self.pending_len {
+            if buf.len() >= MIN_DIRECT_OUTPUT {
+                // Decode straight into the caller's buffer.
+                return self.decode_into(buf);
+            }
+            let mut pending = [0; MIN_DIRECT_OUTPUT];
+            self.pending_len = self.decode_into(&mut pending)?;
+            self.pending = pending;
+            self.pending_pos = 0;
         }
 
-        let available = self.decoded_len - self.decoded_pos;
-        let to_copy = available.min(buf.len());
-        buf[..to_copy]
-            .copy_from_slice(&self.decoded_buf[self.decoded_pos..self.decoded_pos + to_copy]);
-        self.decoded_pos += to_copy;
+        let available = &self.pending[self.pending_pos..self.pending_len];
+        let to_copy = available.len().min(buf.len());
+        buf[..to_copy].copy_from_slice(&available[..to_copy]);
+        self.pending_pos += to_copy;
         Ok(to_copy)
     }
 }
@@ -271,6 +256,82 @@ mod tests {
         let mut byte = [0u8; 1];
         assert_eq!(reader.read(&mut byte).unwrap(), 0);
         assert_eq!(reader.read(&mut byte).unwrap(), 0);
+    }
+
+    fn read_with_buffer_len(data: &[u8], encoding: &'static Encoding, len: usize) -> Vec<u8> {
+        let mut reader = DecodingReader::new(OneByteReader { data, pos: 0 }, encoding);
+        let mut output = Vec::new();
+        let mut buf = vec![0u8; len];
+        loop {
+            let n = reader.read(&mut buf).unwrap();
+            if n == 0 {
+                return output;
+            }
+            output.extend_from_slice(&buf[..n]);
+        }
+    }
+
+    #[test]
+    fn stream_any_buffer_len_yields_the_same_text() {
+        let text = "a\u{e9}\u{20AC}\u{1F600}b \u{131}\u{15F}";
+        for len in 1..=9 {
+            let output = read_with_buffer_len(text.as_bytes(), encoding_rs::UTF_8, len);
+            assert_eq!(String::from_utf8(output).unwrap(), text, "len={len}");
+        }
+        // Windows-1254: each byte decodes to a 1- to 3-byte UTF-8 sequence.
+        let legacy: &[u8] = &[b'a', 0xFE, 0xF0, 0xFD, 0x80, b'z'];
+        for len in 1..=5 {
+            let output = read_with_buffer_len(legacy, encoding_rs::WINDOWS_1254, len);
+            assert_eq!(
+                String::from_utf8(output).unwrap(),
+                "a\u{15F}\u{11F}\u{131}\u{20AC}z",
+                "len={len}"
+            );
+        }
+    }
+
+    #[test]
+    fn stream_matches_decode_for_boms() {
+        let cases: [(&[u8], &'static Encoding); 6] = [
+            (b"\xEF\xBB\xBFa", encoding_rs::UTF_8),
+            (b"\xEF\xBB\xBFa", encoding_rs::WINDOWS_1252),
+            (b"\xFF\xFEa\x00", encoding_rs::UTF_16LE),
+            (b"\xFF\xFEa\x00", encoding_rs::UTF_8),
+            (b"\xFE\xFF\x00a", encoding_rs::UTF_16BE),
+            (b"\xFE\xFF\x00a", encoding_rs::UTF_16LE),
+        ];
+        for (data, encoding) in cases {
+            let mut output = String::new();
+            DecodingReader::new(data, encoding)
+                .read_to_string(&mut output)
+                .unwrap();
+            assert_eq!(
+                output,
+                crate::decode(data, encoding),
+                "data={data:?}, encoding={}",
+                encoding.name()
+            );
+        }
+    }
+
+    #[test]
+    fn stream_strips_a_bom_split_across_reads() {
+        let output = read_with_buffer_len(b"\xEF\xBB\xBFok", encoding_rs::UTF_8, 8);
+        assert_eq!(output, b"ok");
+    }
+
+    #[test]
+    fn stream_empty_read_does_not_touch_the_source() {
+        struct FailingReader;
+        impl Read for FailingReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("source must not be read"))
+            }
+        }
+
+        let mut reader = DecodingReader::new(FailingReader, encoding_rs::UTF_8);
+        assert_eq!(reader.read(&mut []).unwrap(), 0);
+        assert!(reader.read(&mut [0u8; 8]).is_err());
     }
 
     #[test]

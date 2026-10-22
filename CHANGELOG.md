@@ -14,6 +14,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical token stream matches fhp-tokenizer's; lol_html and tl rows are
   labelled as less work or non-spec references. See
   [benchmarks/README.md](benchmarks/README.md#tokenizer-comparison).
+- `fhp_encoding::decode_cow`, which decodes like `decode` but borrows input
+  that is already valid UTF-8 instead of copying it.
+- `fhp_encoding::bom_length` and `fhp_encoding::PRESCAN_LIMIT`. fhp-tree now
+  uses them instead of its own BOM tables and prescan window size.
+
+### Fixed
+
+- `DecodingReader` decodes with the encoding it is given, like `decode`: a
+  BOM for a different encoding is decoded as content instead of switching
+  the decoder to UTF-8 or UTF-16.
+- `DecodingReader::read` with an empty buffer returns 0 without reading from
+  its source.
+- The `<meta>` encoding prescan follows the HTML algorithm in four more cases:
+  - A `charset` attribute that is empty or not an encoding label makes its
+    element declare nothing; it no longer falls back to that element's
+    `http-equiv` `content`.
+  - In `content`, the first `charset=` decides even when its value is not a
+    label.
+  - `charset` in `content` no longer needs whitespace or `;` before it.
+  - A tag name runs to the first whitespace or `>`, so a quote after a `/`
+    in it (`<a/b='>`) no longer hides a later `<meta>`.
+- The `detect` documentation states that the first declaring `<meta>`
+  element wins; the `charset` attribute takes precedence only within one
+  element.
 
 ### Performance
 
@@ -29,6 +53,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `StreamTokenizer::feed` is a further 8–17% faster on the repository
   fixtures: attribute names spelled exactly like one of 35 common names are
   returned as static strings instead of allocated. Tokens are unchanged.
+- `DecodingReader` decodes straight into the caller's buffer instead of
+  through an internal 32 KiB buffer and a second copy, and allocates 8 KiB
+  per reader instead of 40 KiB.
 
 ## [0.2.0] - 2026-10-14
 

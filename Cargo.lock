@@ -386,6 +386,7 @@ version = "0.2.0"
 dependencies = [
  "encoding_rs",
  "fhp-core",
+ "memchr",
 ]
 
 [[package]]

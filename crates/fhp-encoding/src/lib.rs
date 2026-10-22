@@ -5,9 +5,10 @@
 //! [encoding sniffing algorithm](https://html.spec.whatwg.org/multipage/parsing.html#encoding-sniffing-algorithm):
 //!
 //! 1. BOM (Byte Order Mark) detection
-//! 2. `<meta charset="...">` prescan (first 1 KB)
-//! 3. `<meta http-equiv="Content-Type" content="...charset=...">` prescan
-//! 4. Fallback to UTF-8
+//! 2. `<meta>` prescan of the first 1 KB: the first element that declares an
+//!    encoding with `charset="..."` or with `http-equiv="Content-Type"` and
+//!    `content="...charset=..."` wins
+//! 3. Fallback to UTF-8
 //!
 //! The actual decoding is delegated to [`encoding_rs`], which is
 //! SIMD-optimized by Mozilla/Servo. Decoding never fails: malformed byte
@@ -33,7 +34,7 @@ pub mod detect;
 /// Streaming decoder for chunk-based processing.
 pub mod stream;
 
-pub use decode::{decode, decode_or_detect};
-pub use detect::detect;
+pub use decode::{bom_length, decode, decode_cow, decode_or_detect};
+pub use detect::{PRESCAN_LIMIT, detect};
 pub use encoding_rs::Encoding;
 pub use stream::DecodingReader;

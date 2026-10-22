@@ -10,15 +10,13 @@
 
 use encoding_rs::Encoding;
 use fhp_core::error::ParseError;
+use fhp_encoding::PRESCAN_LIMIT;
 use fhp_tokenizer::streaming::StreamTokenizer;
 use fhp_tokenizer::token::Token;
 
 use crate::builder::TreeBuilder;
 use crate::node::NodeId;
 use crate::{Document, HtmlError, MAX_INPUT_SIZE, NodeRef};
-
-/// Maximum bytes retained for HTML encoding prescan.
-const PRESCAN_LIMIT: usize = 1024;
 
 /// Maximum amount of raw input processed as one internal unit.
 const PROCESS_BLOCK_SIZE: usize = 64 * 1024;
@@ -115,7 +113,7 @@ struct DecoderState {
 impl DecoderState {
     fn detect(sample: &[u8], max_input_size: usize) -> (Self, usize) {
         let encoding = fhp_encoding::detect(sample);
-        let bom_len = bom_length(sample, encoding);
+        let bom_len = fhp_encoding::bom_length(sample, encoding);
         (
             Self {
                 decoder: encoding.new_decoder_without_bom_handling(),
@@ -442,7 +440,7 @@ impl EarlyStopParser {
             self.initial_buf.extend_from_slice(&chunk[..take]);
             chunk = &chunk[take..];
 
-            if explicit_bom_length(&self.initial_buf).is_some() {
+            if Encoding::for_bom(&self.initial_buf).is_some() {
                 self.flush_initial_buf()?;
                 if self.found.is_some() {
                     return Ok(EarlyStopProgress::Matched);
@@ -809,28 +807,6 @@ pub fn parse_stream_with_limit<'a>(
 
 fn effective_max(max_input_size: usize) -> usize {
     max_input_size.min(crate::MAX_REPRESENTABLE_INPUT_SIZE)
-}
-
-fn explicit_bom_length(input: &[u8]) -> Option<usize> {
-    if input.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        Some(3)
-    } else if input.starts_with(&[0xFF, 0xFE]) || input.starts_with(&[0xFE, 0xFF]) {
-        Some(2)
-    } else {
-        None
-    }
-}
-
-fn bom_length(input: &[u8], encoding: &'static Encoding) -> usize {
-    if encoding == encoding_rs::UTF_8 && input.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        3
-    } else if (encoding == encoding_rs::UTF_16LE && input.starts_with(&[0xFF, 0xFE]))
-        || (encoding == encoding_rs::UTF_16BE && input.starts_with(&[0xFE, 0xFF]))
-    {
-        2
-    } else {
-        0
-    }
 }
 
 #[cfg(test)]

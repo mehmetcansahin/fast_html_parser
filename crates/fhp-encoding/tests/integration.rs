@@ -290,6 +290,15 @@ fn streaming_decode_utf8() {
 }
 
 #[test]
+fn streaming_explicit_encoding_does_not_strip_a_foreign_bom() {
+    let mut output = String::new();
+    DecodingReader::new(&b"\xEF\xBB\xBFa"[..], encoding_rs::WINDOWS_1252)
+        .read_to_string(&mut output)
+        .unwrap();
+    assert_eq!(output, "ï»¿a");
+}
+
+#[test]
 fn streaming_decode_windows_1254() {
     // ş=0xFE, ğ=0xF0 in Windows-1254.
     let data: &[u8] = &[0xFE, 0xF0];

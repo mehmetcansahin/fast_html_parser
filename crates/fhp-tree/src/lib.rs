@@ -229,7 +229,7 @@ pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Doc
 #[cfg(feature = "encoding")]
 fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
     let encoding = fhp_encoding::detect(input);
-    let input = strip_matching_bom(input, encoding);
+    let input = &input[fhp_encoding::bom_length(input, encoding)..];
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut decoded = String::with_capacity(input.len().min(max));
     let mut offset = 0usize;
@@ -269,19 +269,6 @@ fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
     }
 
     Ok(decoded)
-}
-
-#[cfg(feature = "encoding")]
-fn strip_matching_bom<'a>(input: &'a [u8], encoding: &'static encoding_rs::Encoding) -> &'a [u8] {
-    if encoding == encoding_rs::UTF_8 && input.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        &input[3..]
-    } else if (encoding == encoding_rs::UTF_16LE && input.starts_with(&[0xFF, 0xFE]))
-        || (encoding == encoding_rs::UTF_16BE && input.starts_with(&[0xFE, 0xFF]))
-    {
-        &input[2..]
-    } else {
-        input
-    }
 }
 
 fn ensure_input_size(size: usize, max: usize) -> Result<(), HtmlError> {
