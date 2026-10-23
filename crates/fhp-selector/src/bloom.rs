@@ -5,8 +5,9 @@
 //! ancestors allows fast rejection without the walk.
 //!
 //! Selection carries an `AncestorFilter` down its depth-first walk, built
-//! from hashes the arena already stores. The public [`AncestorBloom`] table
-//! builds a 256-bit bloom filter per node instead.
+//! from hashes the arena already stores. The deprecated public
+//! [`AncestorBloom`] table builds a 256-bit bloom filter per node instead,
+//! re-reading and re-hashing every attribute.
 //!
 //! [`AncestorBloom`]: crate::bloom::AncestorBloom
 
@@ -126,10 +127,14 @@ fn id_bit(hash: u32) -> u64 {
 /// Uses 4 `u64` words (256 bits total). False-positive rate is low
 /// enough for ancestor pre-filtering with typical HTML documents.
 #[derive(Clone, Copy, Debug)]
+#[deprecated(
+    note = "selection no longer uses a per-node bloom table; it filters ancestors by the tag, class and id hashes the arena stores. This API will be removed in a future release."
+)]
 pub struct AncestorBloom {
     bits: [u64; 4],
 }
 
+#[allow(deprecated)]
 impl AncestorBloom {
     /// Create an empty bloom filter.
     pub const fn new() -> Self {
@@ -158,6 +163,7 @@ impl AncestorBloom {
     }
 }
 
+#[allow(deprecated)]
 impl Default for AncestorBloom {
     fn default() -> Self {
         Self::new()
@@ -169,6 +175,9 @@ impl Default for AncestorBloom {
 /// Uses FNV-1a on the tag discriminant byte, consistent with
 /// [`selector_hash`] used for per-node class/id hashes.
 #[inline]
+#[deprecated(
+    note = "selection no longer uses a per-node bloom table; it filters ancestors by the tag, class and id hashes the arena stores. This API will be removed in a future release."
+)]
 pub fn hash_tag(tag: Tag) -> u32 {
     selector_hash(&[tag as u8])
 }
@@ -178,6 +187,9 @@ pub fn hash_tag(tag: Tag) -> u32 {
 /// Delegates to [`selector_hash`] (FNV-1a) so that ancestor bloom
 /// hashes are consistent with per-node class/id hashes.
 #[inline]
+#[deprecated(
+    note = "selection no longer uses a per-node bloom table; it filters ancestors by the tag, class and id hashes the arena stores. This API will be removed in a future release."
+)]
 pub fn hash_str(s: &str) -> u32 {
     selector_hash(s.as_bytes())
 }
@@ -192,6 +204,10 @@ pub fn hash_str(s: &str) -> u32 {
 ///
 /// The returned `Vec` is indexed by `NodeId::index()`; entries outside the
 /// subtree of `root` stay empty.
+#[deprecated(
+    note = "selection no longer uses a per-node bloom table; it filters ancestors by the tag, class and id hashes the arena stores. This API will be removed in a future release."
+)]
+#[allow(deprecated)]
 pub fn build_ancestor_blooms(arena: &Arena, root: NodeId) -> Vec<AncestorBloom> {
     let mut blooms = vec![AncestorBloom::new(); arena.len()];
     fill_ancestor_blooms(arena, root, &mut blooms);
@@ -203,6 +219,7 @@ pub fn build_ancestor_blooms(arena: &Arena, root: NodeId) -> Vec<AncestorBloom> 
 ///
 /// Entries outside the subtree are left untouched, so one table can be
 /// filled for several roots.
+#[allow(deprecated)]
 fn fill_ancestor_blooms(arena: &Arena, root: NodeId, blooms: &mut [AncestorBloom]) {
     if root.is_null() {
         return;
@@ -219,6 +236,7 @@ fn fill_ancestor_blooms(arena: &Arena, root: NodeId, blooms: &mut [AncestorBloom
 
 /// Add the hashes a node contributes to its descendants' blooms: its tag,
 /// class names, and id. Text, comment, and doctype nodes contribute nothing.
+#[allow(deprecated)]
 fn insert_node_hashes(arena: &Arena, node: NodeId, bloom: &mut AncestorBloom) {
     let n = arena.get(node);
     if n.flags.has(NodeFlags::IS_TEXT)
@@ -251,6 +269,7 @@ fn insert_node_hashes(arena: &Arena, node: NodeId, bloom: &mut AncestorBloom) {
 }
 
 /// Recursive DFS to build ancestor blooms.
+#[allow(deprecated)]
 fn build_recursive(
     arena: &Arena,
     node: NodeId,
@@ -278,6 +297,7 @@ fn build_recursive(
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 

@@ -57,7 +57,8 @@
 
 /// CSS selector AST types.
 pub mod ast;
-/// Bloom filter for ancestor pre-filtering.
+/// Ancestor pre-filtering for descendant combinators. Its per-node
+/// `AncestorBloom` table is deprecated.
 pub mod bloom;
 /// Right-to-left matching engine.
 pub mod matcher;

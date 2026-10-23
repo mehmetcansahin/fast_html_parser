@@ -32,6 +32,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the tree stays at most 513 levels deep. `TreeBuilder::process` and
   `TreeBuilder::finish` no longer return errors.
 
+### Deprecated
+
+- `fhp_selector::bloom::AncestorBloom`, `build_ancestor_blooms`, `hash_tag`,
+  and `hash_str`. Selection no longer builds a per-node bloom table; it
+  filters ancestors with the tag, class, and id hashes the arena already
+  stores.
+
 ### Fixed
 
 - `DecodingReader` decodes with the encoding it is given, like `decode`: a
