@@ -99,6 +99,10 @@ pub(crate) const MAX_REPRESENTABLE_INPUT_SIZE: usize = 1 << 31;
 ///
 /// Runs the tokenizer and tree builder in sequence.
 ///
+/// At most 512 elements are open at once. A start tag beyond that inserts an
+/// empty element, and the content after it goes to the innermost open
+/// element, so deeply nested input still parses with a bounded tree depth.
+///
 /// # Errors
 ///
 /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
@@ -402,15 +406,7 @@ impl<'a> NodeRef<'a> {
     ///
     /// For element nodes, returns `""`. For text nodes, returns the text.
     pub fn text(&self) -> &'a str {
-        let node = self.arena.get(self.id);
-        if node.flags.has(NodeFlags::IS_TEXT)
-            || node.flags.has(NodeFlags::IS_COMMENT)
-            || node.flags.has(NodeFlags::IS_DOCTYPE)
-        {
-            self.arena.text(self.id)
-        } else {
-            ""
-        }
+        self.arena.text(self.id)
     }
 
     /// Recursively collect all text content from this node and its
@@ -478,10 +474,8 @@ impl<'a> NodeRef<'a> {
             // Raw text elements (script/style/plaintext/...) must not be
             // escaped per HTML spec.
             let parent_id = node.parent;
-            let is_raw_text = !parent_id.is_null() && {
-                let parent_tag = self.arena.get(parent_id).tag;
-                parent_tag.is_raw_text() || parent_tag == Tag::Plaintext
-            };
+            let is_raw_text =
+                !parent_id.is_null() && builder::opens_raw_text(self.arena.get(parent_id).tag);
             if is_raw_text {
                 out.push_str(text);
             } else {
@@ -533,6 +527,26 @@ impl<'a> NodeRef<'a> {
                     return;
                 }
                 out.push('>');
+
+                // The parser drops a newline right after these start tags, so
+                // content that starts with one needs an extra newline to
+                // survive a round trip.
+                let drops_leading_newline = matches!(node.tag, Tag::Pre | Tag::Textarea)
+                    || (node.tag == Tag::Unknown && name.eq_ignore_ascii_case("listing"));
+                if drops_leading_newline
+                    && !node.first_child.is_null()
+                    && self
+                        .arena
+                        .get(node.first_child)
+                        .flags
+                        .has(NodeFlags::IS_TEXT)
+                    && matches!(
+                        self.arena.text(node.first_child).as_bytes().first(),
+                        Some(b'\n' | b'\r')
+                    )
+                {
+                    out.push('\n');
+                }
             }
         }
 
@@ -1143,5 +1157,33 @@ mod tests {
         let html = doc.to_html();
         assert!(html.contains("<my-widget>"), "html: {html}");
         assert!(html.contains("</my-widget>"), "html: {html}");
+    }
+
+    #[test]
+    fn leading_newline_of_pre_textarea_and_listing_survives_a_round_trip() {
+        for html in [
+            "<pre>\n\nx</pre>",
+            "<textarea>\n\nx</textarea>",
+            "<listing>\n\nx</listing>",
+        ] {
+            let serialized = parse(html).unwrap().to_html();
+            assert_eq!(serialized, html);
+            assert_eq!(parse(&serialized).unwrap().root().text_content(), "\nx");
+        }
+        assert_eq!(parse("<pre>x</pre>").unwrap().to_html(), "<pre>x</pre>");
+        assert_eq!(
+            parse("<pre><!--\n-->x</pre>").unwrap().to_html(),
+            "<pre><!--\n-->x</pre>"
+        );
+    }
+
+    #[test]
+    fn arena_text_of_an_unknown_element_is_empty() {
+        let doc = parse("<my-widget>x</my-widget>").unwrap();
+        let widget = doc.root().first_child().unwrap();
+
+        assert_eq!(doc.arena().unknown_tag_name(widget.id()), Some("my-widget"));
+        assert_eq!(doc.arena().text(widget.id()), "");
+        assert_eq!(widget.text(), "");
     }
 }

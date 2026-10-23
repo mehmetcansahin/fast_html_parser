@@ -129,8 +129,7 @@ assert_eq!(doc.root().text_content(), "from chunks");
 ```
 
 Both raw and decoded byte counts are limited; the effective ceiling is
-`min(configured_limit, 2 GiB)`. Nesting and size failures make a stream parser
-terminal. Iterator and async helpers stop reading after the first error.
+`min(configured_limit, 2 GiB)`. Size failures make a stream parser terminal. Iterator and async helpers stop reading after the first error.
 
 ### Early Stop
 

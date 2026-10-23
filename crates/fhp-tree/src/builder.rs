@@ -6,13 +6,19 @@
 //!
 //! [`Token`]: fhp_tokenizer::token::Token
 
+use std::collections::HashMap;
+use std::collections::hash_map::RandomState;
+use std::hash::{BuildHasher, Hash, Hasher};
+
 use fhp_core::{attr::iter_raw_attrs, error::ParseError, is_html_whitespace, tag::Tag};
 use fhp_tokenizer::token::{Attribute as TokenAttribute, Token};
 
 use crate::arena::Arena;
 use crate::node::{NodeFlags, NodeId};
 
-/// Maximum nesting depth to prevent stack overflow on pathological input.
+/// Maximum number of open elements, excluding the synthetic root. Elements
+/// started beyond it stay empty, which bounds the stack and the tree depth
+/// that recursive walks such as serialization descend.
 const MAX_DEPTH: u16 = 512;
 
 /// Cap capacity heuristics for very large inputs.
@@ -128,38 +134,95 @@ struct OpenElement {
     /// generic end-tag and list-item searches. Cached at push time so stack
     /// walks never compare unknown element names.
     special: bool,
+    /// Which scope walks end at this element, cached like `special`.
+    boundary: ScopeBoundary,
     /// Effective insertion mode for the stack prefix ending at this entry.
     insertion_mode: InsertionMode,
     element_child_count: u32,
+    /// Noah's Ark identity of a formatting element (tag, name, and
+    /// attributes), computed on first use; 0 until then.
+    identity: u64,
+}
+
+/// The scope walks an open element ends.
+///
+/// HTML also bounds every scope at `html`, which is always the bottom of its
+/// stack. Here `html` is an ordinary element that a stray second `<html>` can
+/// open anywhere, so the synthetic root bounds the walks instead.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ScopeBoundary {
+    /// Ends no scope walk.
+    None,
+    /// Ends the default scope and the scopes built on it: `applet`,
+    /// `caption`, `td`, `th`, `marquee`, and `object`.
+    Default,
+    /// Also ends the table scope: `table` and `template`.
+    Table,
+}
+
+impl ScopeBoundary {
+    /// `unknown_name` is the preserved name of a [`Tag::Unknown`] element.
+    fn of(tag: Tag, kind: ElementKind, unknown_name: Option<&str>) -> Self {
+        if kind == ElementKind::Table {
+            return Self::Table;
+        }
+        if matches!(kind, ElementKind::Cell | ElementKind::Caption) {
+            return Self::Default;
+        }
+        match unknown_name {
+            Some(name) if tag == Tag::Unknown && name.eq_ignore_ascii_case("template") => {
+                Self::Table
+            }
+            Some(name)
+                if tag == Tag::Unknown
+                    && matches_ascii_name(name, &["applet", "marquee", "object"]) =>
+            {
+                Self::Default
+            }
+            _ => Self::None,
+        }
+    }
 }
 
 /// Element sets that end an "has an element in scope" stack walk.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Scope {
-    /// The default scope: tables, cells, and captions.
+    /// The default scope: tables, cells, captions, `applet`, `marquee`,
+    /// `object`, and `template`.
     Standard,
     /// Default scope plus `ol` and `ul`.
     ListItem,
     /// Default scope plus `button`.
     Button,
-    /// Table scope: only a table ends the walk.
+    /// Table scope: `table` and `template`.
     Table,
 }
 
 impl Scope {
     #[inline]
     fn stops_at(self, entry: &OpenElement) -> bool {
-        let standard = matches!(
-            entry.kind,
-            ElementKind::Table | ElementKind::Cell | ElementKind::Caption
-        );
+        let standard = entry.boundary != ScopeBoundary::None;
         match self {
             Self::Standard => standard,
             Self::ListItem => standard || matches!(entry.tag, Tag::Ol | Tag::Ul),
             Self::Button => standard || entry.tag == Tag::Button,
-            Self::Table => entry.kind == ElementKind::Table,
+            Self::Table => entry.boundary == ScopeBoundary::Table,
         }
     }
+}
+
+/// The newline right after a `pre`, `listing`, or `textarea` start tag is
+/// dropped. The tokenizer does not normalize newlines, so it may be `\n`,
+/// `\r\n`, or a lone `\r`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum NewlineSkip {
+    /// Nothing to drop.
+    None,
+    /// Drop a leading newline of the next character token.
+    Newline,
+    /// The previous character token was exactly `\r`: drop the `\n` that
+    /// completes a CRLF split across tokens.
+    LineFeedAfterCr,
 }
 
 enum PendingAttrs<'slice, 'input> {
@@ -184,9 +247,10 @@ impl InsertionLocation {
 }
 
 /// Whether the tokenizer stays in a literal text mode after this start tag
-/// (raw text through the matching end tag, or plaintext through EOF).
+/// (raw text through the matching end tag, or plaintext through EOF). Text
+/// inside such an element is neither entity-decoded nor escaped.
 #[inline]
-fn opens_raw_text(tag: Tag) -> bool {
+pub(crate) fn opens_raw_text(tag: Tag) -> bool {
     tag.is_raw_text() || tag == Tag::Plaintext
 }
 
@@ -294,13 +358,12 @@ fn attrs_type_hidden(attributes: &PendingAttrs<'_, '_>) -> bool {
     }
 }
 
-/// Known block-level starts that imply the end of an open `<p>` element.
-///
-/// This covers every such element represented by the compact [`Tag`] enum;
-/// unknown/custom elements do not implicitly close a paragraph.
+/// Block-level starts that imply the end of an open `<p>` element. Elements
+/// without a compact [`Tag`] are matched by `name`; custom elements never
+/// close a paragraph.
 #[inline]
-fn closes_p_element(tag: Tag) -> bool {
-    matches!(
+fn closes_p_element(tag: Tag, name: &str) -> bool {
+    let known = matches!(
         tag,
         Tag::Article
             | Tag::Aside
@@ -325,7 +388,29 @@ fn closes_p_element(tag: Tag) -> bool {
             | Tag::Table
             | Tag::Ul
             | Tag::Xmp
-    )
+    );
+    known
+        || (tag == Tag::Unknown
+            && matches_ascii_name(
+                name,
+                &[
+                    "address",
+                    "blockquote",
+                    "center",
+                    "details",
+                    "dialog",
+                    "dir",
+                    "dl",
+                    "fieldset",
+                    "figcaption",
+                    "figure",
+                    "hgroup",
+                    "listing",
+                    "menu",
+                    "search",
+                    "summary",
+                ],
+            ))
 }
 
 /// Builds a DOM tree from a token stream.
@@ -341,19 +426,24 @@ pub struct TreeBuilder {
     kind_counts: [u16; ElementKind::COUNT],
     /// Effective insertion mode of the final open-element entry.
     insertion_mode: InsertionMode,
-    /// Whether a line feed at the start of the next character token is
-    /// dropped (the token right after a `pre`, `listing`, or `textarea`
-    /// start tag).
-    skip_next_lf: bool,
+    /// Newline to drop from the next character token (the token right after
+    /// a `pre`, `listing`, or `textarea` start tag).
+    newline_skip: NewlineSkip,
+    /// Where comments go after `</body>` (the `html` element) or `</html>`
+    /// (the document). Neither end tag closes anything, so everything else
+    /// after them still goes to the current node.
+    after_body_comment_parent: Option<NodeId>,
+    /// Elements the most recently processed token implied (`tbody`, `tr`,
+    /// `colgroup`), in creation order.
+    implied_elements: Vec<NodeId>,
+    /// Randomly keyed hasher for Noah's Ark identities.
+    identity_state: RandomState,
     /// The synthetic root node (document root).
     root: NodeId,
     /// Base address of the original input (for source-backed text).
     source_base: usize,
     /// Length of the original input in bytes.
     source_len: usize,
-    /// Terminal construction error. The infallible `TreeSink` path records it
-    /// here and [`TreeBuilder::finish`] surfaces it.
-    error: Option<ParseError>,
     /// Text node emitted by the current uninterrupted character-token run.
     /// Non-text tokens clear it so coalescing is independent of storage mode.
     last_text_node: NodeId,
@@ -399,8 +489,10 @@ impl TreeBuilder {
             tag: Tag::Unknown,
             kind: ElementKind::Root,
             special: true,
+            boundary: ScopeBoundary::None,
             insertion_mode: InsertionMode::InBody,
             element_child_count: 0,
+            identity: 0,
         });
         let mut kind_counts = [0; ElementKind::COUNT];
         kind_counts[ElementKind::Root.index()] = 1;
@@ -409,11 +501,13 @@ impl TreeBuilder {
             open_elements,
             kind_counts,
             insertion_mode: InsertionMode::InBody,
-            skip_next_lf: false,
+            newline_skip: NewlineSkip::None,
+            after_body_comment_parent: None,
+            implied_elements: Vec::new(),
+            identity_state: RandomState::new(),
             root,
             source_base: 0,
             source_len: 0,
-            error: None,
             last_text_node: NodeId::NULL,
             pending_table_text: String::new(),
             table_text_run_foster: false,
@@ -453,13 +547,14 @@ impl TreeBuilder {
 
     /// Process a single token and insert it into the tree.
     ///
-    /// The builder becomes terminal after a construction error. No partial
-    /// document is returned after the nesting limit is exceeded.
+    /// Tree construction never fails: once 512 elements are open, a new
+    /// element is inserted empty and its content goes to the current node.
+    /// The `Result` leaves room for future limits without an API change.
     #[inline]
     pub fn process(&mut self, token: &Token<'_>) -> Result<Option<NodeId>, ParseError> {
-        self.ensure_active()?;
         self.flushed_text_node = None;
-        match token {
+        self.implied_elements.clear();
+        let created = match token {
             Token::OpenTag {
                 tag,
                 name,
@@ -472,7 +567,9 @@ impl TreeBuilder {
                     PendingAttrs::Parsed(attributes),
                     *self_closing,
                 );
-                if matches!(created, Ok(None)) && opens_raw_text(*tag) {
+                // Ignored, or inserted empty at the nesting limit: either way
+                // the tokenizer's raw text has no raw-text parent.
+                if opens_raw_text(*tag) && !created.is_some_and(|node| self.is_current(node)) {
                     self.ignored_raw_text = Some(*tag);
                 }
                 created
@@ -485,23 +582,22 @@ impl TreeBuilder {
                 self.handle_close_tag(*tag, name.as_ref())
             }
             Token::Text { content } if self.ignored_raw_text.is_some() => {
-                Ok(self.handle_raw_text(content.as_ref()))
+                self.handle_raw_text(content.as_ref())
             }
-            Token::Text { content } => Ok(self.handle_text(content.as_ref())),
-            Token::Comment { content } => Ok(self.handle_comment(content.as_ref())),
-            Token::Doctype { content } => Ok(self.handle_doctype(content.as_ref())),
-            Token::CData { content } => Ok(self.handle_text(content.as_ref())),
-        }
+            Token::Text { content } => self.handle_text(content.as_ref()),
+            Token::Comment { content } => self.handle_comment(content.as_ref()),
+            Token::Doctype { content } => self.handle_doctype(content.as_ref()),
+            Token::CData { content } => self.handle_text(content.as_ref()),
+        };
+        Ok(created)
     }
 
     /// Finish building and return the root node id and arena.
+    ///
+    /// Like [`Self::process`], this never fails at present.
     pub fn finish(mut self) -> Result<(Arena, NodeId), ParseError> {
-        if let Some(error) = self.error {
-            Err(error)
-        } else {
-            let _ = self.flush_pending_table_text();
-            Ok((self.arena, self.root))
-        }
+        let _ = self.flush_pending_table_text();
+        Ok((self.arena, self.root))
     }
 
     /// Take a table-whitespace text node that was flushed immediately before
@@ -514,6 +610,14 @@ impl TreeBuilder {
         self.flushed_text_node.take()
     }
 
+    /// Elements implied by the most recently processed token (`tbody`, `tr`,
+    /// `colgroup`), in creation order. They precede the element the token
+    /// itself created.
+    #[cfg(feature = "encoding")]
+    pub(crate) fn implied_elements(&self) -> &[NodeId] {
+        &self.implied_elements
+    }
+
     /// Whether a node is still present on the open-elements stack.
     #[inline]
     #[cfg(feature = "encoding")]
@@ -521,12 +625,12 @@ impl TreeBuilder {
         self.open_elements.iter().any(|entry| entry.id == node)
     }
 
+    /// Whether `node` is the current node (the top of the open stack).
     #[inline]
-    fn ensure_active(&self) -> Result<(), ParseError> {
-        match &self.error {
-            Some(error) => Err(error.clone()),
-            None => Ok(()),
-        }
+    fn is_current(&self, node: NodeId) -> bool {
+        self.open_elements
+            .last()
+            .is_some_and(|entry| entry.id == node)
     }
 
     #[inline]
@@ -544,18 +648,42 @@ impl TreeBuilder {
 
     #[inline]
     fn push_open_element(&mut self, id: NodeId, tag: Tag, kind: ElementKind) {
-        let insertion_mode = kind.pushed_mode(self.insertion_mode);
-        let special = is_special_element(tag, kind, self.arena.unknown_tag_name(id));
-        self.open_elements.push(OpenElement {
+        let unknown_name = self.arena.unknown_tag_name(id);
+        let entry = OpenElement {
             id,
             tag,
             kind,
-            special,
-            insertion_mode,
+            special: is_special_element(tag, kind, unknown_name),
+            boundary: ScopeBoundary::of(tag, kind, unknown_name),
+            // Set by `push_entry`.
+            insertion_mode: InsertionMode::InBody,
             element_child_count: 0,
-        });
-        self.kind_counts[kind.index()] += 1;
-        self.insertion_mode = insertion_mode;
+            identity: 0,
+        };
+        self.push_entry(entry);
+    }
+
+    /// Push a complete entry, deriving its insertion mode from the stack.
+    #[inline]
+    fn push_entry(&mut self, mut entry: OpenElement) {
+        entry.insertion_mode = entry.kind.pushed_mode(self.insertion_mode);
+        self.insertion_mode = entry.insertion_mode;
+        self.kind_counts[entry.kind.index()] += 1;
+        self.open_elements.push(entry);
+    }
+
+    /// Recompute every entry's insertion mode and the kind counts after an
+    /// edit in the middle of the stack.
+    fn rebuild_stack_state(&mut self) {
+        let mut kind_counts = [0; ElementKind::COUNT];
+        let mut mode = InsertionMode::InBody;
+        for entry in &mut self.open_elements {
+            kind_counts[entry.kind.index()] += 1;
+            mode = entry.kind.pushed_mode(mode);
+            entry.insertion_mode = mode;
+        }
+        self.kind_counts = kind_counts;
+        self.insertion_mode = mode;
     }
 
     /// Pop the common single-entry close path without setting up a truncate
@@ -583,8 +711,9 @@ impl TreeBuilder {
         name: &str,
         attributes: PendingAttrs<'slice, 'input>,
         source_self_closing: bool,
-    ) -> Result<Option<NodeId>, ParseError> {
+    ) -> Option<NodeId> {
         self.end_text_run();
+        self.after_body_comment_parent = None;
         let kind = ElementKind::classify(tag, name);
 
         if self.insertion_mode == InsertionMode::InSelect {
@@ -605,11 +734,11 @@ impl TreeBuilder {
                 }
                 ElementKind::Select => {
                     self.close_last_kind(ElementKind::Select);
-                    return Ok(None);
+                    return None;
                 }
                 // Processed with the "in head" rules: inserted in place.
                 _ if tag == Tag::Script => {}
-                _ => return Ok(None),
+                _ => return None,
             }
         }
 
@@ -632,11 +761,11 @@ impl TreeBuilder {
                         attributes,
                         source_self_closing,
                         InsertionLocation::Append(self.current_parent()),
-                    )?;
-                    return Ok(Some(node));
+                    );
+                    return Some(node);
                 }
                 if !self.pop_if_current(ElementKind::ColGroup) {
-                    return Ok(None);
+                    return None;
                 }
                 return self.handle_open_tag(tag, name, attributes, source_self_closing);
             }
@@ -657,7 +786,7 @@ impl TreeBuilder {
                 ElementKind::Row => self.clear_back_to(ElementKind::TableBody),
                 ElementKind::Cell => {
                     self.clear_back_to(ElementKind::TableBody);
-                    self.insert_implied(Tag::Tr, "tr", ElementKind::Row)?;
+                    self.insert_implied(Tag::Tr, "tr", ElementKind::Row);
                 }
                 ElementKind::TableBody
                 | ElementKind::Table
@@ -675,22 +804,22 @@ impl TreeBuilder {
                 }
                 ElementKind::Row => {
                     self.clear_back_to(ElementKind::Table);
-                    self.insert_implied(Tag::Tbody, "tbody", ElementKind::TableBody)?;
+                    self.insert_implied(Tag::Tbody, "tbody", ElementKind::TableBody);
                 }
                 ElementKind::Cell => {
                     self.clear_back_to(ElementKind::Table);
-                    self.insert_implied(Tag::Tbody, "tbody", ElementKind::TableBody)?;
-                    self.insert_implied(Tag::Tr, "tr", ElementKind::Row)?;
+                    self.insert_implied(Tag::Tbody, "tbody", ElementKind::TableBody);
+                    self.insert_implied(Tag::Tr, "tr", ElementKind::Row);
                 }
                 ElementKind::Column => {
                     self.clear_back_to(ElementKind::Table);
-                    self.insert_implied(Tag::Unknown, "colgroup", ElementKind::ColGroup)?;
+                    self.insert_implied(Tag::Unknown, "colgroup", ElementKind::ColGroup);
                 }
                 ElementKind::Table => self.close_last_kind(ElementKind::Table),
                 _ => foster = true,
             },
             // Table parts outside a table are ignored.
-            InsertionMode::InBody if is_table_section_start(kind) => return Ok(None),
+            InsertionMode::InBody if is_table_section_start(kind) => return None,
             _ => {}
         }
 
@@ -708,21 +837,20 @@ impl TreeBuilder {
                         attributes,
                         source_self_closing,
                         InsertionLocation::Append(self.current_parent()),
-                    )?;
-                    self.pop_open_element();
-                    return Ok(Some(node));
+                    );
+                    self.pop_if_open(node);
+                    return Some(node);
                 }
                 _ => {}
             }
         }
 
         if tag == Tag::A {
-            // A nested anchor start repairs the previous active anchor before
-            // the new element is inserted. Reuse the deliberately simplified
-            // adoption path used by formatting end tags.
+            // A nested anchor start runs the adoption agency for the previous
+            // anchor before the new element is inserted.
             self.adoption_close(tag, name);
         }
-        self.apply_body_implicit_close(tag, kind);
+        self.apply_body_implicit_close(tag, name, kind);
         // Fostering applies only while the current node is a table part; an
         // element already fostered out of the table receives its content.
         let location = if foster && self.current_node_is_table_part() {
@@ -730,32 +858,43 @@ impl TreeBuilder {
         } else {
             InsertionLocation::Append(self.current_parent())
         };
-        let node =
-            self.insert_element(tag, name, kind, attributes, source_self_closing, location)?;
-        if matches!(tag, Tag::Pre | Tag::Textarea)
-            || (tag == Tag::Unknown && name.eq_ignore_ascii_case("listing"))
+        let node = self.insert_element(tag, name, kind, attributes, source_self_closing, location);
+        // Only an element that opened receives the content after it.
+        if self.is_current(node)
+            && (matches!(tag, Tag::Pre | Tag::Textarea)
+                || (tag == Tag::Unknown && name.eq_ignore_ascii_case("listing")))
         {
-            self.skip_next_lf = true;
+            self.newline_skip = NewlineSkip::Newline;
         }
-        Ok(Some(node))
+        Some(node)
     }
 
-    fn insert_implied(
-        &mut self,
-        tag: Tag,
-        name: &str,
-        kind: ElementKind,
-    ) -> Result<NodeId, ParseError> {
-        self.insert_element(
+    fn insert_implied(&mut self, tag: Tag, name: &str, kind: ElementKind) {
+        let node = self.insert_element(
             tag,
             name,
             kind,
             PendingAttrs::None,
             false,
             InsertionLocation::Append(self.current_parent()),
-        )
+        );
+        self.implied_elements.push(node);
     }
 
+    /// Pop `node` if it is the current node. Elements inserted at the nesting
+    /// limit never open, so a caller that closes a just-inserted element at
+    /// once must not pop its parent instead.
+    #[inline]
+    fn pop_if_open(&mut self, node: NodeId) {
+        if self.is_current(node) {
+            self.pop_open_element();
+        }
+    }
+
+    /// Insert an element at `location` and open it, unless it is void or
+    /// `MAX_DEPTH` elements are already open: then it stays empty and the
+    /// content after it goes to the current node, which keeps both the stack
+    /// and the tree depth bounded.
     fn insert_element<'slice, 'input>(
         &mut self,
         tag: Tag,
@@ -764,16 +903,7 @@ impl TreeBuilder {
         attributes: PendingAttrs<'slice, 'input>,
         source_self_closing: bool,
         location: InsertionLocation,
-    ) -> Result<NodeId, ParseError> {
-        if self.open_elements.len() > usize::from(MAX_DEPTH) {
-            let error = ParseError::NestingTooDeep {
-                depth: u32::from(MAX_DEPTH) + 1,
-                limit: u32::from(MAX_DEPTH),
-            };
-            self.error = Some(error.clone());
-            return Err(error);
-        }
-
+    ) -> NodeId {
         let parent = location.parent();
         let depth = self.arena.get(parent).depth.saturating_add(1);
         let node = self.arena.new_element(tag, depth);
@@ -796,23 +926,42 @@ impl TreeBuilder {
         if source_self_closing || is_void {
             self.arena.set_self_closing(node);
         }
-        // A slash on a non-void HTML element is syntactic metadata only.
-        if !is_void {
+        // A slash on a non-void HTML element is syntactic metadata only. The
+        // synthetic root is not counted against the nesting limit.
+        if !is_void && self.open_elements.len() <= usize::from(MAX_DEPTH) {
             self.push_open_element(node, tag, kind);
         }
-        Ok(node)
+        node
     }
 
     /// Attach a new element at `location`, keeping the element-child indices
     /// and the parent's open-stack child count exact.
     fn attach_element(&mut self, node: NodeId, location: InsertionLocation) {
         match location {
-            InsertionLocation::Append(parent) => {
-                self.arena.append_child_trusted(parent, node);
-                self.register_appended_element(parent, node);
-            }
+            InsertionLocation::Append(parent) => self.arena.append_child_trusted(parent, node),
             InsertionLocation::Before { parent, reference } => {
                 self.arena.insert_before(parent, reference, node);
+            }
+        }
+        self.register_attached_element(node, location);
+    }
+
+    /// [`Self::attach_element`] for a detached element that keeps its
+    /// subtree (an adoption agency move). Depths are left to the caller.
+    fn attach_moved_element(&mut self, node: NodeId, location: InsertionLocation) {
+        match location {
+            InsertionLocation::Append(parent) => self.arena.append_subtree(parent, node),
+            InsertionLocation::Before { parent, reference } => {
+                self.arena.insert_subtree_before(parent, reference, node);
+            }
+        }
+        self.register_attached_element(node, location);
+    }
+
+    fn register_attached_element(&mut self, node: NodeId, location: InsertionLocation) {
+        match location {
+            InsertionLocation::Append(parent) => self.register_appended_element(parent, node),
+            InsertionLocation::Before { parent, reference } => {
                 // The new element takes the reference's index and shifts the
                 // reference and every later element sibling by one. Fostering
                 // targets an open table, which is the last element child of
@@ -839,14 +988,32 @@ impl TreeBuilder {
         }
     }
 
-    fn handle_close_tag(&mut self, tag: Tag, name: &str) -> Result<Option<NodeId>, ParseError> {
+    fn handle_close_tag(&mut self, tag: Tag, name: &str) -> Option<NodeId> {
         self.end_text_run();
+        if matches!(tag, Tag::Body | Tag::Html) {
+            // Neither end tag closes anything: content after them still
+            // belongs to the body. Only later comments move out of it.
+            if self
+                .find_named_in_scope(Tag::Body, "body", Scope::Standard)
+                .is_some()
+            {
+                let html = self
+                    .open_elements
+                    .iter()
+                    .find(|entry| entry.tag == Tag::Html)
+                    .map_or(self.root, |entry| entry.id);
+                self.after_body_comment_parent =
+                    Some(if tag == Tag::Html { self.root } else { html });
+            }
+            return None;
+        }
+        self.after_body_comment_parent = None;
         if tag == Tag::Br {
             // `</br>` is parsed as a `<br>` start tag without attributes.
             return self.handle_open_tag(Tag::Br, "br", PendingAttrs::None, false);
         }
         if tag.is_void() {
-            return Ok(None);
+            return None;
         }
 
         // The overwhelmingly common close is the current element. Handle it
@@ -855,7 +1022,7 @@ impl TreeBuilder {
         let last_index = self.open_elements.len() - 1;
         if last_index > 0 && self.entry_matches(last_index, tag, name) {
             self.pop_open_element();
-            return Ok(None);
+            return None;
         }
 
         let kind = ElementKind::classify(tag, name);
@@ -878,7 +1045,7 @@ impl TreeBuilder {
                 ElementKind::Select => self.close_last_kind(ElementKind::Select),
                 _ => {}
             }
-            return Ok(None);
+            return None;
         }
 
         // "In column group": any other end tag closes the column group and
@@ -889,7 +1056,7 @@ impl TreeBuilder {
             if self.pop_if_current(ElementKind::ColGroup) {
                 return self.handle_close_tag(tag, name);
             }
-            return Ok(None);
+            return None;
         }
 
         match kind {
@@ -920,9 +1087,9 @@ impl TreeBuilder {
                         PendingAttrs::None,
                         false,
                         location,
-                    )?;
-                    self.pop_open_element();
-                    return Ok(Some(node));
+                    );
+                    self.pop_if_open(node);
+                    return Some(node);
                 }
             }
             ElementKind::ListItem => {
@@ -940,7 +1107,7 @@ impl TreeBuilder {
             }
             _ => self.close_matching(tag, name, kind),
         }
-        Ok(None)
+        None
     }
 
     /// Close an element by name. Ordinary end tags stop at the first special
@@ -1107,32 +1274,43 @@ impl TreeBuilder {
         })
     }
 
+    /// The HTML adoption agency algorithm, run for a formatting end tag and
+    /// for an `a` start tag while another `a` is open.
+    ///
+    /// The open stack stands in for the list of active formatting elements:
+    /// scope boundaries (tables, cells, captions, ...) act as its markers, and
+    /// formatting elements closed on the way are reopened at once instead of
+    /// at the next insertion.
     fn adoption_close(&mut self, tag: Tag, name: &str) {
         if !self.kind_is_open(ElementKind::Formatting) {
             return;
         }
-        // Table, cell, and caption boundaries act as formatting markers: a
-        // formatting element outside them is not repaired from inside.
-        let mut found = None;
-        for index in (1..self.open_elements.len()).rev() {
-            if self.entry_matches(index, tag, name) {
-                found = Some(index);
-                break;
-            }
-            if Scope::Standard.stops_at(&self.open_elements[index]) {
+        // The HTML outer loop runs at most eight times.
+        for _ in 0..8 {
+            let Some(index) = self.find_named_in_scope(tag, name, Scope::Standard) else {
+                return;
+            };
+            // Well-formed formatting closes dominate real-world input. They
+            // need no recovery allocation and no shallow element clones.
+            if index + 1 == self.open_elements.len() {
+                self.pop_open_element();
                 return;
             }
+            let furthest_block = (index + 1..self.open_elements.len())
+                .find(|&above| self.open_elements[above].special);
+            match furthest_block {
+                Some(furthest_block) => self.adopt_furthest_block(index, furthest_block),
+                None => {
+                    self.close_formatting_element(index);
+                    return;
+                }
+            }
         }
-        let Some(index) = found else {
-            return;
-        };
-        // Well-formed formatting closes dominate real-world input. They need
-        // no recovery allocation and no shallow element clones.
-        if index + 1 == self.open_elements.len() {
-            self.pop_open_element();
-            return;
-        }
+    }
 
+    /// Close the formatting element at stack `index` when no special element
+    /// is open above it, then reopen the formatting elements closed with it.
+    fn close_formatting_element(&mut self, index: usize) {
         let has_formatting_to_reopen = self.open_elements[index + 1..]
             .iter()
             .any(|entry| entry.kind == ElementKind::Formatting);
@@ -1141,11 +1319,12 @@ impl TreeBuilder {
             return;
         }
 
-        let reopen: Vec<OpenElement> = self.open_elements[index + 1..]
+        let mut reopen: Vec<OpenElement> = self.open_elements[index + 1..]
             .iter()
             .copied()
             .filter(|entry| entry.kind == ElementKind::Formatting)
             .collect();
+        self.apply_noahs_ark(&mut reopen);
         self.truncate_stack(index);
 
         for old in reopen {
@@ -1159,8 +1338,157 @@ impl TreeBuilder {
             let depth = self.arena.get(location.parent()).depth.saturating_add(1);
             let node = self.arena.clone_element_shallow(old.id, depth);
             self.attach_element(node, location);
-            self.push_open_element(node, old.tag, old.kind);
+            self.push_entry(OpenElement {
+                id: node,
+                element_child_count: 0,
+                ..old
+            });
         }
+    }
+
+    /// The HTML "Noah's Ark" clause: reopen at most three formatting elements
+    /// with the same tag and attributes, keeping the innermost. Without it,
+    /// every misnested end tag could clone all open formatting elements.
+    fn apply_noahs_ark(&self, reopen: &mut Vec<OpenElement>) {
+        if reopen.len() <= 3 {
+            return;
+        }
+        for entry in reopen.iter_mut() {
+            if entry.identity == 0 {
+                entry.identity = self.formatting_identity(entry.id);
+            }
+        }
+        let mut remaining: HashMap<u64, usize> = HashMap::new();
+        for entry in reopen.iter() {
+            *remaining.entry(entry.identity).or_default() += 1;
+        }
+        reopen.retain(|entry| {
+            let count = remaining
+                .get_mut(&entry.identity)
+                .expect("every identity was counted");
+            let keep = *count <= 3;
+            *count -= 1;
+            keep
+        });
+    }
+
+    /// Hash of an element's tag, name, and attributes, with names compared
+    /// ASCII case-insensitively and attributes in source order. A reordered
+    /// copy therefore escapes the Noah's Ark limit; the randomly keyed hasher
+    /// keeps distinct elements from colliding on purpose.
+    fn formatting_identity(&self, node: NodeId) -> u64 {
+        fn write_lowercase(hasher: &mut impl Hasher, bytes: &[u8]) {
+            for &byte in bytes {
+                hasher.write_u8(byte.to_ascii_lowercase());
+            }
+            // Not a UTF-8 byte, so names cannot run into each other.
+            hasher.write_u8(0xFF);
+        }
+
+        let mut hasher = self.identity_state.build_hasher();
+        (self.arena.get(node).tag as u8).hash(&mut hasher);
+        if let Some(name) = self.arena.unknown_tag_name(node) {
+            write_lowercase(&mut hasher, name.as_bytes());
+        }
+        for attribute in self.arena.attrs(node) {
+            write_lowercase(&mut hasher, self.arena.attr_name(attribute).as_bytes());
+            match self.arena.attr_value(attribute) {
+                Some(value) => {
+                    hasher.write_u8(1);
+                    value.hash(&mut hasher);
+                }
+                None => hasher.write_u8(0),
+            }
+        }
+        hasher.finish()
+    }
+
+    /// The adoption agency steps for a formatting element with a special
+    /// element (the furthest block) open above it.
+    ///
+    /// The furthest block moves out of the formatting element into the
+    /// element below it on the stack (the common ancestor), wrapped in clones
+    /// of up to three formatting elements open in between, and a clone of the
+    /// formatting element takes over the furthest block's children. Every
+    /// other element in between leaves the stack and stays where it is.
+    fn adopt_furthest_block(&mut self, formatting_index: usize, furthest_index: usize) {
+        let formatting = self.open_elements[formatting_index];
+        let furthest = self.open_elements[furthest_index];
+        let common_ancestor = self.open_elements[formatting_index - 1];
+        let location = if matches!(
+            common_ancestor.kind,
+            ElementKind::Table | ElementKind::TableBody | ElementKind::Row
+        ) {
+            self.foster_location()
+        } else {
+            InsertionLocation::Append(common_ancestor.id)
+        };
+
+        // Inner loop, from the furthest block down: the three nearest
+        // elements may be formatting elements to clone around the chain.
+        self.arena.detach(furthest.id);
+        let mut chain = Vec::new();
+        let mut last_node = furthest.id;
+        for (position, index) in (formatting_index + 1..furthest_index).rev().enumerate() {
+            let entry = self.open_elements[index];
+            if position >= 3 || entry.kind != ElementKind::Formatting {
+                continue;
+            }
+            let clone = self.arena.clone_element_shallow(entry.id, 0);
+            self.arena.append_subtree(clone, last_node);
+            self.arena.set_full_element_index(last_node, 1);
+            chain.push(OpenElement {
+                id: clone,
+                element_child_count: 1,
+                ..entry
+            });
+            last_node = clone;
+        }
+
+        let replacement = self.arena.clone_element_shallow(formatting.id, 0);
+        self.arena.move_children(furthest.id, replacement);
+        self.arena.append_subtree(furthest.id, replacement);
+        self.arena.set_full_element_index(replacement, 1);
+        self.attach_moved_element(last_node, location);
+
+        // The chain down to the replacement is a handful of nodes. The
+        // furthest block's former children keep their depth unless the chain
+        // is shorter than the run of elements it replaced.
+        let mut node = last_node;
+        loop {
+            let parent = self.arena.get(node).parent;
+            let depth = self.arena.get(parent).depth.saturating_add(1);
+            self.arena.get_mut(node).depth = depth;
+            if node == replacement {
+                break;
+            }
+            node = self.arena.get(node).first_child;
+        }
+        let child_depth = self.arena.get(replacement).depth.saturating_add(1);
+        let mut child = self.arena.get(replacement).first_child;
+        while !child.is_null() {
+            self.arena.set_subtree_depth(child, child_depth);
+            child = self.arena.get(child).next_sibling;
+        }
+
+        // The formatting element and everything up to the furthest block
+        // leave the stack; the clones replace their originals in order, and
+        // the replacement opens right above the furthest block.
+        let mut above = self.open_elements.split_off(furthest_index);
+        let replacement_children = above[0].element_child_count;
+        above[0].element_child_count = 1;
+        above.insert(
+            1,
+            OpenElement {
+                id: replacement,
+                element_child_count: replacement_children,
+                ..formatting
+            },
+        );
+        self.open_elements.truncate(formatting_index);
+        self.open_elements.extend(chain.into_iter().rev());
+        self.open_elements.extend(above);
+        self.rebuild_stack_state();
     }
 
     fn register_appended_element(&mut self, parent: NodeId, node: NodeId) {
@@ -1212,7 +1540,7 @@ impl TreeBuilder {
             .insertion_mode;
     }
 
-    fn apply_body_implicit_close(&mut self, tag: Tag, kind: ElementKind) {
+    fn apply_body_implicit_close(&mut self, tag: Tag, name: &str, kind: ElementKind) {
         match kind {
             ElementKind::ListItem | ElementKind::DefinitionItem => {
                 self.close_list_item_start(kind);
@@ -1220,7 +1548,7 @@ impl TreeBuilder {
             _ => {}
         }
         if self.kind_is_open(ElementKind::Paragraph)
-            && (closes_p_element(tag)
+            && (closes_p_element(tag, name)
                 || matches!(
                     kind,
                     ElementKind::Paragraph
@@ -1270,14 +1598,33 @@ impl TreeBuilder {
         if content.is_empty() {
             return None;
         }
-        if self.skip_next_lf {
-            self.skip_next_lf = false;
-            if let Some(rest) = content.strip_prefix('\n') {
-                if rest.is_empty() {
-                    return None;
+        match core::mem::replace(&mut self.newline_skip, NewlineSkip::None) {
+            NewlineSkip::None => {}
+            NewlineSkip::Newline => {
+                if let Some(rest) = content
+                    .strip_prefix("\r\n")
+                    .or_else(|| content.strip_prefix('\n'))
+                {
+                    content = rest;
+                } else if let Some(rest) = content.strip_prefix('\r') {
+                    if rest.is_empty() {
+                        // The `\n` of a CRLF may arrive in the next token.
+                        self.newline_skip = NewlineSkip::LineFeedAfterCr;
+                    }
+                    content = rest;
                 }
-                content = rest;
             }
+            NewlineSkip::LineFeedAfterCr => {
+                if let Some(rest) = content.strip_prefix('\n') {
+                    content = rest;
+                }
+            }
+        }
+        if content.is_empty() {
+            return None;
+        }
+        if self.after_body_comment_parent.is_some() && !content.bytes().all(is_html_whitespace) {
+            self.after_body_comment_parent = None;
         }
 
         let mut inserted = None;
@@ -1352,7 +1699,7 @@ impl TreeBuilder {
         }
         self.last_text_node = NodeId::NULL;
         self.table_text_run_foster = false;
-        self.skip_next_lf = false;
+        self.newline_skip = NewlineSkip::None;
     }
 
     #[cfg(feature = "encoding")]
@@ -1373,8 +1720,7 @@ impl TreeBuilder {
 
         #[cfg(feature = "entity-decode")]
         {
-            let parent_tag = self.arena.get(self.current_parent()).tag;
-            if parent_tag.is_raw_text() || parent_tag == Tag::Plaintext {
+            if opens_raw_text(self.arena.get(self.current_parent()).tag) {
                 self.handle_text(raw)
             } else {
                 let decoded = fhp_tokenizer::entity::decode_entities(raw);
@@ -1476,7 +1822,9 @@ impl TreeBuilder {
     /// Handle a comment.
     fn handle_comment(&mut self, content: &str) -> Option<NodeId> {
         self.end_text_run();
-        let parent = self.current_parent();
+        let parent = self
+            .after_body_comment_parent
+            .unwrap_or_else(|| self.current_parent());
         let depth = self.arena.get(parent).depth.saturating_add(1);
         let node = self.arena.new_comment(depth, content);
         self.arena.append_child_trusted(parent, node);
@@ -1530,45 +1878,32 @@ fn is_select_breakout_start(tag: Tag, name: &str) -> bool {
 }
 
 impl fhp_tokenizer::TreeSink for TreeBuilder {
-    fn should_continue(&self) -> bool {
-        self.error.is_none()
-    }
-
     fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool) {
-        if self.error.is_none() {
-            let _ = self.handle_open_tag(tag, name, PendingAttrs::Raw(attr_raw), self_closing);
-        }
+        // Only incremental observers read the implied elements; keep the
+        // one-shot path from accumulating them.
+        self.implied_elements.clear();
+        self.handle_open_tag(tag, name, PendingAttrs::Raw(attr_raw), self_closing);
     }
 
     fn close_tag(&mut self, tag: Tag, name: &str) {
-        if self.error.is_none() {
-            let _ = self.handle_close_tag(tag, name);
-        }
+        self.handle_close_tag(tag, name);
     }
 
     fn text(&mut self, raw: &str) {
-        if self.error.is_none() {
-            self.handle_raw_text(raw);
-        }
+        self.handle_raw_text(raw);
     }
 
     fn comment(&mut self, content: &str) {
-        if self.error.is_none() {
-            self.handle_comment(content);
-        }
+        self.handle_comment(content);
     }
 
     fn doctype(&mut self, content: &str) {
-        if self.error.is_none() {
-            self.handle_doctype(content);
-        }
+        self.handle_doctype(content);
     }
 
     fn cdata(&mut self, content: &str) {
         // CDATA content is literal text, exactly like `Token::CData`.
-        if self.error.is_none() {
-            self.handle_text(content);
-        }
+        self.handle_text(content);
     }
 }
 
@@ -2205,38 +2540,259 @@ mod tests {
     }
 
     #[test]
-    fn depth_limit_is_strict_and_terminal() {
+    fn elements_past_the_depth_limit_stay_empty() {
         let mut builder = TreeBuilder::new();
+        let mut deepest = NodeId::NULL;
         for _ in 0..MAX_DEPTH {
-            process(&mut builder, &make_open(Tag::Div));
+            deepest = process(&mut builder, &make_open(Tag::Div)).unwrap();
         }
-        let error = builder.process(&make_open(Tag::Div)).unwrap_err();
-        assert_eq!(
-            error,
-            ParseError::NestingTooDeep {
-                depth: 513,
-                limit: 512,
-            }
-        );
-        assert!(!fhp_tokenizer::TreeSink::should_continue(&builder));
-        match builder.finish() {
-            Err(finish_error) => assert_eq!(finish_error, error),
-            Ok(_) => panic!("terminal builder unexpectedly returned a document"),
-        }
+        let flattened = process(&mut builder, &make_open(Tag::Span)).unwrap();
+        process(&mut builder, &make_text("x"));
+        let void = process(&mut builder, &make_open(Tag::Br)).unwrap();
+        assert_eq!(builder.open_elements.len(), usize::from(MAX_DEPTH) + 1);
+        assert_stack_invariants(&builder);
+
+        let (arena, root) = finish(builder);
+        assert_tree_invariants(&arena, root);
+        assert_eq!(arena.get(deepest).depth, MAX_DEPTH);
+        // The span is an empty leaf; what follows goes to the deepest div.
+        assert_eq!(arena.get(deepest).first_child, flattened);
+        assert!(arena.get(flattened).first_child.is_null());
+        let text = arena.get(flattened).next_sibling;
+        assert_eq!(arena.text(text), "x");
+        assert_eq!(arena.get(text).next_sibling, void);
     }
 
     #[test]
-    fn void_element_below_512_open_elements_exceeds_depth_limit() {
-        let mut builder = TreeBuilder::new();
+    fn closing_an_element_inserted_at_the_depth_limit_keeps_its_parent_open() {
+        // `</p>` without an open paragraph inserts an empty one and closes it.
+        let mut html = "<div>".repeat(usize::from(MAX_DEPTH));
+        html.push_str("</p>x");
+        let (arena, root) = parse(&html).unwrap();
+        assert_tree_invariants(&arena, root);
+
+        let mut deepest = root;
         for _ in 0..MAX_DEPTH {
-            process(&mut builder, &make_open(Tag::Div));
+            deepest = arena.get(deepest).first_child;
+        }
+        let paragraph = arena.get(deepest).first_child;
+        assert_eq!(arena.get(paragraph).tag, Tag::P);
+        assert_eq!(arena.text(arena.get(paragraph).next_sibling), "x");
+    }
+
+    /// Check links, depths, and element sibling indices of the whole tree.
+    fn assert_tree_invariants(arena: &Arena, node: NodeId) {
+        let mut element_index = 0;
+        let mut previous = NodeId::NULL;
+        let mut child = arena.get(node).first_child;
+        while !child.is_null() {
+            let entry = arena.get(child);
+            assert_eq!(entry.parent, node);
+            assert_eq!(entry.prev_sibling, previous);
+            assert_eq!(entry.depth, arena.get(node).depth + 1);
+            if arena.is_element(child) {
+                element_index += 1;
+                assert_eq!(arena.full_element_index(child), element_index);
+            }
+            assert_tree_invariants(arena, child);
+            previous = child;
+            child = entry.next_sibling;
+        }
+        assert_eq!(arena.get(node).last_child, previous);
+    }
+
+    fn parse_checked_outline(html: &str) -> String {
+        let (arena, root) = parse(html).unwrap();
+        assert_tree_invariants(&arena, root);
+        outline(&arena, root)
+    }
+
+    fn count_tag(arena: &Arena, tag: Tag) -> usize {
+        arena.nodes.iter().filter(|node| node.tag == tag).count()
+    }
+
+    #[test]
+    fn furthest_block_moves_out_of_the_formatting_element() {
+        assert_eq!(
+            parse_checked_outline("<b><div>x</b>y</div>"),
+            "<b></b><div><b>x</b>y</div>"
+        );
+        assert_eq!(
+            parse_checked_outline("<b><p>one</b>two</p>"),
+            "<b></b><p><b>one</b>two</p>"
+        );
+    }
+
+    #[test]
+    fn nested_anchor_keeps_the_enclosing_block_open() {
+        assert_eq!(
+            parse_checked_outline("<a href=1><div>t<a href=2>x</a><p>d</p></div></a>"),
+            "<a></a><div><a>t</a><a>x</a><p>d</p></div>"
+        );
+    }
+
+    #[test]
+    fn adoption_clones_at_most_three_formatting_elements_around_the_block() {
+        assert_eq!(
+            parse_checked_outline("<a><b><i><u><s><div>x</a>y"),
+            "<a><b><i><u><s></s></u></i></b></a><i><u><s><div><a>x</a>y</div></s></u></i>"
+        );
+    }
+
+    #[test]
+    fn adoption_moves_keep_depths_when_ordinary_elements_leave_the_stack() {
+        assert_eq!(
+            parse_checked_outline("<b><span><em><div><p>x</p>y</b>z"),
+            "<b><span><em></em></span></b><em><div><b><p>x</p>y</b>z</div></em>"
+        );
+    }
+
+    #[test]
+    fn noahs_ark_limits_identical_reopened_formatting_elements() {
+        // Nested `i`, unlike nested `a`, stays open, so every `</i>` closes
+        // one and reopens the `b` elements above it.
+        let html = format!(
+            "{}{}{}",
+            "<i>".repeat(100),
+            "<b>".repeat(100),
+            "</i>".repeat(100)
+        );
+        let (arena, root) = parse(&html).unwrap();
+        assert_tree_invariants(&arena, root);
+        assert_eq!(count_tag(&arena, Tag::I), 100);
+        // Every `</i>` reopens three of the identical `b` elements.
+        assert_eq!(count_tag(&arena, Tag::B), 100 + 3 * 100);
+    }
+
+    #[test]
+    fn noahs_ark_keeps_formatting_elements_with_other_attributes() {
+        let (arena, _) = parse("<a><b id=1><b ID=1><b id=1><b id=1><b id=2>x</a>y").unwrap();
+        let count_id = |id: &str| {
+            (0..arena.nodes.len())
+                .map(|index| NodeId(index as u32))
+                .filter(|&node| arena.get(node).tag == Tag::B)
+                .filter(|&node| {
+                    arena
+                        .attrs(node)
+                        .iter()
+                        .any(|attr| arena.attr_value(attr) == Some(id))
+                })
+                .count()
+        };
+        assert_eq!(count_id("1"), 4 + 3);
+        assert_eq!(count_id("2"), 1 + 1);
+    }
+
+    #[test]
+    fn adoption_clones_share_name_and_attribute_storage() {
+        let (arena, root) = parse("<i><font color=red>x</i>y").unwrap();
+        let clone = arena.get(arena.get(root).first_child).next_sibling;
+
+        assert_eq!(arena.unknown_tag_name(clone), Some("font"));
+        assert_eq!(arena.attr_value(&arena.attrs(clone)[0]), Some("red"));
+        assert_eq!(arena.text(arena.get(clone).first_child), "y");
+        assert_eq!(arena.attr_slab.len(), 1);
+    }
+
+    #[test]
+    fn body_and_html_end_tags_close_nothing() {
+        assert_eq!(
+            parse_checked_outline("<html><body><p>x</p></body></html><script>t()</script>"),
+            "<html><body><p>x</p><script>t()</script></body></html>"
+        );
+        assert_eq!(
+            parse_checked_outline("<body><div>x</body>y"),
+            "<body><div>xy</div></body>"
+        );
+    }
+
+    #[test]
+    fn comments_after_body_and_html_end_tags_leave_the_body() {
+        let (arena, root) = parse("<html><body>x</body>\n<!--a--></html><!--b-->").unwrap();
+        let html = arena.get(root).first_child;
+        let body = arena.get(html).first_child;
+        let comment_a = arena.get(body).next_sibling;
+        let comment_b = arena.get(html).next_sibling;
+        assert_eq!(arena.get(body).tag, Tag::Body);
+        // Whitespace after `</body>` still goes to the body.
+        let text = arena.get(body).first_child;
+        assert_eq!(arena.text(text), "x");
+        assert_eq!(arena.text(arena.get(text).next_sibling), "\n");
+        assert_eq!(arena.get(body).last_child, arena.get(text).next_sibling);
+        assert_eq!(arena.text(comment_a), "a");
+        assert_eq!(arena.text(comment_b), "b");
+
+        // Other content returns the parser to the body.
+        let (arena, root) = parse("<body></body>y<!--c-->").unwrap();
+        let body = arena.get(root).first_child;
+        let comment = arena.get(arena.get(body).first_child).next_sibling;
+        assert!(arena.get(comment).flags.has(NodeFlags::IS_COMMENT));
+        assert!(arena.get(body).next_sibling.is_null());
+    }
+
+    #[test]
+    fn block_starts_close_an_open_paragraph() {
+        for name in [
+            "address",
+            "blockquote",
+            "center",
+            "details",
+            "dialog",
+            "dir",
+            "dl",
+            "fieldset",
+            "figcaption",
+            "figure",
+            "hgroup",
+            "listing",
+            "menu",
+            "search",
+            "summary",
+        ] {
+            assert_eq!(
+                parse_outline(&format!("<p>a<{name}>b</{name}>c")),
+                format!("<p>a</p><{name}>b</{name}>c"),
+                "{name}"
+            );
         }
         assert_eq!(
-            builder.process(&make_open(Tag::Br)).unwrap_err(),
-            ParseError::NestingTooDeep {
-                depth: 513,
-                limit: 512,
-            }
+            parse_outline("<p>a<my-block>b</my-block>c"),
+            "<p>a<my-block>b</my-block>c</p>"
         );
+    }
+
+    #[test]
+    fn object_and_template_bound_scope_walks() {
+        assert_eq!(
+            parse_outline("<p>a<object><p>b</object>c"),
+            "<p>a<object><p>b</p></object>c</p>"
+        );
+        assert_eq!(
+            parse_outline("<div><template><span></div>x"),
+            "<div><template><span>x</span></template></div>"
+        );
+        assert_eq!(
+            parse_outline("<b><marquee>x</b>y"),
+            "<b><marquee>xy</marquee></b>"
+        );
+    }
+
+    #[test]
+    fn leading_crlf_after_pre_and_textarea_is_dropped() {
+        assert_eq!(
+            parse_outline("<pre>\r\ncode</pre><textarea>\rtext</textarea>"),
+            "<pre>code</pre><textarea>text</textarea>"
+        );
+        assert_eq!(parse_outline("<pre>\r\n\r\nx</pre>"), "<pre>\r\nx</pre>");
+    }
+
+    #[test]
+    fn crlf_split_across_character_tokens_is_dropped_once() {
+        let mut builder = TreeBuilder::new();
+        let pre = process(&mut builder, &make_open(Tag::Pre)).unwrap();
+        process(&mut builder, &make_text("\r"));
+        process(&mut builder, &make_text("\ncode"));
+        let (arena, _) = finish(builder);
+        assert_eq!(arena.text(arena.get(pre).first_child), "code");
     }
 }

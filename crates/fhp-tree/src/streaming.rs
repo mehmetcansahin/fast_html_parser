@@ -142,20 +142,28 @@ impl DecoderState {
     /// [`Self::decode`], decoded-size accounting is committed by the caller
     /// after it has checked for an early match.
     fn decode_lossy(&mut self, bytes: &[u8], last: bool) -> String {
+        let mut output = String::new();
+        self.decode_lossy_into(bytes, last, &mut output);
+        output
+    }
+
+    /// [`Self::decode_lossy`] into `output`, replacing its contents but
+    /// reusing its allocation.
+    fn decode_lossy_into(&mut self, bytes: &[u8], last: bool, output: &mut String) {
         let max_len = self
             .decoder
             .max_utf8_buffer_length(bytes.len())
             .unwrap_or_else(|| bytes.len().saturating_mul(4).saturating_add(4));
-        let mut output = String::with_capacity(max_len);
+        output.clear();
+        output.reserve(max_len);
         let mut pos = 0;
 
         loop {
             let (result, read, _had_errors) =
-                self.decoder
-                    .decode_to_string(&bytes[pos..], &mut output, last);
+                self.decoder.decode_to_string(&bytes[pos..], output, last);
             pos += read;
             match result {
-                encoding_rs::CoderResult::InputEmpty => return output,
+                encoding_rs::CoderResult::InputEmpty => return,
                 encoding_rs::CoderResult::OutputFull => {
                     let additional = self
                         .decoder
@@ -345,6 +353,9 @@ pub struct EarlyStopParser {
     seen_input_size: usize,
     max_input_size: usize,
     terminal: bool,
+    /// Decoded text of the current segment. Input is decoded one `>` at a
+    /// time, so the allocation is reused across segments.
+    decode_buffer: String,
 }
 
 impl EarlyStopParser {
@@ -372,6 +383,7 @@ impl EarlyStopParser {
             seen_input_size: 0,
             max_input_size: effective_max(MAX_INPUT_SIZE),
             terminal: false,
+            decode_buffer: String::new(),
         }
     }
 
@@ -566,11 +578,23 @@ impl EarlyStopParser {
     }
 
     fn decode_and_check(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
+        let mut text = core::mem::take(&mut self.decode_buffer);
+        let result = self.decode_into_and_check(bytes, last, &mut text);
+        self.decode_buffer = text;
+        result
+    }
+
+    fn decode_into_and_check(
+        &mut self,
+        bytes: &[u8],
+        last: bool,
+        text: &mut String,
+    ) -> Result<(), HtmlError> {
         let decoder = self
             .decoder
             .as_mut()
             .expect("decoder initialized before processing");
-        let text = decoder.decode_lossy(bytes, last);
+        decoder.decode_lossy_into(bytes, last, text);
         let decoded_before = decoder.decoded_size;
         let decoded_size = decoded_before.saturating_add(text.len());
         let remaining = self.max_input_size.saturating_sub(decoded_before);
@@ -619,7 +643,7 @@ impl EarlyStopParser {
             let flushed = self.builder.finish_observed_text_run();
             check_early_nodes(
                 &self.builder,
-                [flushed, None],
+                flushed,
                 self.predicate.as_ref(),
                 self.mode,
                 &mut self.pending_match,
@@ -718,45 +742,38 @@ fn process_early_token(
     pending_match: &mut Option<NodeId>,
     found: &mut Option<(NodeId, MatchCompleteness)>,
 ) -> Result<(), ParseError> {
-    if !matches!(token, Token::Text { .. } | Token::CData { .. }) {
+    let is_text = matches!(token, Token::Text { .. } | Token::CData { .. });
+    if !is_text {
         let flushed = builder.finish_observed_text_run();
-        check_early_nodes(
-            builder,
-            [flushed, None],
-            predicate,
-            mode,
-            pending_match,
-            found,
-        );
+        check_early_nodes(builder, flushed, predicate, mode, pending_match, found);
         if found.is_some() {
             return Ok(());
         }
     }
 
-    let is_text = matches!(token, Token::Text { .. } | Token::CData { .. });
-    let created = builder.process(token)?;
+    let created = builder.process(token)?.filter(|_| !is_text);
     let flushed = builder.take_flushed_text_node();
-    check_early_nodes(
-        builder,
-        [flushed, (!is_text).then_some(created).flatten()],
-        predicate,
-        mode,
-        pending_match,
-        found,
-    );
+    // Implied `tbody`, `tr`, and `colgroup` elements precede the element the
+    // token itself created.
+    let builder: &TreeBuilder = builder;
+    let nodes = flushed
+        .into_iter()
+        .chain(builder.implied_elements().iter().copied())
+        .chain(created);
+    check_early_nodes(builder, nodes, predicate, mode, pending_match, found);
     Ok(())
 }
 
 fn check_early_nodes(
     builder: &TreeBuilder,
-    created: [Option<NodeId>; 2],
+    created: impl IntoIterator<Item = NodeId>,
     predicate: &NodePredicate,
     mode: EarlyStopMode,
     pending_match: &mut Option<NodeId>,
     found: &mut Option<(NodeId, MatchCompleteness)>,
 ) {
     if pending_match.is_none() {
-        for node_id in created.into_iter().flatten() {
+        for node_id in created {
             let node = NodeRef {
                 arena: &builder.arena,
                 id: node_id,

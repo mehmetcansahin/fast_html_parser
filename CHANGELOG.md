@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `fhp_encoding::bom_length` and `fhp_encoding::PRESCAN_LIMIT`. fhp-tree now
   uses them instead of its own BOM tables and prescan window size.
 
+### Changed
+
+- Documents with more than 512 open elements parse instead of failing with
+  `ParseError::NestingTooDeep`. A start tag past the limit inserts an empty
+  element, and the content after it goes to the innermost open element, so
+  the tree stays at most 513 levels deep. `TreeBuilder::process` and
+  `TreeBuilder::finish` no longer return errors.
+
 ### Fixed
 
 - `DecodingReader` decodes with the encoding it is given, like `decode`: a
@@ -48,6 +56,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   like `[disabled='']` and XPath `@disabled=''`.
 - Selector and XPath error messages show the offending character instead of
   its first UTF-8 byte, and report byte offsets into the untrimmed input.
+- Misnested formatting end tags and nested `<a>` start tags follow the HTML
+  adoption agency: a block such as `div` or `p` inside the formatting element
+  moves out of it instead of being closed. `<a><div>t<a>x</a><p>d</p></div>`
+  keeps `x` and `d` inside the `div`.
+- Reopened formatting elements follow the HTML "Noah's Ark" limit of three
+  identical elements, so one misnested end tag can no longer clone every open
+  formatting element. Clones share the original's tag name and attributes
+  instead of copying them.
+- `</body>` and `</html>` no longer close anything. Content after them stays
+  in the body; only comments move to the `html` element or the document.
+- Block starts without a compact `Tag`, such as `blockquote`, `dl`, `figure`,
+  `fieldset`, `details`, and `address`, close an open `<p>`.
+- `object`, `applet`, `marquee`, and `template` bound scope checks, so end
+  tags and implied `<p>` closes no longer reach through them.
+- The newline dropped after a `<pre>`, `<textarea>`, or `<listing>` start tag
+  may be `\r\n` or `\r`, including a CRLF split across stream chunks.
+- Serializing a `<pre>`, `<textarea>`, or `<listing>` whose content starts
+  with a newline writes one extra newline, so the content survives a parse.
+- `EarlyStopParser` passes implied `tbody`, `tr`, and `colgroup` elements to
+  its predicate.
+- `Arena::text` returns `""` for elements instead of a custom element's tag
+  name.
 
 ### Performance
 
@@ -66,6 +96,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `DecodingReader` decodes straight into the caller's buffer instead of
   through an internal 32 KiB buffer and a second copy, and allocates 8 KiB
   per reader instead of 40 KiB.
+- `EarlyStopParser` decodes into one reused buffer instead of allocating a
+  string for every `>`-delimited input segment.
 
 ## [0.2.0] - 2026-10-14
 

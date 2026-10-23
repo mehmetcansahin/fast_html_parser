@@ -184,12 +184,15 @@ pub struct Node {
 }
 
 impl Node {
-    /// Create a new element node with all links set to NULL.
-    pub fn new_element(tag: Tag, depth: u16) -> Self {
-        let mut flags = NodeFlags::empty();
-        if tag.is_void() {
-            flags.set(NodeFlags::IS_VOID);
-        }
+    /// A node with no links, attributes, or selector hashes.
+    #[inline]
+    const fn blank(
+        tag: Tag,
+        flags: NodeFlags,
+        depth: u16,
+        text_offset: u32,
+        text_len: u32,
+    ) -> Self {
         Self {
             tag,
             flags,
@@ -199,8 +202,8 @@ impl Node {
             next_sibling: NodeId::NULL,
             last_child: NodeId::NULL,
             prev_sibling: NodeId::NULL,
-            text_offset: 0,
-            text_len: 0,
+            text_offset,
+            text_len,
             attr_offset: 0,
             attr_count: 0,
             attr_raw_offset: 0,
@@ -210,84 +213,33 @@ impl Node {
             element_index: 0,
             _padding: [0; 6],
         }
+    }
+
+    /// Create a new element node with all links set to NULL.
+    pub fn new_element(tag: Tag, depth: u16) -> Self {
+        let mut flags = NodeFlags::empty();
+        if tag.is_void() {
+            flags.set(NodeFlags::IS_VOID);
+        }
+        Self::blank(tag, flags, depth, 0, 0)
     }
 
     /// Create a new text node.
     pub fn new_text(depth: u16, text_offset: u32, text_len: u32) -> Self {
-        let mut flags = NodeFlags::empty();
-        flags.set(NodeFlags::IS_TEXT);
-        Self {
-            tag: Tag::Unknown,
-            flags,
-            depth,
-            parent: NodeId::NULL,
-            first_child: NodeId::NULL,
-            next_sibling: NodeId::NULL,
-            last_child: NodeId::NULL,
-            prev_sibling: NodeId::NULL,
-            text_offset,
-            text_len,
-            attr_offset: 0,
-            attr_count: 0,
-            attr_raw_offset: 0,
-            attr_raw_len: 0,
-            class_hash: 0,
-            id_hash: 0,
-            element_index: 0,
-            _padding: [0; 6],
-        }
+        let flags = NodeFlags(NodeFlags::IS_TEXT);
+        Self::blank(Tag::Unknown, flags, depth, text_offset, text_len)
     }
 
     /// Create a new comment node.
     pub fn new_comment(depth: u16, text_offset: u32, text_len: u32) -> Self {
-        let mut flags = NodeFlags::empty();
-        flags.set(NodeFlags::IS_COMMENT);
-        Self {
-            tag: Tag::Unknown,
-            flags,
-            depth,
-            parent: NodeId::NULL,
-            first_child: NodeId::NULL,
-            next_sibling: NodeId::NULL,
-            last_child: NodeId::NULL,
-            prev_sibling: NodeId::NULL,
-            text_offset,
-            text_len,
-            attr_offset: 0,
-            attr_count: 0,
-            attr_raw_offset: 0,
-            attr_raw_len: 0,
-            class_hash: 0,
-            id_hash: 0,
-            element_index: 0,
-            _padding: [0; 6],
-        }
+        let flags = NodeFlags(NodeFlags::IS_COMMENT);
+        Self::blank(Tag::Unknown, flags, depth, text_offset, text_len)
     }
 
     /// Create a new doctype node.
     pub fn new_doctype(depth: u16, text_offset: u32, text_len: u32) -> Self {
-        let mut flags = NodeFlags::empty();
-        flags.set(NodeFlags::IS_DOCTYPE);
-        Self {
-            tag: Tag::Unknown,
-            flags,
-            depth,
-            parent: NodeId::NULL,
-            first_child: NodeId::NULL,
-            next_sibling: NodeId::NULL,
-            last_child: NodeId::NULL,
-            prev_sibling: NodeId::NULL,
-            text_offset,
-            text_len,
-            attr_offset: 0,
-            attr_count: 0,
-            attr_raw_offset: 0,
-            attr_raw_len: 0,
-            class_hash: 0,
-            id_hash: 0,
-            element_index: 0,
-            _padding: [0; 6],
-        }
+        let flags = NodeFlags(NodeFlags::IS_DOCTYPE);
+        Self::blank(Tag::Unknown, flags, depth, text_offset, text_len)
     }
 }
 

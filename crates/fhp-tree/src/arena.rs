@@ -557,6 +557,16 @@ impl Arena {
     /// checks without charging release parsers for them.
     #[inline]
     pub(crate) fn append_child_trusted(&mut self, parent: NodeId, child: NodeId) {
+        debug_assert!(self.nodes[child.index()].first_child.is_null());
+        debug_assert!(self.nodes[child.index()].last_child.is_null());
+        self.append_subtree(parent, child);
+    }
+
+    /// Append a detached node, together with any subtree it owns, as the last
+    /// child of `parent`. Depths and element sibling indices are left to the
+    /// caller.
+    #[inline]
+    pub(crate) fn append_subtree(&mut self, parent: NodeId, child: NodeId) {
         let parent_index = parent.index();
         let child_index = child.index();
         debug_assert!(parent_index < self.nodes.len());
@@ -567,8 +577,6 @@ impl Arena {
         debug_assert!(child_node.parent.is_null());
         debug_assert!(child_node.prev_sibling.is_null());
         debug_assert!(child_node.next_sibling.is_null());
-        debug_assert!(child_node.first_child.is_null());
-        debug_assert!(child_node.last_child.is_null());
 
         let last = self.nodes[parent_index].last_child;
         debug_assert_eq!(
@@ -594,6 +602,23 @@ impl Arena {
     ///
     /// This is used by the tree builder's table foster-parenting recovery.
     pub(crate) fn insert_before(&mut self, parent: NodeId, reference: NodeId, child: NodeId) {
+        let child_node = &self.nodes[child.index()];
+        assert!(
+            child_node.first_child.is_null() && child_node.last_child.is_null(),
+            "insert_before: child is already linked"
+        );
+        self.insert_subtree_before(parent, reference, child);
+    }
+
+    /// Insert a detached node, together with any subtree it owns, immediately
+    /// before an existing child. Depths and element sibling indices are left
+    /// to the caller.
+    pub(crate) fn insert_subtree_before(
+        &mut self,
+        parent: NodeId,
+        reference: NodeId,
+        child: NodeId,
+    ) {
         let parent_index = parent.index();
         let reference_index = reference.index();
         let child_index = child.index();
@@ -606,9 +631,7 @@ impl Arena {
         assert!(
             child_node.parent.is_null()
                 && child_node.prev_sibling.is_null()
-                && child_node.next_sibling.is_null()
-                && child_node.first_child.is_null()
-                && child_node.last_child.is_null(),
+                && child_node.next_sibling.is_null(),
             "insert_before: child is already linked"
         );
 
@@ -642,51 +665,140 @@ impl Arena {
         count
     }
 
-    /// Clone an element without children for the adoption-agency reopen path.
+    /// Unlink `node`, together with its subtree, from its parent and
+    /// siblings. Later element siblings move up one element index.
+    pub(crate) fn detach(&mut self, node: NodeId) {
+        let target = &self.nodes[node.index()];
+        let (parent, previous, next) = (target.parent, target.prev_sibling, target.next_sibling);
+        if parent.is_null() {
+            return;
+        }
+
+        if previous.is_null() {
+            self.nodes[parent.index()].first_child = next;
+        } else {
+            self.nodes[previous.index()].next_sibling = next;
+        }
+        if next.is_null() {
+            self.nodes[parent.index()].last_child = previous;
+        } else {
+            self.nodes[next.index()].prev_sibling = previous;
+        }
+        if self.nodes[parent.index()].first_child.is_null() {
+            self.nodes[parent.index()]
+                .flags
+                .clear(NodeFlags::HAS_CHILDREN);
+        }
+        let target = &mut self.nodes[node.index()];
+        target.parent = NodeId::NULL;
+        target.prev_sibling = NodeId::NULL;
+        target.next_sibling = NodeId::NULL;
+
+        if self.is_element(node) {
+            let mut sibling = next;
+            while !sibling.is_null() {
+                if self.is_element(sibling) {
+                    let index = self.full_element_index(sibling).saturating_sub(1);
+                    self.set_full_element_index(sibling, index);
+                }
+                sibling = self.nodes[sibling.index()].next_sibling;
+            }
+        }
+    }
+
+    /// Move every child of `from`, in order, into the childless node `to`.
+    /// Element sibling indices stay valid; depths are left to the caller.
+    pub(crate) fn move_children(&mut self, from: NodeId, to: NodeId) {
+        debug_assert!(self.nodes[to.index()].first_child.is_null());
+        let first = self.nodes[from.index()].first_child;
+        let last = self.nodes[from.index()].last_child;
+        let mut child = first;
+        while !child.is_null() {
+            let node = &mut self.nodes[child.index()];
+            node.parent = to;
+            child = node.next_sibling;
+        }
+
+        let source = &mut self.nodes[from.index()];
+        source.first_child = NodeId::NULL;
+        source.last_child = NodeId::NULL;
+        source.flags.clear(NodeFlags::HAS_CHILDREN);
+        if !first.is_null() {
+            let target = &mut self.nodes[to.index()];
+            target.first_child = first;
+            target.last_child = last;
+            target.flags.set(NodeFlags::HAS_CHILDREN);
+        }
+    }
+
+    /// Give `node` the depth `depth` and shift its descendants to match.
+    /// Allocation-free, and a no-op when the depth is already right.
+    pub(crate) fn set_subtree_depth(&mut self, node: NodeId, depth: u16) {
+        if self.nodes[node.index()].depth == depth {
+            return;
+        }
+        self.nodes[node.index()].depth = depth;
+
+        // Pre-order walk of the descendants; each parent is updated first.
+        let mut current = self.nodes[node.index()].first_child;
+        while !current.is_null() {
+            let parent = self.nodes[current.index()].parent;
+            self.nodes[current.index()].depth = self.nodes[parent.index()].depth.saturating_add(1);
+
+            let first_child = self.nodes[current.index()].first_child;
+            if !first_child.is_null() {
+                current = first_child;
+                continue;
+            }
+            let mut climb = current;
+            current = NodeId::NULL;
+            while climb != node {
+                let entry = &self.nodes[climb.index()];
+                if !entry.next_sibling.is_null() {
+                    current = entry.next_sibling;
+                    break;
+                }
+                climb = entry.parent;
+            }
+        }
+    }
+
+    /// Clone an element without children for adoption-agency repairs.
+    ///
+    /// Tag names and attributes are never modified once written, so the clone
+    /// shares the original's slab ranges instead of copying them.
     pub(crate) fn clone_element_shallow(&mut self, source: NodeId, depth: u16) -> NodeId {
         let original = &self.nodes[source.index()];
         let tag = original.tag;
-        let attr_offset = original.attr_offset;
-        let attr_count = original.attr_count;
-        let class_hash = original.class_hash;
-        let id_hash = original.id_hash;
-        let unknown_name = if tag == Tag::Unknown && original.text_len > 0 {
-            let start = original.text_offset as usize;
-            let end = start + original.text_len as usize;
-            Some(self.text_slab[start..end].to_vec())
-        } else {
-            None
-        };
+        let (text_offset, text_len) = (original.text_offset, original.text_len);
+        let (attr_offset, attr_count) = (original.attr_offset, original.attr_count);
+        let (class_hash, id_hash) = (original.class_hash, original.id_hash);
 
         let node = self.new_element(tag, depth);
-        if let Some(name) = unknown_name {
-            let offset = self.text_slab.len() as u32;
-            self.text_slab.extend_from_slice(&name);
-            let target = &mut self.nodes[node.index()];
-            target.text_offset = offset;
-            target.text_len = name.len() as u32;
+        let target = &mut self.nodes[node.index()];
+        if tag == Tag::Unknown {
+            target.text_offset = text_offset;
+            target.text_len = text_len;
         }
-
         if attr_count > 0 {
-            let source_start = attr_offset as usize;
-            let source_end = source_start + attr_count as usize;
-            let new_offset = self.attr_slab.len() as u32;
-            self.attr_slab.extend_from_within(source_start..source_end);
-            let target = &mut self.nodes[node.index()];
-            target.attr_offset = new_offset;
+            target.attr_offset = attr_offset;
             target.attr_count = attr_count;
             target.flags.set(NodeFlags::HAS_ATTRS);
             target.class_hash = class_hash;
             target.id_hash = id_hash;
         }
-
         node
     }
 
     /// Get the name of an attribute.
     #[inline]
     pub fn attr_name(&self, attr: &Attribute) -> &str {
-        checked_attr_slice(&self.attr_str_slab, attr.name_offset, attr.name_len)
+        checked_str(
+            &self.attr_str_slab,
+            attr.name_offset,
+            attr.name_len,
+            "attribute",
+        )
     }
 
     /// Get the value of an attribute, or `None` for boolean attributes.
@@ -695,10 +807,11 @@ impl Arena {
         if !attr.has_value {
             return None;
         }
-        Some(checked_attr_slice(
+        Some(checked_str(
             &self.attr_str_slab,
             attr.value_offset,
             attr.value_len,
+            "attribute",
         ))
     }
 
@@ -715,15 +828,21 @@ impl Arena {
         &self.attr_slab[start..end]
     }
 
-    /// Get the text content for a node (direct text, not recursive).
+    /// Get the direct content of a text, comment, or doctype node. Element
+    /// nodes return an empty string.
     #[inline]
     pub fn text(&self, node: NodeId) -> &str {
         let n = &self.nodes[node.index()];
-        if n.text_len == 0 {
+        // An unknown element keeps its tag name in the text fields.
+        if n.text_len == 0
+            || !n
+                .flags
+                .has(NodeFlags::IS_TEXT | NodeFlags::IS_COMMENT | NodeFlags::IS_DOCTYPE)
+        {
             return "";
         }
         if n.flags.has(NodeFlags::IS_TEXT) && n.flags.has(NodeFlags::IS_TEXT_FROM_SOURCE) {
-            checked_text_slice(&self.source, n.text_offset, n.text_len)
+            checked_str(&self.source, n.text_offset, n.text_len, "text")
         } else {
             let text_start = n.text_offset as usize;
             let text_end = text_start
@@ -736,7 +855,7 @@ impl Arena {
                 }),
                 "source-backed text promotion is not finalized; call Arena::set_source_owned first"
             );
-            checked_text_slice(&self.text_slab, n.text_offset, n.text_len)
+            checked_str(&self.text_slab, n.text_offset, n.text_len, "text")
         }
     }
 
@@ -747,10 +866,11 @@ impl Arena {
         if n.tag != Tag::Unknown || n.text_len == 0 {
             return None;
         }
-        Some(checked_text_slice(
+        Some(checked_str(
             &self.text_slab,
             n.text_offset,
             n.text_len,
+            "text",
         ))
     }
 
@@ -785,33 +905,18 @@ impl Default for Arena {
     }
 }
 
-/// Resolve arena-owned text metadata without trusting mutable `Node` fields.
+/// Resolve string metadata without trusting mutable `Node` fields or assuming
+/// an `Attribute` belongs to this arena: `Attribute` values can be cloned and
+/// passed to another arena through the safe public API. Both the byte range
+/// and UTF-8 boundaries are checked; `what` names the slab in panic messages.
 #[inline]
-fn checked_text_slice(bytes: &[u8], offset: u32, len: u32) -> &str {
+fn checked_str<'a>(bytes: &'a [u8], offset: u32, len: u32, what: &str) -> &'a str {
     let start = offset as usize;
-    let end = start
+    let slice = start
         .checked_add(len as usize)
-        .expect("arena text range is out of bounds");
-    let slice = bytes
-        .get(start..end)
-        .expect("arena text range is out of bounds");
-    std::str::from_utf8(slice).expect("arena text range is not valid UTF-8")
-}
-
-/// Resolve an attribute's string metadata without assuming it belongs to this
-/// arena. `Attribute` values can be cloned and passed to another arena through
-/// the safe public API, so both the byte range and UTF-8 boundaries must be
-/// checked here.
-#[inline]
-fn checked_attr_slice(bytes: &[u8], offset: u32, len: u32) -> &str {
-    let start = offset as usize;
-    let end = start
-        .checked_add(len as usize)
-        .expect("arena attribute range is out of bounds");
-    let slice = bytes
-        .get(start..end)
-        .expect("arena attribute range is out of bounds");
-    std::str::from_utf8(slice).expect("arena attribute range is not valid UTF-8")
+        .and_then(|end| bytes.get(start..end))
+        .unwrap_or_else(|| panic!("arena {what} range is out of bounds"));
+    std::str::from_utf8(slice).unwrap_or_else(|_| panic!("arena {what} range is not valid UTF-8"))
 }
 
 #[cfg(test)]

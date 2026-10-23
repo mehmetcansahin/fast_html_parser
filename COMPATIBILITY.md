@@ -95,11 +95,12 @@ parsing.
 Configured limits apply independently to raw bytes and decoded UTF-8 bytes.
 The effective maximum is `min(configured_limit, 2 GiB)`: arena offsets are
 stored as `u32`, and named-character-reference decoding can expand text by up
-to 6/5. At most 512 nested elements are permitted,
-excluding the synthetic root. Attempting to create an element at depth 513 returns
-`HtmlError::Parse(ParseError::NestingTooDeep)` and no partial `Document`.
+to 6/5. At most 512 elements are open at once, excluding the synthetic root.
+A start tag beyond that inserts an empty element at depth 513, and the content
+after it goes to the innermost open element, so deeply nested input still
+parses into a tree no deeper than 513.
 
-Depth and size errors are terminal for a streaming parser. Iterator, Tokio, and
+Size errors are terminal for a streaming parser. Iterator, Tokio, and
 async-std adapters stop pulling their source after the first error.
 
 The streaming tokenizer bounds unfinished raw-text/RCDATA closing-tag candidates
