@@ -4,8 +4,8 @@
 //! left through the combinator chain, checking ancestors, parents,
 //! or siblings as required.
 //!
-//! When a selector contains descendant combinators, ancestor bloom
-//! filters are used for fast rejection.
+//! When a selector contains descendant combinators, an ancestor filter
+//! carried down the selection walk is used for fast rejection.
 
 use std::collections::HashMap;
 
@@ -16,9 +16,7 @@ use fhp_tree::node::{NodeFlags, NodeId};
 use crate::ast::{
     AttrOp, AttrSelector, Combinator, CompoundSelector, Selector, SelectorList, SimpleSelector,
 };
-use crate::bloom::{
-    AncestorBloom, build_ancestor_blooms, fill_ancestor_blooms, hash_str, hash_tag,
-};
+use crate::bloom::AncestorFilter;
 use crate::space::contains_html_space_token;
 
 // ---------------------------------------------------------------------------
@@ -515,7 +513,6 @@ pub fn select_all(arena: &Arena, root: NodeId, selector: &Selector) -> Vec<NodeI
     SelectionCollector::new(arena.len(), std::slice::from_ref(selector)).collect(
         arena,
         root,
-        None,
         &[],
         &mut results,
     );
@@ -525,13 +522,7 @@ pub fn select_all(arena: &Arena, root: NodeId, selector: &Selector) -> Vec<NodeI
 /// Select all nodes in `root`'s subtree matching a selector list.
 pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<NodeId> {
     let mut results = Vec::new();
-    SelectionCollector::new(arena.len(), &list.selectors).collect(
-        arena,
-        root,
-        None,
-        &[],
-        &mut results,
-    );
+    SelectionCollector::new(arena.len(), &list.selectors).collect(arena, root, &[], &mut results);
     results
 }
 
@@ -543,9 +534,8 @@ pub fn select_all_list(arena: &Arena, root: NodeId, list: &SelectorList) -> Vec<
 /// document-ordered result. A root inside the subtree of an earlier root adds
 /// nothing, and a root's traversal skips the subtrees of earlier roots.
 ///
-/// Matcher memo tables and the ancestor bloom table are shared by all roots,
-/// so the cost is linear in the visited nodes instead of proportional to
-/// `roots.len() * arena.len()`.
+/// Matcher memo tables are shared by all roots, so the cost is linear in the
+/// visited nodes instead of proportional to `roots.len() * arena.len()`.
 pub fn select_all_list_roots(arena: &Arena, roots: &[NodeId], list: &SelectorList) -> Vec<NodeId> {
     let mut results = Vec::new();
     if roots.is_empty() {
@@ -553,25 +543,13 @@ pub fn select_all_list_roots(arena: &Arena, roots: &[NodeId], list: &SelectorLis
     }
 
     let mut collector = SelectionCollector::new(arena.len(), &list.selectors);
-    let uses_blooms = collector.uses_blooms();
-    let mut blooms = if uses_blooms {
-        vec![AncestorBloom::new(); arena.len()]
-    } else {
-        Vec::new()
-    };
     let mut done = vec![false; arena.len()];
 
     for &root in roots {
         if root.is_null() || is_covered(arena, &done, root) {
             continue;
         }
-        let shared_blooms = if uses_blooms {
-            fill_ancestor_blooms(arena, root, &mut blooms);
-            Some(blooms.as_slice())
-        } else {
-            None
-        };
-        collector.collect(arena, root, shared_blooms, &done, &mut results);
+        collector.collect(arena, root, &done, &mut results);
         done[root.index()] = true;
     }
     results
@@ -605,10 +583,11 @@ enum SelectionCollector<'a> {
     Tag(Tag),
     /// A lone id selector, `#id`, with its precomputed hash.
     Id(&'a str, u32),
-    /// A single selector with a descendant combinator (bloom pre-filtering).
-    Bloom {
+    /// A single selector with a descendant combinator whose ancestor
+    /// compounds name tags, classes, or ids to pre-filter on.
+    Filtered {
         matcher: SelectorMatcher<'a>,
-        hashes: Vec<u32>,
+        required: AncestorFilter,
     },
     /// A single selector without descendant combinators.
     Simple(SelectorMatcher<'a>),
@@ -629,47 +608,23 @@ impl<'a> SelectionCollector<'a> {
         }
 
         let matcher = SelectorMatcher::new(node_count, selector);
-        if has_descendant_combinator(selector) {
-            Self::Bloom {
-                matcher,
-                hashes: compute_descendant_hashes(selector),
-            }
+        let required = AncestorFilter::required_by(selector);
+        if has_descendant_combinator(selector) && !required.is_empty() {
+            Self::Filtered { matcher, required }
         } else {
             Self::Simple(matcher)
         }
     }
 
-    #[inline]
-    fn uses_blooms(&self) -> bool {
-        matches!(self, Self::Bloom { .. })
-    }
-
     /// Append the matches in `root`'s subtree to `results` in document order,
     /// skipping every subtree whose root is marked in `done`.
-    ///
-    /// `shared_blooms` must hold filled ancestor blooms for the subtree when
-    /// given; otherwise a bloom-filtered collector builds them for this call.
-    fn collect(
-        &mut self,
-        arena: &Arena,
-        root: NodeId,
-        shared_blooms: Option<&[AncestorBloom]>,
-        done: &[bool],
-        results: &mut Vec<NodeId>,
-    ) {
+    fn collect(&mut self, arena: &Arena, root: NodeId, done: &[bool], results: &mut Vec<NodeId>) {
         match self {
             Self::Tag(tag) => collect_tag(arena, root, *tag, done, results),
             Self::Id(id, hash) => collect_id(arena, root, id, *hash, done, results),
-            Self::Bloom { matcher, hashes } => {
-                let local_blooms;
-                let blooms = match shared_blooms {
-                    Some(blooms) => blooms,
-                    None => {
-                        local_blooms = build_ancestor_blooms(arena, root);
-                        &local_blooms
-                    }
-                };
-                collect_bloom(arena, root, matcher, blooms, hashes, done, results);
+            Self::Filtered { matcher, required } => {
+                let ancestors = AncestorFilter::of_ancestors(arena, root);
+                collect_filtered(arena, root, matcher, required, ancestors, done, results);
             }
             Self::Simple(matcher) => collect_simple(arena, root, matcher, done, results),
             Self::List(matchers) => collect_list(arena, root, matchers, done, results),
@@ -814,13 +769,15 @@ fn collect_tag(
     }
 }
 
-/// DFS collection with bloom pre-filtering.
-fn collect_bloom(
+/// DFS collection that rejects candidates whose ancestors cannot satisfy
+/// `required` before running the matcher. `ancestors` describes the
+/// ancestors of `node`.
+fn collect_filtered(
     arena: &Arena,
     node: NodeId,
     matcher: &mut SelectorMatcher<'_>,
-    blooms: &[AncestorBloom],
-    bloom_hashes: &[u32],
+    required: &AncestorFilter,
+    ancestors: AncestorFilter,
     done: &[bool],
     results: &mut Vec<NodeId>,
 ) {
@@ -829,51 +786,24 @@ fn collect_bloom(
     }
 
     let n = arena.get(node);
-    if is_element(n) {
-        // Quick bloom check: ancestors must contain the required elements.
-        let bloom = &blooms[node.index()];
-        let bloom_pass = bloom_hashes.iter().all(|&h| bloom.may_contain(h));
-
-        if bloom_pass && matcher.matches(arena, node) {
-            results.push(node);
-        }
+    if is_element(n) && ancestors.may_satisfy(required) && matcher.matches(arena, node) {
+        results.push(node);
     }
 
+    let child_ancestors = ancestors.with(n);
     let mut child = n.first_child;
     while !child.is_null() {
-        collect_bloom(arena, child, matcher, blooms, bloom_hashes, done, results);
+        collect_filtered(
+            arena,
+            child,
+            matcher,
+            required,
+            child_ancestors,
+            done,
+            results,
+        );
         child = arena.get(child).next_sibling;
     }
-}
-
-/// Compute bloom hashes for all descendant-combinator compounds in the chain.
-fn compute_descendant_hashes(selector: &Selector) -> Vec<u32> {
-    let mut hashes = Vec::new();
-    for (combinator, compound) in &selector.chain {
-        if *combinator != Combinator::Descendant {
-            continue;
-        }
-        for part in &compound.parts {
-            match part {
-                SimpleSelector::Tag(tag) if *tag != Tag::Unknown => {
-                    hashes.push(hash_tag(*tag));
-                }
-                // Ancestor blooms store only hashed Tag discriminants, not
-                // unknown/custom element names. Hashing the literal unknown
-                // tag name here causes false negatives for descendant checks
-                // (e.g. `my-widget span`), so skip UnknownTag pre-filtering.
-                SimpleSelector::UnknownTag(_) => {}
-                SimpleSelector::Class(class, _) => {
-                    hashes.push(hash_str(class));
-                }
-                SimpleSelector::Id(id, _) => {
-                    hashes.push(hash_str(id));
-                }
-                _ => {}
-            }
-        }
-    }
-    hashes
 }
 
 /// DFS to find first matching node.
