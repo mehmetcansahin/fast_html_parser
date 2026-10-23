@@ -14,7 +14,7 @@ use fhp_encoding::PRESCAN_LIMIT;
 use fhp_tokenizer::streaming::StreamTokenizer;
 use fhp_tokenizer::token::Token;
 
-use crate::builder::TreeBuilder;
+use crate::builder::{TreeBuilder, recycle_buffer};
 use crate::node::NodeId;
 use crate::{Document, HtmlError, MAX_INPUT_SIZE, NodeRef};
 
@@ -581,7 +581,7 @@ impl EarlyStopParser {
     fn decode_and_check(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
         let mut text = core::mem::take(&mut self.decode_buffer);
         let result = self.decode_into_and_check(bytes, last, &mut text);
-        self.decode_buffer = text;
+        self.decode_buffer = recycle_buffer(text);
         result
     }
 

@@ -28,6 +28,21 @@ const MAX_DEPTH: u16 = 512;
 /// for nodes and attributes that it will never create.
 const MAX_CAPACITY_HINT_INPUT: usize = 8 * 1024 * 1024;
 
+/// Largest scratch buffer kept for reuse across tokens. A bigger one, grown
+/// by an unusually long token, is freed instead of being held for the rest
+/// of the parse.
+const MAX_RECYCLED_CAPACITY: usize = 64 * 1024;
+
+/// Empty `buffer` for reuse, or free it if a long token grew it past
+/// [`MAX_RECYCLED_CAPACITY`].
+pub(crate) fn recycle_buffer(mut buffer: String) -> String {
+    if buffer.capacity() > MAX_RECYCLED_CAPACITY {
+        return String::new();
+    }
+    buffer.clear();
+    buffer
+}
+
 /// Private element categories used by the pragmatic insertion-mode machine.
 /// Public tag interning remains compact and unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1734,9 +1749,8 @@ impl TreeBuilder {
 
     /// Hand an emptied table-text buffer back, so later whitespace runs in a
     /// table reuse its allocation instead of allocating a fresh `String`.
-    fn recycle_pending_table_text(&mut self, mut buffer: String) {
-        buffer.clear();
-        self.pending_table_text = buffer;
+    fn recycle_pending_table_text(&mut self, buffer: String) {
+        self.pending_table_text = recycle_buffer(buffer);
     }
 
     fn end_text_run(&mut self) {
@@ -1778,8 +1792,7 @@ impl TreeBuilder {
             } else {
                 self.handle_text(raw)
             };
-            decoded.clear();
-            self.decoded_text = decoded;
+            self.decoded_text = recycle_buffer(decoded);
             inserted
         }
 
@@ -2700,6 +2713,21 @@ mod tests {
             parse_checked_outline("<b><span><em><div><p>x</p>y</b>z"),
             "<b><span><em></em></span></b><em><div><b><p>x</p>y</b>z</div></em>"
         );
+    }
+
+    #[test]
+    fn recycled_buffers_are_freed_past_the_capacity_cap() {
+        let small = recycle_buffer(String::from("text"));
+        assert!(small.is_empty() && small.capacity() >= 4);
+        let large = recycle_buffer(String::with_capacity(MAX_RECYCLED_CAPACITY + 1));
+        assert_eq!(large.capacity(), 0);
+
+        let mut html = String::from("<table>");
+        html.push_str(&" ".repeat(MAX_RECYCLED_CAPACITY + 1));
+        html.push_str("<tr><td>x</td></tr></table>");
+        let mut builder = TreeBuilder::new();
+        fhp_tokenizer::tokenize_into(&html, &mut builder);
+        assert_eq!(builder.pending_table_text.capacity(), 0);
     }
 
     /// `<b><span>` pairs around a block: every `</b>` moves the block's
