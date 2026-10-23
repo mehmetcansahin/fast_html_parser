@@ -1656,7 +1656,9 @@ impl TreeBuilder {
             if !self.pending_table_text.is_empty() {
                 let mut run = std::mem::take(&mut self.pending_table_text);
                 run.push_str(content);
-                return self.insert_text(&run, true);
+                let inserted = self.insert_text(&run, true);
+                self.recycle_pending_table_text(run);
+                return inserted;
             }
             return self.insert_text(content, true);
         }
@@ -1690,7 +1692,16 @@ impl TreeBuilder {
             return None;
         }
         let content = std::mem::take(&mut self.pending_table_text);
-        self.insert_text(&content, false)
+        let inserted = self.insert_text(&content, false);
+        self.recycle_pending_table_text(content);
+        inserted
+    }
+
+    /// Hand an emptied table-text buffer back, so later whitespace runs in a
+    /// table reuse its allocation instead of allocating a fresh `String`.
+    fn recycle_pending_table_text(&mut self, mut buffer: String) {
+        buffer.clear();
+        self.pending_table_text = buffer;
     }
 
     fn end_text_run(&mut self) {
