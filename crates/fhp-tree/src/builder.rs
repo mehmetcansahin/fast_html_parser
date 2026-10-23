@@ -1788,7 +1788,7 @@ impl TreeBuilder {
         if old_end != self.arena.text_slab.len() {
             return None;
         }
-        self.arena.text_slab.extend_from_slice(content.as_bytes());
+        self.arena.text_slab.push_str(content);
         self.arena.get_mut(previous).text_len = new_len;
         Some(previous)
     }

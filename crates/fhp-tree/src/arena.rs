@@ -67,17 +67,17 @@ pub struct Arena {
     /// All nodes in insertion order.
     pub(crate) nodes: Vec<Node>,
     /// All text content concatenated (for entity-decoded or owned text).
-    pub(crate) text_slab: Vec<u8>,
+    pub(crate) text_slab: String,
     /// All attributes in insertion order.
     pub(crate) attr_slab: Vec<Attribute>,
-    /// All attribute name and value bytes concatenated.
-    pub(crate) attr_str_slab: Vec<u8>,
+    /// All attribute names and values concatenated.
+    pub(crate) attr_str_slab: String,
     /// Owned copy of the original input source.
     ///
     /// Text nodes that reference entity-free (borrowed) regions of the input
     /// store offsets into this buffer via [`NodeFlags::IS_TEXT_FROM_SOURCE`].
     /// Empty for streaming parsers.
-    pub(crate) source: Vec<u8>,
+    pub(crate) source: String,
     /// Source ranges promoted into the text slab before an owned source is
     /// transferred to the arena.
     pending_source_copies: Vec<PendingSourceCopy>,
@@ -95,10 +95,10 @@ impl Arena {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
-            text_slab: Vec::new(),
+            text_slab: String::new(),
             attr_slab: Vec::new(),
-            attr_str_slab: Vec::new(),
-            source: Vec::new(),
+            attr_str_slab: String::new(),
+            source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
         }
@@ -108,10 +108,10 @@ impl Arena {
     pub fn with_capacity(node_cap: usize, text_cap: usize, attr_cap: usize) -> Self {
         Self {
             nodes: Vec::with_capacity(node_cap),
-            text_slab: Vec::with_capacity(text_cap),
+            text_slab: String::with_capacity(text_cap),
             attr_slab: Vec::with_capacity(attr_cap),
-            attr_str_slab: Vec::with_capacity(attr_cap * 32),
-            source: Vec::new(),
+            attr_str_slab: String::with_capacity(attr_cap * 32),
+            source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
         }
@@ -155,7 +155,7 @@ impl Arena {
         }
         let offset = self.text_slab.len() as u32;
         let len = tag_name.len() as u32;
-        self.text_slab.extend_from_slice(tag_name.as_bytes());
+        self.text_slab.push_str(tag_name);
         let n = &mut self.nodes[node.index()];
         n.text_offset = offset;
         n.text_len = len;
@@ -165,7 +165,7 @@ impl Arena {
     pub fn new_text(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
         let len = text.len() as u32;
-        self.text_slab.extend_from_slice(text.as_bytes());
+        self.text_slab.push_str(text);
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node::new_text(depth, offset, len));
         id
@@ -187,7 +187,7 @@ impl Arena {
 
     /// Store an owned copy of the input source for source-backed text nodes.
     pub fn set_source(&mut self, input: &str) {
-        self.source = input.as_bytes().to_vec();
+        self.source = input.to_owned();
         self.resolve_pending_source_copies();
     }
 
@@ -196,7 +196,7 @@ impl Arena {
     /// When the caller owns the input `String` (e.g., from an HTTP response),
     /// this avoids the memcpy that [`set_source`](Arena::set_source) performs.
     pub fn set_source_owned(&mut self, source: String) {
-        self.source = source.into_bytes();
+        self.source = source;
         self.resolve_pending_source_copies();
     }
 
@@ -211,13 +211,14 @@ impl Arena {
     ) -> Option<u32> {
         let source_end = source_offset.checked_add(source_len)?;
         let new_offset = self.text_slab.len();
-        let promoted_end = new_offset.checked_add(source_len)?;
+        // Reject a promoted range whose end would overflow.
+        new_offset.checked_add(source_len)?;
         let new_offset_u32 = u32::try_from(new_offset).ok()?;
         self.text_slab
             .reserve(source_len.checked_add(content.len())?);
 
         if self.source.is_empty() {
-            self.text_slab.resize(promoted_end, 0);
+            self.text_slab.extend(std::iter::repeat_n('\0', source_len));
             self.pending_source_copies.push(PendingSourceCopy {
                 source_offset,
                 text_offset: new_offset,
@@ -225,9 +226,9 @@ impl Arena {
             });
         } else {
             let source_text = self.source.get(source_offset..source_end)?;
-            self.text_slab.extend_from_slice(source_text);
+            self.text_slab.push_str(source_text);
         }
-        self.text_slab.extend_from_slice(content.as_bytes());
+        self.text_slab.push_str(content);
         Some(new_offset_u32)
     }
 
@@ -245,11 +246,14 @@ impl Arena {
                 .source
                 .get(pending.source_offset..source_end)
                 .expect("owned source does not contain a pending text range");
-            let target = self
-                .text_slab
-                .get_mut(pending.text_offset..text_end)
-                .expect("text slab does not contain a pending source range");
-            target.copy_from_slice(source);
+            assert!(
+                text_end <= self.text_slab.len(),
+                "text slab does not contain a pending source range"
+            );
+            // The placeholder is NUL bytes, so the range is on character
+            // boundaries and the replacement keeps the slab length.
+            self.text_slab
+                .replace_range(pending.text_offset..text_end, source);
         }
     }
 
@@ -257,7 +261,7 @@ impl Arena {
     pub fn new_comment(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
         let len = text.len() as u32;
-        self.text_slab.extend_from_slice(text.as_bytes());
+        self.text_slab.push_str(text);
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node::new_comment(depth, offset, len));
         id
@@ -267,7 +271,7 @@ impl Arena {
     pub fn new_doctype(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
         let len = text.len() as u32;
-        self.text_slab.extend_from_slice(text.as_bytes());
+        self.text_slab.push_str(text);
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node::new_doctype(depth, offset, len));
         id
@@ -296,13 +300,13 @@ impl Arena {
                 continue;
             }
             let name_offset = self.attr_str_slab.len() as u32;
-            self.attr_str_slab.extend_from_slice(name);
+            self.attr_str_slab.push_str(&attr.name);
             let name_len = attr.name.len() as u32;
 
             let (value_offset, value_len, has_value) = if let Some(v) = &attr.value {
                 update_selector_hashes(name, Some(v.as_bytes()), &mut class_hash, &mut id_hash);
                 let vo = self.attr_str_slab.len() as u32;
-                self.attr_str_slab.extend_from_slice(v.as_bytes());
+                self.attr_str_slab.push_str(v);
                 (vo, v.len() as u32, true)
             } else {
                 (0, 0, false)
@@ -366,7 +370,7 @@ impl Arena {
                 continue;
             }
             let name_offset = self.attr_str_slab.len() as u32;
-            self.attr_str_slab.extend_from_slice(name);
+            self.attr_str_slab.push_str(attr.name);
 
             let (value_offset, value_len, has_value) = match attr.value {
                 Some(raw_value) => {
@@ -374,7 +378,10 @@ impl Arena {
                     let value_start = value_offset as usize;
                     update_selector_hashes(
                         name,
-                        Some(&self.attr_str_slab[value_start..value_start + value_len as usize]),
+                        Some(
+                            &self.attr_str_slab.as_bytes()
+                                [value_start..value_start + value_len as usize],
+                        ),
                         &mut class_hash,
                         &mut id_hash,
                     );
@@ -408,7 +415,7 @@ impl Arena {
     fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
         let offset = self.attr_str_slab.len() as u32;
         let decoded = fhp_tokenizer::entity::decode_attribute_entities(raw_value);
-        self.attr_str_slab.extend_from_slice(decoded.as_bytes());
+        self.attr_str_slab.push_str(&decoded);
         (offset, decoded.len() as u32)
     }
 
@@ -416,7 +423,7 @@ impl Arena {
     #[cfg(not(feature = "entity-decode"))]
     fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
         let offset = self.attr_str_slab.len() as u32;
-        self.attr_str_slab.extend_from_slice(raw_value.as_bytes());
+        self.attr_str_slab.push_str(raw_value);
         (offset, raw_value.len() as u32)
     }
 
@@ -909,14 +916,33 @@ impl Default for Arena {
 /// an `Attribute` belongs to this arena: `Attribute` values can be cloned and
 /// passed to another arena through the safe public API. Both the byte range
 /// and UTF-8 boundaries are checked; `what` names the slab in panic messages.
+///
+/// Every slab is a `String`, so an in-bounds range is valid UTF-8 exactly when
+/// both ends fall on character boundaries, which is checked in O(1).
 #[inline]
-fn checked_str<'a>(bytes: &'a [u8], offset: u32, len: u32, what: &str) -> &'a str {
+fn checked_str<'a>(text: &'a str, offset: u32, len: u32, what: &str) -> &'a str {
     let start = offset as usize;
-    let slice = start
+    match start
         .checked_add(len as usize)
-        .and_then(|end| bytes.get(start..end))
-        .unwrap_or_else(|| panic!("arena {what} range is out of bounds"));
-    std::str::from_utf8(slice).unwrap_or_else(|_| panic!("arena {what} range is not valid UTF-8"))
+        .and_then(|end| text.get(start..end))
+    {
+        Some(slice) => slice,
+        None => invalid_str_range(text, start, len, what),
+    }
+}
+
+/// Panic for a range [`checked_str`] rejected. Kept out of line so the
+/// inlined accessors stay small on the parser's hot paths.
+#[cold]
+#[inline(never)]
+fn invalid_str_range(text: &str, start: usize, len: u32, what: &str) -> ! {
+    if start
+        .checked_add(len as usize)
+        .is_none_or(|end| end > text.len())
+    {
+        panic!("arena {what} range is out of bounds");
+    }
+    panic!("arena {what} range is not valid UTF-8");
 }
 
 #[cfg(test)]
