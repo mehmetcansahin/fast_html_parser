@@ -1003,24 +1003,23 @@ fn node_has_id(arena: &Arena, node: NodeId, target_id: &str, target_hash: u32) -
     })
 }
 
-/// Return whether the cached id hash can conclusively reject this node.
+/// Return whether the cached id hash conclusively rejects this node.
 ///
-/// The arena stores one hash, while malformed HTML can retain duplicate `id`
-/// attributes. A mismatch is therefore conclusive only when at most one `id`
-/// attribute exists; duplicate attributes require the full value scan.
+/// Both arena attribute writers drop duplicate attribute names, so a node has
+/// at most one `id` attribute and its cached hash covers it. A target that
+/// hashes to the "no id" sentinel 0 is never rejected here.
 #[inline]
 fn id_hash_rejects(arena: &Arena, node: NodeId, target_hash: u32) -> bool {
-    let n = arena.get(node);
-    if target_hash == 0 || n.id_hash == target_hash {
-        return false;
-    }
-
-    arena
-        .attrs(node)
-        .iter()
-        .filter(|attr| arena.attr_name(attr).eq_ignore_ascii_case("id"))
-        .nth(1)
-        .is_none()
+    debug_assert!(
+        arena
+            .attrs(node)
+            .iter()
+            .filter(|attr| arena.attr_name(attr).eq_ignore_ascii_case("id"))
+            .nth(1)
+            .is_none(),
+        "arena attributes must not contain duplicate `id` names"
+    );
+    target_hash != 0 && arena.get(node).id_hash != target_hash
 }
 
 #[cfg(test)]
