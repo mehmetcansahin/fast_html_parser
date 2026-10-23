@@ -454,6 +454,9 @@ pub struct TreeBuilder {
     /// Whether the current table character-token run is known to require
     /// foster parenting.
     table_text_run_foster: bool,
+    /// Reusable buffer for entity-decoded character tokens.
+    #[cfg(feature = "entity-decode")]
+    decoded_text: String,
     /// Text node flushed immediately before the most recently processed
     /// non-text token.
     flushed_text_node: Option<NodeId>,
@@ -511,6 +514,8 @@ impl TreeBuilder {
             last_text_node: NodeId::NULL,
             pending_table_text: String::new(),
             table_text_run_foster: false,
+            #[cfg(feature = "entity-decode")]
+            decoded_text: String::new(),
             flushed_text_node: None,
             ignored_raw_text: None,
         }
@@ -1732,11 +1737,20 @@ impl TreeBuilder {
         #[cfg(feature = "entity-decode")]
         {
             if opens_raw_text(self.arena.get(self.current_parent()).tag) {
-                self.handle_text(raw)
-            } else {
-                let decoded = fhp_tokenizer::entity::decode_entities(raw);
-                self.handle_text(decoded.as_ref())
+                return self.handle_text(raw);
             }
+            // Text without a decoded reference is passed through unchanged so
+            // it can stay source-backed; decoded text goes through a reused
+            // buffer instead of a fresh `String` per token.
+            let mut decoded = std::mem::take(&mut self.decoded_text);
+            let inserted = if fhp_tokenizer::entity::decode_entities_into(raw, &mut decoded) {
+                self.handle_text(&decoded)
+            } else {
+                self.handle_text(raw)
+            };
+            decoded.clear();
+            self.decoded_text = decoded;
+            inserted
         }
 
         #[cfg(not(feature = "entity-decode"))]

@@ -413,10 +413,14 @@ impl Arena {
     /// Write an attribute value to the string slab, with optional entity decoding.
     #[cfg(feature = "entity-decode")]
     fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
-        let offset = self.attr_str_slab.len() as u32;
-        let decoded = fhp_tokenizer::entity::decode_attribute_entities(raw_value);
-        self.attr_str_slab.push_str(&decoded);
-        (offset, decoded.len() as u32)
+        let offset = self.attr_str_slab.len();
+        if !fhp_tokenizer::entity::decode_attribute_entities_into(
+            raw_value,
+            &mut self.attr_str_slab,
+        ) {
+            self.attr_str_slab.push_str(raw_value);
+        }
+        (offset as u32, (self.attr_str_slab.len() - offset) as u32)
     }
 
     /// Write an attribute value to the string slab (no entity decoding).

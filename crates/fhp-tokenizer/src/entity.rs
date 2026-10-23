@@ -48,13 +48,46 @@ pub fn decode_attribute_entities(input: &str) -> Cow<'_, str> {
     decode_entities_in(input, EntityContext::Attribute)
 }
 
+/// Decode HTML character references in text content into a caller-owned
+/// buffer, so repeated calls can reuse one allocation.
+///
+/// If any reference in `input` decodes, the decoded text is appended to
+/// `output` and `true` is returned. Otherwise `output` is left unchanged and
+/// `false` is returned: `input` is then its own decoded form, exactly as
+/// [`decode_entities`] would return it borrowed.
+#[inline]
+pub fn decode_entities_into(input: &str, output: &mut String) -> bool {
+    append_if_decoded(input, EntityContext::Text, output)
+}
+
+/// Decode HTML character references in an attribute value into a
+/// caller-owned buffer, with the semantics of [`decode_attribute_entities`]
+/// and the return convention of [`decode_entities_into`].
+#[inline]
+pub fn decode_attribute_entities_into(input: &str, output: &mut String) -> bool {
+    append_if_decoded(input, EntityContext::Attribute, output)
+}
+
 fn decode_entities_in(input: &str, context: EntityContext) -> Cow<'_, str> {
+    // `String::new` does not allocate; the buffer is sized on the first
+    // decoded reference.
+    let mut output = String::new();
+    if append_if_decoded(input, context, &mut output) {
+        Cow::Owned(output)
+    } else {
+        Cow::Borrowed(input)
+    }
+}
+
+/// Append the decoded form of `input` to `output` when at least one reference
+/// decodes, and report whether one did. `output` is untouched otherwise.
+fn append_if_decoded(input: &str, context: EntityContext, output: &mut String) -> bool {
     let bytes = input.as_bytes();
     let Some(mut amp) = memchr(b'&', bytes) else {
-        return Cow::Borrowed(input);
+        return false;
     };
 
-    let mut output = None;
+    let mut decoded_any = false;
     let mut copied_until = 0usize;
 
     loop {
@@ -67,7 +100,10 @@ fn decode_entities_in(input: &str, context: EntityContext) -> Cow<'_, str> {
             continue;
         };
 
-        let output = output.get_or_insert_with(|| String::with_capacity(input.len()));
+        if !decoded_any {
+            output.reserve(input.len());
+            decoded_any = true;
+        }
         output.push_str(&input[copied_until..amp]);
         replacement.push_into(output);
         copied_until = amp + 1 + consumed;
@@ -78,12 +114,10 @@ fn decode_entities_in(input: &str, context: EntityContext) -> Cow<'_, str> {
         amp = copied_until + relative_amp;
     }
 
-    let Some(mut output) = output else {
-        return Cow::Borrowed(input);
-    };
-
-    output.push_str(&input[copied_until..]);
-    Cow::Owned(output)
+    if decoded_any {
+        output.push_str(&input[copied_until..]);
+    }
+    decoded_any
 }
 
 /// Decode the reference whose body begins at `start` (immediately after `&`).
@@ -252,6 +286,41 @@ mod tests {
         }
         for body in ["amp", "lt", "ampx;", "#39", "#390;", "quo;", ""] {
             assert_eq!(common_reference(body.as_bytes()), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn decoding_into_a_buffer_matches_the_cow_api() {
+        let inputs = [
+            "",
+            "plain",
+            "a & b",
+            "&&&&",
+            "&unknown;",
+            "x &amp; y &lt;z&gt;",
+            "&copy=test &notin &#60div",
+            "&CounterClockwiseContourIntegral; tail",
+        ];
+        for input in inputs {
+            let mut output = String::from("prefix:");
+            let decoded = decode_entities_into(input, &mut output);
+            match decode_entities(input) {
+                Cow::Borrowed(_) => assert!(!decoded && output == "prefix:", "{input}"),
+                Cow::Owned(expected) => {
+                    assert!(decoded, "{input}");
+                    assert_eq!(output, format!("prefix:{expected}"));
+                }
+            }
+
+            let mut output = String::from("prefix:");
+            let decoded = decode_attribute_entities_into(input, &mut output);
+            match decode_attribute_entities(input) {
+                Cow::Borrowed(_) => assert!(!decoded && output == "prefix:", "{input}"),
+                Cow::Owned(expected) => {
+                    assert!(decoded, "{input}");
+                    assert_eq!(output, format!("prefix:{expected}"));
+                }
+            }
         }
     }
 
