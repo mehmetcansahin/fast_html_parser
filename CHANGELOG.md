@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that is already valid UTF-8 instead of copying it.
 - `fhp_encoding::bom_length` and `fhp_encoding::PRESCAN_LIMIT`. fhp-tree now
   uses them instead of its own BOM tables and prescan window size.
+- `fhp_tokenizer::entity::decode_entities_into` and
+  `decode_attribute_entities_into`, which decode into a caller-owned
+  `String` so repeated calls can reuse one allocation. They append only when
+  a reference decodes and report whether one did, so undecoded input can
+  stay borrowed exactly as with the `Cow` functions.
 
 ### Changed
 
@@ -98,6 +103,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   per reader instead of 40 KiB.
 - `EarlyStopParser` decodes into one reused buffer instead of allocating a
   string for every `>`-delimited input segment.
+- Parsing is 12–19% faster and tokenizing 25–47% faster on the repository
+  fixtures (Ryzen 7800X3D, fat LTO, mimalloc to suppress allocator noise):
+  - `Tag::from_bytes` packs names of up to eight bytes into one `u64` and
+    looks them up in a compile-time multiply-shift table instead of the
+    SipHash-based `phf` map.
+  - `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&nbsp;`, `&apos;` and `&#39;` skip
+    the general reference matcher; decoding them is about 2.3x faster.
+  - The tree builder decodes text and attribute values into reused buffers
+    and reuses its table-whitespace buffer, instead of allocating a `String`
+    per decoded token or whitespace run.
+- `Arena::text`, `attr_name`, `attr_value` and `unknown_tag_name` check
+  their range in O(1) instead of re-validating UTF-8 on every call; the
+  arena's slabs are now `String`s. `text_content` is 23–42% faster and
+  attribute access 59–69% faster.
+- Selectors with a descendant combinator are 55–87% faster: selection
+  carries a filter of the ancestors' tags, classes and ids down its
+  depth-first walk instead of building a 256-bit bloom filter for every
+  node on each query. `#id` selectors are 55–73% faster because the cached
+  id hash now rejects a node without scanning its attributes.
+- `parse_bytes` parses valid UTF-8 in place instead of copying it through
+  the decoder, halving or better its overhead over `parse`.
 
 ## [0.2.0] - 2026-10-14
 
