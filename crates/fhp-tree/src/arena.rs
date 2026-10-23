@@ -30,6 +30,22 @@ pub struct Attribute {
 /// Number of tag index buckets (Tag is `repr(u8)`, 256 possible values).
 const TAG_INDEX_SIZE: usize = 256;
 
+/// NUL bytes for pending-copy placeholders. Every byte is a whole character,
+/// so the placeholder can later be replaced at any byte offset.
+const NULS: &str = match std::str::from_utf8(&[0; 256]) {
+    Ok(nuls) => nuls,
+    Err(_) => panic!("NUL bytes are valid UTF-8"),
+};
+
+/// Append `len` NUL bytes in blocks rather than one character at a time.
+fn push_nul_placeholder(text: &mut String, mut len: usize) {
+    while len > 0 {
+        let block = len.min(NULS.len());
+        text.push_str(&NULS[..block]);
+        len -= block;
+    }
+}
+
 struct PendingSourceCopy {
     source_offset: usize,
     text_offset: usize,
@@ -218,7 +234,7 @@ impl Arena {
             .reserve(source_len.checked_add(content.len())?);
 
         if self.source.is_empty() {
-            self.text_slab.extend(std::iter::repeat_n('\0', source_len));
+            push_nul_placeholder(&mut self.text_slab, source_len);
             self.pending_source_copies.push(PendingSourceCopy {
                 source_offset,
                 text_offset: new_offset,
