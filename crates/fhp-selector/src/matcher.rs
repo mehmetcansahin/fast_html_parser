@@ -936,19 +936,12 @@ fn node_has_id(arena: &Arena, node: NodeId, target_id: &str, target_hash: u32) -
 /// Return whether the cached id hash conclusively rejects this node.
 ///
 /// Both arena attribute writers drop duplicate attribute names, so a node has
-/// at most one `id` attribute and its cached hash covers it. A target that
+/// at most one `id` attribute and its cached hash covers it. Like
+/// `class_hash`, the hash is trusted: a node whose fields were edited through
+/// `Arena::get_mut` must keep it in sync (see `Node::id_hash`). A target that
 /// hashes to the "no id" sentinel 0 is never rejected here.
 #[inline]
 fn id_hash_rejects(arena: &Arena, node: NodeId, target_hash: u32) -> bool {
-    debug_assert!(
-        arena
-            .attrs(node)
-            .iter()
-            .filter(|attr| arena.attr_name(attr).eq_ignore_ascii_case("id"))
-            .nth(1)
-            .is_none(),
-        "arena attributes must not contain duplicate `id` names"
-    );
     target_hash != 0 && arena.get(node).id_hash != target_hash
 }
 

@@ -897,6 +897,10 @@ impl Arena {
     }
 
     /// Get a mutable reference to a node by id.
+    ///
+    /// Text and attribute ranges are bounds-checked on every read, but the
+    /// selector hashes ([`Node::class_hash`], [`Node::id_hash`]) are trusted:
+    /// keep them in sync when editing a node's attribute range.
     #[inline]
     pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
         &mut self.nodes[id.index()]

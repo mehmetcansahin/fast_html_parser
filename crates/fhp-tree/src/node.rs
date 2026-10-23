@@ -164,11 +164,18 @@ pub struct Node {
     /// `hash % 64`. Zero means no class attribute. Used by the selector
     /// matcher for fast rejection. 64 bits reduces false positive rate
     /// from ~15% (5 classes) to ~8% compared to 32-bit.
+    ///
+    /// Selectors trust this field: code that edits `attr_offset` or
+    /// `attr_count` must keep it in sync with the node's attributes.
     pub class_hash: u64,
     /// FNV-1a hash of the `id` attribute value.
     ///
     /// Zero means no id attribute. Used by the selector matcher for fast
-    /// rejection before scanning attributes.
+    /// rejection before scanning attributes. The arena keeps only the first
+    /// of duplicate attribute names, so a node has at most one `id`.
+    ///
+    /// Selectors trust this field: code that edits `attr_offset` or
+    /// `attr_count` must keep it in sync with the node's attributes.
     pub id_hash: u32,
     /// Reserved (formerly the raw attribute region length for lazy parsing,
     /// which was removed). Kept to preserve the 64-byte layout.
