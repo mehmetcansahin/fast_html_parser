@@ -12,10 +12,14 @@ use fhp_tree::{Document, parse};
 /// the block, so the block's content moves up one level per end tag.
 const PAIRS: usize = 250;
 const BLOCK_ITEMS: usize = 20_000;
-/// Far below the ratio the per-move rewrite produced, far above noise.
-const MAX_RATIO: f64 = 4.0;
+/// Deferred depths cost ~1.1x. Rewriting them per move costs ~12x for
+/// `parse` and ~4.2x under an early-stop predicate, and counting ancestors
+/// for every node created after a move ~6x under a depth-reading predicate.
+const MAX_RATIO: f64 = 2.5;
 
-fn page(end_tag: &str) -> String {
+/// The block's content first, then one end tag per pair: `</b>` moves the
+/// content every time, `</q>` (the control) never.
+fn repeated_moves(end_tag: &str) -> String {
     let mut html = "<b><span>".repeat(PAIRS);
     html.push_str("<div>");
     html.push_str(&"<i>x</i>".repeat(BLOCK_ITEMS));
@@ -23,16 +27,41 @@ fn page(end_tag: &str) -> String {
     html
 }
 
-fn median_parse_ms(html: &str) -> f64 {
+/// One end tag over a block with ten nested open `section`s, then the
+/// content, ~500 levels deep. `</b>` leaves the older nodes with stale
+/// depths while the content is created.
+fn content_after_a_move(end_tag: &str) -> String {
+    let mut html = "<b><span>".repeat(PAIRS);
+    html.push_str("<div><i>y</i>");
+    html.push_str(&"<section>".repeat(10));
+    html.push_str(end_tag);
+    html.push_str(&"<i>x</i>".repeat(BLOCK_ITEMS));
+    html
+}
+
+fn median_ms(mut run: impl FnMut()) -> f64 {
     let mut samples: Vec<f64> = (0..5)
         .map(|_| {
             let start = Instant::now();
-            std::hint::black_box(parse(html).unwrap());
+            run();
             start.elapsed().as_secs_f64() * 1e3
         })
         .collect();
     samples.sort_by(f64::total_cmp);
     samples[samples.len() / 2]
+}
+
+fn assert_constant_factor(what: &str, page: fn(&str) -> String, mut run: impl FnMut(&str)) {
+    let control = page("</q>");
+    let misnested = page("</b>");
+    let control_ms = median_ms(|| run(&control));
+    let misnested_ms = median_ms(|| run(&misnested));
+    let ratio = misnested_ms / control_ms;
+    assert!(
+        ratio < MAX_RATIO,
+        "{what}: misnested page took {misnested_ms:.1} ms, \
+         {ratio:.1}x the control's {control_ms:.1} ms"
+    );
 }
 
 fn assert_depths_are_exact(document: &Document, node: NodeId) {
@@ -47,17 +76,38 @@ fn assert_depths_are_exact(document: &Document, node: NodeId) {
 
 #[test]
 fn repeated_adoption_moves_cost_a_constant_factor() {
-    let control = page("</q>");
-    let misnested = page("</b>");
+    for page in [repeated_moves, content_after_a_move] {
+        let document = parse(&page("</b>")).unwrap();
+        assert_depths_are_exact(&document, document.root().id());
 
-    let document = parse(&misnested).unwrap();
-    assert_depths_are_exact(&document, document.root().id());
+        assert_constant_factor("parse", page, |html| {
+            std::hint::black_box(parse(html).unwrap());
+        });
+    }
+}
 
-    let control_ms = median_parse_ms(&control);
-    let misnested_ms = median_parse_ms(&misnested);
-    let ratio = misnested_ms / control_ms;
-    assert!(
-        ratio < MAX_RATIO,
-        "misnested page took {misnested_ms:.1} ms, {ratio:.1}x the control's {control_ms:.1} ms"
-    );
+#[test]
+#[cfg(feature = "encoding")]
+fn early_stop_parsing_pays_a_constant_factor_too() {
+    use fhp_tree::streaming::{EarlyStopOutcome, EarlyStopParser};
+
+    // The predicate observes every node, reads its depth, and never matches,
+    // so the whole page is parsed under observation.
+    let early_stop = |html: &str| {
+        let mut parser = EarlyStopParser::stop_on_create(|node| node.depth() == u16::MAX);
+        parser.feed(html.as_bytes()).unwrap();
+        let EarlyStopOutcome::Done(document) = parser.finish().unwrap() else {
+            panic!("the predicate never matches");
+        };
+        document
+    };
+
+    for page in [repeated_moves, content_after_a_move] {
+        let document = early_stop(&page("</b>"));
+        assert_depths_are_exact(&document, document.root().id());
+
+        assert_constant_factor("EarlyStopParser", page, |html| {
+            std::hint::black_box(early_stop(html));
+        });
+    }
 }

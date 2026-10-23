@@ -480,12 +480,6 @@ pub struct TreeBuilder {
     /// element's content undecoded, while no raw-text parent exists; the token
     /// path then decodes it exactly as the sink path does.
     ignored_raw_text: Option<Tag>,
-    /// Whether node depths must stay exact during construction, because an
-    /// observer (the early-stop predicate) reads nodes before `finish`.
-    eager_depths: bool,
-    /// Whether an adoption agency move left descendant depths stale; `finish`
-    /// then recomputes them in one pass.
-    depths_stale: bool,
 }
 
 impl TreeBuilder {
@@ -539,18 +533,6 @@ impl TreeBuilder {
             decoded_text: String::new(),
             flushed_text_node: None,
             ignored_raw_text: None,
-            eager_depths: false,
-            depths_stale: false,
-        }
-    }
-
-    /// Create a tree builder whose node depths stay exact after every token,
-    /// for observers that read the tree before [`Self::finish`].
-    #[cfg(feature = "encoding")]
-    pub(crate) fn new_observed() -> Self {
-        Self {
-            eager_depths: true,
-            ..Self::new()
         }
     }
 
@@ -635,9 +617,7 @@ impl TreeBuilder {
     /// Like [`Self::process`], this never fails at present.
     pub fn finish(mut self) -> Result<(Arena, NodeId), ParseError> {
         let _ = self.flush_pending_table_text();
-        if self.depths_stale {
-            self.arena.recompute_descendant_depths(self.root);
-        }
+        self.arena.refresh_depths(self.root);
         Ok((self.arena, self.root))
     }
 
@@ -1505,25 +1485,24 @@ impl TreeBuilder {
             }
             node = self.arena.get(node).first_child;
         }
-        let child_depth = self.arena.get(replacement).depth.saturating_add(1);
-        if self.eager_depths {
-            let mut child = self.arena.get(replacement).first_child;
-            while !child.is_null() {
-                self.arena.set_subtree_depth(child, child_depth);
-                child = self.arena.get(child).next_sibling;
-            }
-        } else if !self.depths_stale {
-            // Rewriting the moved subtree here would repeat for every later
-            // misnested end tag that moves it again, up to once per open
-            // element. `finish` recomputes every depth in one pass instead.
-            let first_child = self.arena.get(replacement).first_child;
-            self.depths_stale =
-                !first_child.is_null() && self.arena.get(first_child).depth != child_depth;
+        // Rewriting the moved subtree's depths would repeat for every later
+        // misnested end tag that moves it again, up to once per open element.
+        // Instead, when the move shifts them (or earlier depths are already
+        // stale), mark every existing node as possibly stale: `NodeRef::depth`
+        // counts their ancestors until `finish` recomputes all depths in one
+        // pass.
+        let moved = self.arena.get(replacement).first_child;
+        let moved_depth = self.arena.get(replacement).depth.saturating_add(1);
+        let shifted = !moved.is_null()
+            && (self.arena.stale_depths_before > 0 || self.arena.get(moved).depth != moved_depth);
+        if shifted {
+            self.arena.stale_depths_before = self.arena.len();
         }
 
         // The formatting element and everything up to the furthest block
         // leave the stack; the clones replace their originals in order, and
         // the replacement opens right above the furthest block.
+        let replacement_index = formatting_index + chain.len() + 1;
         let mut above = self.open_elements.split_off(furthest_index);
         let replacement_children = above[0].element_child_count;
         above[0].element_child_count = 1;
@@ -1539,6 +1518,18 @@ impl TreeBuilder {
         self.open_elements.extend(chain.into_iter().rev());
         self.open_elements.extend(above);
         self.rebuild_stack_state();
+
+        if shifted {
+            // Every new node is inserted into an open element, so keeping
+            // the open elements exact makes every node created from now on
+            // exact too. Each one's parent is open and further down.
+            for index in replacement_index + 1..self.open_elements.len() {
+                let id = self.open_elements[index].id;
+                let parent = self.arena.get(id).parent;
+                let depth = self.arena.get(parent).depth.saturating_add(1);
+                self.arena.get_mut(id).depth = depth;
+            }
+        }
     }
 
     fn register_appended_element(&mut self, parent: NodeId, node: NodeId) {
@@ -2740,29 +2731,58 @@ mod tests {
         html
     }
 
+    /// One misnested `</b>` over a block with content and ten nested open
+    /// `section`s. The first move shifts their depths, and the adoption
+    /// agency's eight rounds leave the innermost sections open, so later
+    /// content lands in open elements the move shifted.
+    fn content_after_a_move(pairs: usize) -> String {
+        let mut html = "<b><span>".repeat(pairs);
+        html.push_str("<div><i>y</i>");
+        html.push_str(&"<section>".repeat(10));
+        html.push_str("</b>");
+        html.push_str(&"<i>x</i>".repeat(20));
+        html
+    }
+
     #[test]
     fn repeated_adoption_moves_defer_depths_to_finish() {
         let html = repeated_misnesting(40);
         let mut builder = TreeBuilder::new();
         fhp_tokenizer::tokenize_into(&html, &mut builder);
-        assert!(builder.depths_stale);
+        assert!(builder.arena.stale_depths_before > 0);
 
         let (arena, root) = finish(builder);
+        assert_eq!(arena.stale_depths_before, 0);
         assert_tree_invariants(&arena, root);
     }
 
     #[test]
-    fn observed_builders_keep_depths_exact_after_every_token() {
-        let html = repeated_misnesting(40);
-        let mut builder = TreeBuilder {
-            eager_depths: true,
-            ..TreeBuilder::new()
-        };
-        for token in fhp_tokenizer::tokenize(&html) {
-            process(&mut builder, &token);
-            assert_tree_invariants(&builder.arena, builder.root);
+    fn node_depths_read_mid_parse_are_exact() {
+        // Early-stop predicates read `NodeRef::depth` between tokens, while
+        // stored depths of older nodes may await the fix-up in `finish`.
+        for html in [repeated_misnesting(40), content_after_a_move(40)] {
+            let mut builder = TreeBuilder::new();
+            let mut saw_stale_depths = false;
+            for token in fhp_tokenizer::tokenize(&html) {
+                process(&mut builder, &token);
+                let stale_before = builder.arena.stale_depths_before;
+                saw_stale_depths |= stale_before > 0;
+                for index in 0..builder.arena.len() {
+                    let node = crate::NodeRef {
+                        arena: &builder.arena,
+                        id: NodeId(index as u32),
+                    };
+                    let depth = node.ancestors().count();
+                    assert_eq!(usize::from(node.depth()), depth);
+                    // Nodes created after the move are stored exact, so
+                    // reading their depth stays O(1).
+                    if index >= stale_before {
+                        assert_eq!(usize::from(builder.arena.get(node.id).depth), depth);
+                    }
+                }
+            }
+            assert!(saw_stale_depths);
         }
-        assert!(!builder.depths_stale);
     }
 
     #[test]

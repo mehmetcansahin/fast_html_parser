@@ -137,8 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Misnested formatting end tags no longer rewrite the depths of the moved
   subtree on every adoption agency move; `TreeBuilder::finish` recomputes
   depths once instead. A crafted 1.6 MB input that repeats such moves 250
-  times parses in 17 ms instead of 240 ms. `EarlyStopParser`, whose
-  predicate reads nodes mid-parse, keeps depths exact after every token.
+  times parses in 17 ms instead of 240 ms, and under `EarlyStopParser` in
+  50 ms instead of 275 ms. Mid-parse, `NodeRef::depth` stays exact: open
+  elements, and so every node created after a move, keep exact depths, and
+  older nodes count their ancestors until `finish`.
 
 ## [0.2.0] - 2026-10-14
 

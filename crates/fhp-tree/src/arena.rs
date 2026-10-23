@@ -104,6 +104,11 @@ pub struct Arena {
     /// order differ from document order, so document-ordered consumers must
     /// still traverse the tree links.
     pub(crate) tag_index: Option<Box<[Vec<NodeId>; TAG_INDEX_SIZE]>>,
+    /// Nodes allocated before this index may have stale [`Node::depth`]
+    /// values; 0 when every depth is exact. Tree construction defers the
+    /// depth fix-up after adoption agency moves to `TreeBuilder::finish`;
+    /// until then `NodeRef::depth` counts these nodes' ancestors.
+    pub(crate) stale_depths_before: usize,
 }
 
 impl Arena {
@@ -117,6 +122,7 @@ impl Arena {
             source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
+            stale_depths_before: 0,
         }
     }
 
@@ -130,6 +136,7 @@ impl Arena {
             source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
+            stale_depths_before: 0,
         }
     }
 
@@ -758,19 +765,17 @@ impl Arena {
         }
     }
 
-    /// Give `node` the depth `depth` and shift its descendants to match.
-    /// Allocation-free, and a no-op when the depth is already right.
-    pub(crate) fn set_subtree_depth(&mut self, node: NodeId, depth: u16) {
-        if self.nodes[node.index()].depth == depth {
-            return;
+    /// Recompute stale depths below `root` in one pass, if any are stale.
+    pub(crate) fn refresh_depths(&mut self, root: NodeId) {
+        if self.stale_depths_before > 0 {
+            self.recompute_descendant_depths(root);
+            self.stale_depths_before = 0;
         }
-        self.nodes[node.index()].depth = depth;
-        self.recompute_descendant_depths(node);
     }
 
     /// Set every descendant of `node` one level below its parent, keeping
     /// `node`'s own depth. Allocation-free pre-order walk.
-    pub(crate) fn recompute_descendant_depths(&mut self, node: NodeId) {
+    fn recompute_descendant_depths(&mut self, node: NodeId) {
         // Each parent is updated before its children.
         let mut current = self.nodes[node.index()].first_child;
         while !current.is_null() {
