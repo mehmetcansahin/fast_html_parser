@@ -11,6 +11,7 @@ enum EntityContext {
     Attribute,
 }
 
+#[derive(Debug, PartialEq)]
 enum Replacement {
     Named(&'static str),
     Numeric(char),
@@ -92,6 +93,16 @@ fn decode_reference(
     start: usize,
     context: EntityContext,
 ) -> Option<(Replacement, usize)> {
+    common_reference(&input.as_bytes()[start..])
+        .or_else(|| decode_any_reference(input, start, context))
+}
+
+/// The general matcher behind [`decode_reference`]'s common-name fast path.
+fn decode_any_reference(
+    input: &str,
+    start: usize,
+    context: EntityContext,
+) -> Option<(Replacement, usize)> {
     let bytes = input.as_bytes();
     let first = *bytes.get(start)?;
 
@@ -121,6 +132,25 @@ fn decode_reference(
         Replacement::Named(matched.value),
         matched.name_len + usize::from(has_semicolon),
     ))
+}
+
+/// Match the semicolon-terminated references that dominate real-world HTML
+/// without walking the general matcher. `body` starts after the `&`.
+///
+/// Each spelling ends in `;`, which stops the general name scan, so the
+/// result is identical to the slow path in both text and attribute context.
+#[inline]
+fn common_reference(body: &[u8]) -> Option<(Replacement, usize)> {
+    match body {
+        [b'a', b'm', b'p', b';', ..] => Some((Replacement::Named("&"), 4)),
+        [b'l', b't', b';', ..] => Some((Replacement::Named("<"), 3)),
+        [b'g', b't', b';', ..] => Some((Replacement::Named(">"), 3)),
+        [b'q', b'u', b'o', b't', b';', ..] => Some((Replacement::Named("\""), 5)),
+        [b'n', b'b', b's', b'p', b';', ..] => Some((Replacement::Named("\u{00A0}"), 5)),
+        [b'a', b'p', b'o', b's', b';', ..] => Some((Replacement::Named("'"), 5)),
+        [b'#', b'3', b'9', b';', ..] => Some((Replacement::Numeric('\''), 4)),
+        _ => None,
+    }
 }
 
 fn decode_numeric_reference(input: &str, start: usize) -> Option<(Replacement, usize)> {
@@ -206,6 +236,23 @@ mod tests {
         assert_eq!(decode_entities("&&&&"), "&&&&");
         assert_eq!(decode_entities("&unknown;"), "&unknown;");
         assert_eq!(decode_entities("&#; &#x;"), "&#; &#x;");
+    }
+
+    #[test]
+    fn common_references_match_the_general_matcher() {
+        for body in ["amp;", "lt;", "gt;", "quot;", "nbsp;", "apos;", "#39;"] {
+            for suffix in ["", "x", "=", ";", " ", "&amp;"] {
+                let input = format!("&{body}{suffix}");
+                let fast = common_reference(&input.as_bytes()[1..]);
+                assert!(fast.is_some(), "{input}");
+                for context in [EntityContext::Text, EntityContext::Attribute] {
+                    assert_eq!(fast, decode_any_reference(&input, 1, context), "{input}");
+                }
+            }
+        }
+        for body in ["amp", "lt", "ampx;", "#39", "#390;", "quo;", ""] {
+            assert_eq!(common_reference(body.as_bytes()), None, "{body}");
+        }
     }
 
     #[test]
