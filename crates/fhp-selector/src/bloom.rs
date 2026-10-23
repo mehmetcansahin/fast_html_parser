@@ -4,9 +4,11 @@
 //! up the ancestor chain. A summary of the tags/classes/ids among a node's
 //! ancestors allows fast rejection without the walk.
 //!
-//! Selection carries an [`AncestorFilter`] down its depth-first walk, built
+//! Selection carries an `AncestorFilter` down its depth-first walk, built
 //! from hashes the arena already stores. The public [`AncestorBloom`] table
 //! builds a 256-bit bloom filter per node instead.
+//!
+//! [`AncestorBloom`]: crate::bloom::AncestorBloom
 
 use fhp_core::hash::selector_hash;
 use fhp_core::tag::Tag;
