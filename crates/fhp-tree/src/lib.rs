@@ -223,17 +223,29 @@ pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Doc
     ensure_input_size(input.len(), max_input_size)?;
 
     let effective_max = max_input_size.min(MAX_REPRESENTABLE_INPUT_SIZE);
-    let text = decode_with_limit(input, effective_max)?;
+    let encoding = fhp_encoding::detect(input);
+    let input = &input[fhp_encoding::bom_length(input, encoding)..];
+    // Valid UTF-8 decodes to itself: parse it in place rather than copying
+    // it through the decoder and validating it a second time.
+    if encoding == encoding_rs::UTF_8 {
+        if let Ok(text) = std::str::from_utf8(input) {
+            return parse_with_limit(text, effective_max);
+        }
+    }
+    let text = decode_with_limit(encoding, input, effective_max)?;
     parse_owned_with_limit(text, effective_max)
 }
 
-/// Decode a complete byte input without ever retaining more than `max` bytes
-/// of decoded UTF-8. This keeps the byte-entry-point limit useful as a memory
-/// bound instead of allocating the decoder's worst-case expansion first.
+/// Decode a complete byte input (without its BOM) without ever retaining more
+/// than `max` bytes of decoded UTF-8. This keeps the byte-entry-point limit
+/// useful as a memory bound instead of allocating the decoder's worst-case
+/// expansion first.
 #[cfg(feature = "encoding")]
-fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
-    let encoding = fhp_encoding::detect(input);
-    let input = &input[fhp_encoding::bom_length(input, encoding)..];
+fn decode_with_limit(
+    encoding: &'static encoding_rs::Encoding,
+    input: &[u8],
+    max: usize,
+) -> Result<String, HtmlError> {
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut decoded = String::with_capacity(input.len().min(max));
     let mut offset = 0usize;
@@ -999,6 +1011,25 @@ mod tests {
         let text = doc.root().text_content();
         assert_eq!(text.chars().count(), WINDOWS_1252_BYTES);
         assert_eq!(text.len(), WINDOWS_1252_BYTES * '€'.len_utf8());
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn parse_bytes_parses_valid_utf8_like_parse() {
+        for html in [
+            "<p>caf\u{e9} &amp; na\u{ef}ve</p>",
+            "\u{feff}<p>bom</p>",
+            "<meta charset=utf-8><p>\u{1F600}</p>",
+            "",
+        ] {
+            let from_bytes = parse_bytes(html.as_bytes()).unwrap();
+            let from_str = parse(html.trim_start_matches('\u{feff}')).unwrap();
+            assert_eq!(
+                from_bytes.root().text_content(),
+                from_str.root().text_content()
+            );
+            assert_eq!(from_bytes.arena().len(), from_str.arena().len());
+        }
     }
 
     #[test]
