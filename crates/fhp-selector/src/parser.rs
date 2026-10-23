@@ -54,6 +54,19 @@ fn limit_error(reason: String) -> SelectorError {
     SelectorError::Invalid { reason }
 }
 
+/// Whether the byte at `index` is escaped: preceded by an odd number of
+/// backslashes and not a newline, which a backslash cannot escape.
+fn is_escaped(bytes: &[u8], index: usize) -> bool {
+    !matches!(bytes[index], b'\n' | b'\r' | b'\x0C')
+        && bytes[..index]
+            .iter()
+            .rev()
+            .take_while(|&&byte| byte == b'\\')
+            .count()
+            % 2
+            == 1
+}
+
 /// Parse a CSS selector string into a [`SelectorList`].
 ///
 /// Supports comma-separated selector lists.
@@ -109,12 +122,22 @@ struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Create a parser over `input` without its surrounding whitespace, keeping
     /// positions relative to the untrimmed input for error messages.
+    ///
+    /// Only the whitespace CSS itself skips is trimmed. Other characters, such
+    /// as U+00A0, are identifier code points, and a trailing space or tab
+    /// escaped by a backslash (`.a\ `) belongs to the selector.
     fn new(input: &'a str) -> Self {
-        let src = input.trim_end();
+        let bytes = input.as_bytes();
+        let mut end = bytes.len();
+        while end > 0 && is_html_whitespace(bytes[end - 1]) && !is_escaped(bytes, end - 1) {
+            end -= 1;
+        }
+        // Only ASCII bytes were trimmed, so `end` is a character boundary.
+        let src = &input[..end];
         Self {
             src,
             input: src.as_bytes(),
-            pos: src.len() - src.trim_start().len(),
+            pos: src.bytes().take_while(|&b| is_html_whitespace(b)).count(),
             simple_parts: 0,
             not_depth: 0,
         }
@@ -1125,6 +1148,22 @@ mod tests {
         // A backslash before a newline or at the end is not an escape.
         assert!(parse_single_selector("#a\\").is_err());
         assert!(parse_single_selector("#a\\\nb").is_err());
+    }
+
+    #[test]
+    fn only_unescaped_css_whitespace_is_trimmed() {
+        assert_eq!(single_id(" \t#a \n\x0C"), "a");
+        // An escaped trailing space or tab belongs to the identifier.
+        assert_eq!(single_id(r"#a\ "), "a ");
+        assert_eq!(single_id("#a\\\t  "), "a\t");
+        // An escaped backslash does not escape the space after it.
+        assert_eq!(single_id(r"#a\\ "), "a\\");
+        // Non-CSS whitespace such as U+00A0 is an identifier code point.
+        assert_eq!(single_id("#a\u{a0}"), "a\u{a0}");
+        assert!(matches!(
+            &parse_single_selector("\u{a0}div").unwrap().subject.parts[0],
+            SimpleSelector::UnknownTag(name) if name == "\u{a0}div"
+        ));
     }
 
     #[test]

@@ -55,6 +55,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.md\:flex`, `#\31 23`), and quoted attribute values decode escapes such
   as `\"`. Pseudo-class names are now ASCII case-insensitive
   (`:First-Child`).
+- Only CSS whitespace around a selector is ignored: an escaped trailing
+  space or tab (`.a\ `) and characters such as U+00A0 belong to the
+  selector. XPath expressions are likewise trimmed of ASCII whitespace only.
 - `:nth-child` matches in trees built with `Arena::append_child`, which now
   records each element's sibling index the way the parser does.
 - `find_by_attr(name, "")` matches valueless attributes such as `disabled`,

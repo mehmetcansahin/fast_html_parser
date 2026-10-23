@@ -65,10 +65,15 @@ impl<'a> XPathParser<'a> {
     /// Create a parser over `input` without its surrounding whitespace, keeping
     /// positions relative to the untrimmed input for error messages.
     fn new(input: &'a str) -> Self {
-        let input = input.trim_end();
+        // Trim only what `skip_whitespace` skips; other whitespace, such as
+        // U+00A0, is not XPath whitespace.
+        let input = input.trim_end_matches(|c: char| c.is_ascii_whitespace());
         Self {
             input,
-            pos: input.len() - input.trim_start().len(),
+            pos: input.len()
+                - input
+                    .trim_start_matches(|c: char| c.is_ascii_whitespace())
+                    .len(),
         }
     }
 
@@ -606,5 +611,15 @@ mod tests {
     #[test]
     fn parse_trailing_garbage_error() {
         assert!(parse_xpath("//div garbage").is_err());
+    }
+
+    #[test]
+    fn only_ascii_whitespace_is_trimmed() {
+        assert_eq!(
+            parse_xpath(" \t//div \r\n").unwrap(),
+            parse_xpath("//div").unwrap()
+        );
+        assert!(parse_xpath("\u{a0}//div").is_err());
+        assert!(parse_xpath("//div\u{3000}").is_err());
     }
 }
