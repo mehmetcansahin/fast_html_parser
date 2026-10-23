@@ -1449,6 +1449,10 @@ impl TreeBuilder {
             InsertionLocation::Append(common_ancestor.id)
         };
 
+        // Open elements always have exact depths, so this is the depth the
+        // furthest block's children leave from, one level below it.
+        let furthest_depth = self.arena.get(furthest.id).depth;
+
         // Inner loop, from the furthest block down: the three nearest
         // elements may be formatting elements to clone around the chain.
         self.arena.detach(furthest.id);
@@ -1489,17 +1493,18 @@ impl TreeBuilder {
             }
             node = self.arena.get(node).first_child;
         }
-        // Rewriting the moved subtree's depths would repeat for every later
-        // misnested end tag that moves it again, up to once per open element.
-        // Instead, when the move shifts them (or earlier depths are already
-        // stale), mark every existing node except the open elements as
-        // possibly stale: `NodeRef::depth` climbs from such a node to its
-        // nearest ancestor known exact (see `Arena::exact_depth`) until
-        // `finish` recomputes all depths in one pass.
-        let moved = self.arena.get(replacement).first_child;
-        let moved_depth = self.arena.get(replacement).depth.saturating_add(1);
-        let shifted = !moved.is_null()
-            && (self.arena.stale_depths.is_some() || self.arena.get(moved).depth != moved_depth);
+        // The moved children now sit one level below the replacement instead
+        // of the furthest block; they and the open elements above them shift
+        // by the difference. Rewriting the moved subtree would repeat for
+        // every later misnested end tag that moves it again, up to once per
+        // open element. Instead, when the move shifts depths, mark every
+        // existing node except the open elements as possibly stale:
+        // `NodeRef::depth` climbs from such a node to its nearest ancestor
+        // known exact (see `Arena::exact_depth`) until `finish` recomputes
+        // all depths in one pass. A move that shifts nothing leaves an
+        // earlier mark valid.
+        let shifted = !self.arena.get(replacement).first_child.is_null()
+            && self.arena.get(replacement).depth != furthest_depth;
 
         // The formatting element and everything up to the furthest block
         // leave the stack; the clones replace their originals in order, and
@@ -2748,6 +2753,41 @@ mod tests {
         html
     }
 
+    /// A depth-shifting move, then ordinary misnested `<b><div>` repairs
+    /// whose moves shift nothing.
+    fn quiet_repairs_after_a_move(pairs: usize) -> String {
+        let mut html = content_after_a_move(pairs);
+        html.push_str(&"<b><div>x</b></div>".repeat(5));
+        html.push_str("<i>z</i>");
+        html
+    }
+
+    #[test]
+    fn moves_that_shift_nothing_keep_the_stale_mark() {
+        let mut builder = TreeBuilder::new();
+        fhp_tokenizer::tokenize_into(&content_after_a_move(40), &mut builder);
+        let before = builder
+            .arena
+            .stale_depths
+            .as_ref()
+            .map(|stale| stale.before);
+        assert!(before.is_some());
+
+        // Each repair moves a `div` and its text without changing the text's
+        // depth, so the mark from the first move stays as it is. (Treating
+        // every move after a mark as shifting re-marks here.)
+        let repairs = "<b><div>x</b></div>".repeat(5);
+        fhp_tokenizer::tokenize_into(&repairs, &mut builder);
+        assert_eq!(
+            builder
+                .arena
+                .stale_depths
+                .as_ref()
+                .map(|stale| stale.before),
+            before
+        );
+    }
+
     #[test]
     fn repeated_adoption_moves_defer_depths_to_finish() {
         let html = repeated_misnesting(40);
@@ -2764,7 +2804,11 @@ mod tests {
     fn node_depths_read_mid_parse_are_exact() {
         // Early-stop predicates read `NodeRef::depth` between tokens, while
         // stored depths of older nodes may await the fix-up in `finish`.
-        for html in [repeated_misnesting(40), content_after_a_move(40)] {
+        for html in [
+            repeated_misnesting(40),
+            content_after_a_move(40),
+            quiet_repairs_after_a_move(40),
+        ] {
             let mut builder = TreeBuilder::new();
             let mut saw_stale_depths = false;
             for token in fhp_tokenizer::tokenize(&html) {
