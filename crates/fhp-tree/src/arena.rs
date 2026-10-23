@@ -749,8 +749,13 @@ impl Arena {
             return;
         }
         self.nodes[node.index()].depth = depth;
+        self.recompute_descendant_depths(node);
+    }
 
-        // Pre-order walk of the descendants; each parent is updated first.
+    /// Set every descendant of `node` one level below its parent, keeping
+    /// `node`'s own depth. Allocation-free pre-order walk.
+    pub(crate) fn recompute_descendant_depths(&mut self, node: NodeId) {
+        // Each parent is updated before its children.
         let mut current = self.nodes[node.index()].first_child;
         while !current.is_null() {
             let parent = self.nodes[current.index()].parent;

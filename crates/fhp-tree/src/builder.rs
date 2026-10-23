@@ -465,6 +465,12 @@ pub struct TreeBuilder {
     /// element's content undecoded, while no raw-text parent exists; the token
     /// path then decodes it exactly as the sink path does.
     ignored_raw_text: Option<Tag>,
+    /// Whether node depths must stay exact during construction, because an
+    /// observer (the early-stop predicate) reads nodes before `finish`.
+    eager_depths: bool,
+    /// Whether an adoption agency move left descendant depths stale; `finish`
+    /// then recomputes them in one pass.
+    depths_stale: bool,
 }
 
 impl TreeBuilder {
@@ -518,6 +524,18 @@ impl TreeBuilder {
             decoded_text: String::new(),
             flushed_text_node: None,
             ignored_raw_text: None,
+            eager_depths: false,
+            depths_stale: false,
+        }
+    }
+
+    /// Create a tree builder whose node depths stay exact after every token,
+    /// for observers that read the tree before [`Self::finish`].
+    #[cfg(feature = "encoding")]
+    pub(crate) fn new_observed() -> Self {
+        Self {
+            eager_depths: true,
+            ..Self::new()
         }
     }
 
@@ -602,6 +620,9 @@ impl TreeBuilder {
     /// Like [`Self::process`], this never fails at present.
     pub fn finish(mut self) -> Result<(Arena, NodeId), ParseError> {
         let _ = self.flush_pending_table_text();
+        if self.depths_stale {
+            self.arena.recompute_descendant_depths(self.root);
+        }
         Ok((self.arena, self.root))
     }
 
@@ -1470,10 +1491,19 @@ impl TreeBuilder {
             node = self.arena.get(node).first_child;
         }
         let child_depth = self.arena.get(replacement).depth.saturating_add(1);
-        let mut child = self.arena.get(replacement).first_child;
-        while !child.is_null() {
-            self.arena.set_subtree_depth(child, child_depth);
-            child = self.arena.get(child).next_sibling;
+        if self.eager_depths {
+            let mut child = self.arena.get(replacement).first_child;
+            while !child.is_null() {
+                self.arena.set_subtree_depth(child, child_depth);
+                child = self.arena.get(child).next_sibling;
+            }
+        } else if !self.depths_stale {
+            // Rewriting the moved subtree here would repeat for every later
+            // misnested end tag that moves it again, up to once per open
+            // element. `finish` recomputes every depth in one pass instead.
+            let first_child = self.arena.get(replacement).first_child;
+            self.depths_stale =
+                !first_child.is_null() && self.arena.get(first_child).depth != child_depth;
         }
 
         // The formatting element and everything up to the furthest block
@@ -2670,6 +2700,41 @@ mod tests {
             parse_checked_outline("<b><span><em><div><p>x</p>y</b>z"),
             "<b><span><em></em></span></b><em><div><b><p>x</p>y</b>z</div></em>"
         );
+    }
+
+    /// `<b><span>` pairs around a block: every `</b>` moves the block's
+    /// content one level up, which used to rewrite its depths each time.
+    fn repeated_misnesting(pairs: usize) -> String {
+        let mut html = "<b><span>".repeat(pairs);
+        html.push_str("<div>");
+        html.push_str(&"<i>x</i>".repeat(20));
+        html.push_str(&"</b>".repeat(pairs));
+        html
+    }
+
+    #[test]
+    fn repeated_adoption_moves_defer_depths_to_finish() {
+        let html = repeated_misnesting(40);
+        let mut builder = TreeBuilder::new();
+        fhp_tokenizer::tokenize_into(&html, &mut builder);
+        assert!(builder.depths_stale);
+
+        let (arena, root) = finish(builder);
+        assert_tree_invariants(&arena, root);
+    }
+
+    #[test]
+    fn observed_builders_keep_depths_exact_after_every_token() {
+        let html = repeated_misnesting(40);
+        let mut builder = TreeBuilder {
+            eager_depths: true,
+            ..TreeBuilder::new()
+        };
+        for token in fhp_tokenizer::tokenize(&html) {
+            process(&mut builder, &token);
+            assert_tree_invariants(&builder.arena, builder.root);
+        }
+        assert!(!builder.depths_stale);
     }
 
     #[test]

@@ -372,7 +372,8 @@ impl EarlyStopParser {
     fn new(predicate: impl for<'a> Fn(NodeRef<'a>) -> bool + 'static, mode: EarlyStopMode) -> Self {
         Self {
             tokenizer: StreamTokenizer::new(),
-            builder: TreeBuilder::new(),
+            // The predicate reads nodes, depths included, before `finish`.
+            builder: TreeBuilder::new_observed(),
             decoder: None,
             initial_buf: Vec::with_capacity(PRESCAN_LIMIT),
             prescan_processed_ascii: 0,
@@ -547,7 +548,7 @@ impl EarlyStopParser {
     /// processed ASCII prefix.
     fn discard_prescan_work(&mut self) {
         self.tokenizer = StreamTokenizer::new();
-        self.builder = TreeBuilder::new();
+        self.builder = TreeBuilder::new_observed();
         self.prescan_processed_ascii = 0;
         self.pending_match = None;
         self.found = None;
