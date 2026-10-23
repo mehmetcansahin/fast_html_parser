@@ -12,10 +12,11 @@ use fhp_tree::{Document, parse};
 /// the block, so the block's content moves up one level per end tag.
 const PAIRS: usize = 250;
 const BLOCK_ITEMS: usize = 20_000;
-/// Deferred depths cost ~1.1x. Rewriting them per move costs ~12x for
-/// `parse` and ~4.2x under an early-stop predicate, and counting ancestors
-/// for every node created after a move ~6x under a depth-reading predicate.
-const MAX_RATIO: f64 = 2.5;
+/// Deferred depths cost ~1.0-1.2x here (debug builds). Rejected designs
+/// cost more: rewriting depths per move ~12x for `parse` and ~4.2x under an
+/// early-stop predicate, a plain stale flag ~3.9x, and climbing to the root
+/// for every older node's depth ~2.4x when the predicate reads the parent's.
+const MAX_RATIO: f64 = 2.0;
 
 /// The block's content first, then one end tag per pair: `</b>` moves the
 /// content every time, `</q>` (the control) never.
@@ -89,25 +90,39 @@ fn repeated_adoption_moves_cost_a_constant_factor() {
 #[test]
 #[cfg(feature = "encoding")]
 fn early_stop_parsing_pays_a_constant_factor_too() {
+    use fhp_tree::NodeRef;
     use fhp_tree::streaming::{EarlyStopOutcome, EarlyStopParser};
 
-    // The predicate observes every node, reads its depth, and never matches,
-    // so the whole page is parsed under observation.
-    let early_stop = |html: &str| {
-        let mut parser = EarlyStopParser::stop_on_create(|node| node.depth() == u16::MAX);
-        parser.feed(html.as_bytes()).unwrap();
-        let EarlyStopOutcome::Done(document) = parser.finish().unwrap() else {
-            panic!("the predicate never matches");
+    type Predicate = fn(NodeRef<'_>) -> bool;
+
+    // Each predicate observes every node, reads a depth, and never matches,
+    // so the whole page is parsed under observation. A new node's parent is
+    // an older, open element.
+    let predicates: [(&str, Predicate); 2] = [
+        ("own depth", |node| node.depth() == u16::MAX),
+        ("parent depth", |node| {
+            node.parent()
+                .is_some_and(|parent| parent.depth() == u16::MAX)
+        }),
+    ];
+
+    for (name, predicate) in predicates {
+        let early_stop = |html: &str| {
+            let mut parser = EarlyStopParser::stop_on_create(predicate);
+            parser.feed(html.as_bytes()).unwrap();
+            let EarlyStopOutcome::Done(document) = parser.finish().unwrap() else {
+                panic!("the predicate never matches");
+            };
+            document
         };
-        document
-    };
 
-    for page in [repeated_moves, content_after_a_move] {
-        let document = early_stop(&page("</b>"));
-        assert_depths_are_exact(&document, document.root().id());
+        for page in [repeated_moves, content_after_a_move] {
+            let document = early_stop(&page("</b>"));
+            assert_depths_are_exact(&document, document.root().id());
 
-        assert_constant_factor("EarlyStopParser", page, |html| {
-            std::hint::black_box(early_stop(html));
-        });
+            assert_constant_factor(&format!("EarlyStopParser, {name}"), page, |html| {
+                std::hint::black_box(early_stop(html));
+            });
+        }
     }
 }

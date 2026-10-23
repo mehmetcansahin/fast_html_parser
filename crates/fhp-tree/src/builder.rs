@@ -1432,6 +1432,10 @@ impl TreeBuilder {
     /// of up to three formatting elements open in between, and a clone of the
     /// formatting element takes over the furthest block's children. Every
     /// other element in between leaves the stack and stays where it is.
+    ///
+    /// Misnesting repair is rare; keep it out of the end-tag hot path.
+    #[cold]
+    #[inline(never)]
     fn adopt_furthest_block(&mut self, formatting_index: usize, furthest_index: usize) {
         let formatting = self.open_elements[formatting_index];
         let furthest = self.open_elements[furthest_index];
@@ -1494,10 +1498,7 @@ impl TreeBuilder {
         let moved = self.arena.get(replacement).first_child;
         let moved_depth = self.arena.get(replacement).depth.saturating_add(1);
         let shifted = !moved.is_null()
-            && (self.arena.stale_depths_before > 0 || self.arena.get(moved).depth != moved_depth);
-        if shifted {
-            self.arena.stale_depths_before = self.arena.len();
-        }
+            && (self.arena.stale_depths.is_some() || self.arena.get(moved).depth != moved_depth);
 
         // The formatting element and everything up to the furthest block
         // leave the stack; the clones replace their originals in order, and
@@ -1529,6 +1530,8 @@ impl TreeBuilder {
                 let depth = self.arena.get(parent).depth.saturating_add(1);
                 self.arena.get_mut(id).depth = depth;
             }
+            let open = self.open_elements.iter().map(|entry| entry.id);
+            self.arena.mark_depths_stale_except(open);
         }
     }
 
@@ -2749,10 +2752,10 @@ mod tests {
         let html = repeated_misnesting(40);
         let mut builder = TreeBuilder::new();
         fhp_tokenizer::tokenize_into(&html, &mut builder);
-        assert!(builder.arena.stale_depths_before > 0);
+        assert!(builder.arena.stale_depths.is_some());
 
         let (arena, root) = finish(builder);
-        assert_eq!(arena.stale_depths_before, 0);
+        assert!(arena.stale_depths.is_none());
         assert_tree_invariants(&arena, root);
     }
 
@@ -2765,7 +2768,7 @@ mod tests {
             let mut saw_stale_depths = false;
             for token in fhp_tokenizer::tokenize(&html) {
                 process(&mut builder, &token);
-                let stale_before = builder.arena.stale_depths_before;
+                let stale_before = builder.arena.stale_depths.as_ref().map_or(0, |s| s.before);
                 saw_stale_depths |= stale_before > 0;
                 for index in 0..builder.arena.len() {
                     let node = crate::NodeRef {
@@ -2778,6 +2781,21 @@ mod tests {
                     // reading their depth stays O(1).
                     if index >= stale_before {
                         assert_eq!(usize::from(builder.arena.get(node.id).depth), depth);
+                    }
+                }
+                // Open elements are stored exact too, and recognised as
+                // such, so reading them does not climb.
+                for entry in &builder.open_elements {
+                    let stored = builder.arena.get(entry.id).depth;
+                    let node = crate::NodeRef {
+                        arena: &builder.arena,
+                        id: entry.id,
+                    };
+                    assert_eq!(usize::from(stored), node.ancestors().count());
+                    if let Some(stale) = &builder.arena.stale_depths {
+                        if entry.id.index() < stale.before {
+                            assert!(stale.exact.binary_search(&entry.id.0).is_ok());
+                        }
                     }
                 }
             }

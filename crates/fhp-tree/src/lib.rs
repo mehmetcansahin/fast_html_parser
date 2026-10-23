@@ -433,12 +433,8 @@ impl<'a> NodeRef<'a> {
     /// The nesting depth: 0 for the document root.
     pub fn depth(&self) -> u16 {
         // Mid-parse (an early-stop predicate), depths of nodes that existed
-        // before an adoption agency move may await the one-pass fix-up in
-        // `finish`; count ancestors for those. Later nodes are always exact.
-        if self.id.index() < self.arena.stale_depths_before {
-            return u16::try_from(self.ancestors().count()).unwrap_or(u16::MAX);
-        }
-        self.arena.get(self.id).depth
+        // before an adoption agency move may await the fix-up in `finish`.
+        self.arena.exact_depth(self.id)
     }
 
     /// Whether this is a text node.

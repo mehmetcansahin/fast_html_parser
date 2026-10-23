@@ -104,11 +104,22 @@ pub struct Arena {
     /// order differ from document order, so document-ordered consumers must
     /// still traverse the tree links.
     pub(crate) tag_index: Option<Box<[Vec<NodeId>; TAG_INDEX_SIZE]>>,
-    /// Nodes allocated before this index may have stale [`Node::depth`]
-    /// values; 0 when every depth is exact. Tree construction defers the
-    /// depth fix-up after adoption agency moves to `TreeBuilder::finish`;
-    /// until then `NodeRef::depth` counts these nodes' ancestors.
-    pub(crate) stale_depths_before: usize,
+    /// Which stored [`Node::depth`] values may be stale, or `None` when
+    /// every depth is exact. Tree construction defers the depth fix-up after
+    /// adoption agency moves to `TreeBuilder::finish`; until then
+    /// `Arena::exact_depth` derives the depths of the nodes this covers.
+    pub(crate) stale_depths: Option<Box<StaleDepths>>,
+}
+
+/// The nodes whose stored depths an adoption agency move may have left stale.
+#[derive(Default)]
+pub(crate) struct StaleDepths {
+    /// Nodes allocated before this index may have stale depths.
+    pub(crate) before: usize,
+    /// Indices below `before` whose depths are exact anyway, sorted: the
+    /// elements open at the last depth-shifting move, which the builder kept
+    /// exact.
+    pub(crate) exact: Vec<u32>,
 }
 
 impl Arena {
@@ -122,7 +133,7 @@ impl Arena {
             source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
-            stale_depths_before: 0,
+            stale_depths: None,
         }
     }
 
@@ -136,7 +147,7 @@ impl Arena {
             source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
-            stale_depths_before: 0,
+            stale_depths: None,
         }
     }
 
@@ -767,9 +778,48 @@ impl Arena {
 
     /// Recompute stale depths below `root` in one pass, if any are stale.
     pub(crate) fn refresh_depths(&mut self, root: NodeId) {
-        if self.stale_depths_before > 0 {
+        if self.stale_depths.take().is_some() {
             self.recompute_descendant_depths(root);
-            self.stale_depths_before = 0;
+        }
+    }
+
+    /// Mark every node allocated so far as possibly stale, except `exact`,
+    /// whose depths the caller has just made exact.
+    pub(crate) fn mark_depths_stale_except(&mut self, exact: impl IntoIterator<Item = NodeId>) {
+        let before = self.nodes.len();
+        let stale = self.stale_depths.get_or_insert_with(Box::default);
+        stale.before = before;
+        stale.exact.clear();
+        stale.exact.extend(exact.into_iter().map(|node| node.0));
+        // Open elements are mostly allocated in stack order, so this is
+        // close to a linear pass.
+        stale.exact.sort_unstable();
+    }
+
+    /// The exact depth of `node`, even mid-parse while the stored depths of
+    /// older nodes may still await the fix-up in `TreeBuilder::finish`.
+    ///
+    /// Climbs only to the nearest ancestor-or-self whose stored depth is
+    /// known exact: any node created after the last depth-shifting move, or
+    /// one open during it. New nodes and open elements answer at once.
+    pub(crate) fn exact_depth(&self, node: NodeId) -> u16 {
+        let Some(stale) = &self.stale_depths else {
+            return self.nodes[node.index()].depth;
+        };
+        let mut current = node;
+        let mut steps = 0u16;
+        loop {
+            let index = current.index();
+            if index >= stale.before || stale.exact.binary_search(&current.0).is_ok() {
+                return self.nodes[index].depth.saturating_add(steps);
+            }
+            let parent = self.nodes[index].parent;
+            if parent.is_null() {
+                // A detached node: its depth is the number of ancestors.
+                return steps;
+            }
+            current = parent;
+            steps = steps.saturating_add(1);
         }
     }
 

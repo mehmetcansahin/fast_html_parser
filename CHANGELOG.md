@@ -140,7 +140,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   times parses in 17 ms instead of 240 ms, and under `EarlyStopParser` in
   50 ms instead of 275 ms. Mid-parse, `NodeRef::depth` stays exact: open
   elements, and so every node created after a move, keep exact depths, and
-  older nodes count their ancestors until `finish`.
+  an older node climbs only to its nearest ancestor known to be exact.
 
 ## [0.2.0] - 2026-10-14
 
