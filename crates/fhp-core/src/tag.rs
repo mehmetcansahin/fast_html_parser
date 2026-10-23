@@ -138,97 +138,152 @@ pub enum Tag {
     Unknown = 255,
 }
 
-/// The maximum byte-length of any known tag name (`"plaintext"` = 9).
-const MAX_KNOWN_TAG_LEN: usize = 9;
-
 /// Number of void element variants (discriminants `0..VOID_COUNT`).
 const VOID_COUNT: u8 = 14;
 
-/// Compile-time perfect-hash map from **lowercase** tag name to [`Tag`].
-static TAG_MAP: phf::Map<&'static [u8], Tag> = phf::phf_map! {
-    b"area"     => Tag::Area,
-    b"base"     => Tag::Base,
-    b"br"       => Tag::Br,
-    b"col"      => Tag::Col,
-    b"embed"    => Tag::Embed,
-    b"hr"       => Tag::Hr,
-    b"img"      => Tag::Img,
-    b"input"    => Tag::Input,
-    b"link"     => Tag::Link,
-    b"meta"     => Tag::Meta,
-    b"param"    => Tag::Param,
-    b"source"   => Tag::Source,
-    b"track"    => Tag::Track,
-    b"wbr"      => Tag::Wbr,
-    b"a"        => Tag::A,
-    b"abbr"     => Tag::Abbr,
-    b"article"  => Tag::Article,
-    b"aside"    => Tag::Aside,
-    b"b"        => Tag::B,
-    b"body"     => Tag::Body,
-    b"button"   => Tag::Button,
-    b"div"      => Tag::Div,
-    b"em"       => Tag::Em,
-    b"footer"   => Tag::Footer,
-    b"form"     => Tag::Form,
-    b"h1"       => Tag::H1,
-    b"h2"       => Tag::H2,
-    b"h3"       => Tag::H3,
-    b"h4"       => Tag::H4,
-    b"h5"       => Tag::H5,
-    b"h6"       => Tag::H6,
-    b"head"     => Tag::Head,
-    b"header"   => Tag::Header,
-    b"html"     => Tag::Html,
-    b"i"        => Tag::I,
-    b"iframe"   => Tag::Iframe,
-    b"li"       => Tag::Li,
-    b"main"     => Tag::Main,
-    b"nav"      => Tag::Nav,
-    b"ol"       => Tag::Ol,
-    b"p"        => Tag::P,
-    b"pre"      => Tag::Pre,
-    b"script"   => Tag::Script,
-    b"section"  => Tag::Section,
-    b"select"   => Tag::Select,
-    b"span"     => Tag::Span,
-    b"strong"   => Tag::Strong,
-    b"style"    => Tag::Style,
-    b"table"    => Tag::Table,
-    b"tbody"    => Tag::Tbody,
-    b"td"       => Tag::Td,
-    b"textarea" => Tag::Textarea,
-    b"th"       => Tag::Th,
-    b"thead"    => Tag::Thead,
-    b"title"    => Tag::Title,
-    b"tr"       => Tag::Tr,
-    b"ul"       => Tag::Ul,
-    b"video"    => Tag::Video,
-    b"xmp"      => Tag::Xmp,
-    b"noembed"  => Tag::Noembed,
-    b"noframes" => Tag::Noframes,
-    b"plaintext" => Tag::Plaintext,
-};
+/// Every known tag with its lowercase name, in discriminant order.
+const KNOWN_TAGS: [(&[u8], Tag); 62] = [
+    (b"area", Tag::Area),
+    (b"base", Tag::Base),
+    (b"br", Tag::Br),
+    (b"col", Tag::Col),
+    (b"embed", Tag::Embed),
+    (b"hr", Tag::Hr),
+    (b"img", Tag::Img),
+    (b"input", Tag::Input),
+    (b"link", Tag::Link),
+    (b"meta", Tag::Meta),
+    (b"param", Tag::Param),
+    (b"source", Tag::Source),
+    (b"track", Tag::Track),
+    (b"wbr", Tag::Wbr),
+    (b"a", Tag::A),
+    (b"abbr", Tag::Abbr),
+    (b"article", Tag::Article),
+    (b"aside", Tag::Aside),
+    (b"b", Tag::B),
+    (b"body", Tag::Body),
+    (b"button", Tag::Button),
+    (b"div", Tag::Div),
+    (b"em", Tag::Em),
+    (b"footer", Tag::Footer),
+    (b"form", Tag::Form),
+    (b"h1", Tag::H1),
+    (b"h2", Tag::H2),
+    (b"h3", Tag::H3),
+    (b"h4", Tag::H4),
+    (b"h5", Tag::H5),
+    (b"h6", Tag::H6),
+    (b"head", Tag::Head),
+    (b"header", Tag::Header),
+    (b"html", Tag::Html),
+    (b"i", Tag::I),
+    (b"iframe", Tag::Iframe),
+    (b"li", Tag::Li),
+    (b"main", Tag::Main),
+    (b"nav", Tag::Nav),
+    (b"ol", Tag::Ol),
+    (b"p", Tag::P),
+    (b"pre", Tag::Pre),
+    (b"script", Tag::Script),
+    (b"section", Tag::Section),
+    (b"select", Tag::Select),
+    (b"span", Tag::Span),
+    (b"strong", Tag::Strong),
+    (b"style", Tag::Style),
+    (b"table", Tag::Table),
+    (b"tbody", Tag::Tbody),
+    (b"td", Tag::Td),
+    (b"textarea", Tag::Textarea),
+    (b"th", Tag::Th),
+    (b"thead", Tag::Thead),
+    (b"title", Tag::Title),
+    (b"tr", Tag::Tr),
+    (b"ul", Tag::Ul),
+    (b"video", Tag::Video),
+    (b"xmp", Tag::Xmp),
+    (b"noembed", Tag::Noembed),
+    (b"noframes", Tag::Noframes),
+    (b"plaintext", Tag::Plaintext),
+];
+
+/// Multiplier of the multiply-shift hash that gives every known name of at
+/// most eight bytes its own [`TAG_TABLE`] slot. Building the table fails at
+/// compile time if a change to [`KNOWN_TAGS`] introduces a collision.
+const TAG_HASH_MULTIPLIER: u64 = 0x3e7a_1eea_9267_bafd;
+
+/// Known names of at most eight bytes, packed by [`pack_name`] and stored at
+/// their hash slot. `plaintext` is the only longer name and is matched
+/// directly.
+static TAG_TABLE: TagTable = TagTable::build();
+
+struct TagTable {
+    keys: [u64; 256],
+    tags: [Tag; 256],
+}
+
+impl TagTable {
+    const fn build() -> Self {
+        let mut keys = [0u64; 256];
+        let mut tags = [Tag::Unknown; 256];
+        let mut index = 0;
+        while index < KNOWN_TAGS.len() {
+            let (name, tag) = KNOWN_TAGS[index];
+            if name.len() <= 8 {
+                let key = pack_name(name);
+                let slot = tag_slot(key);
+                assert!(keys[slot] == 0, "tag name hash collision");
+                keys[slot] = key;
+                tags[slot] = tag;
+            }
+            index += 1;
+        }
+        Self { keys, tags }
+    }
+}
+
+/// Pack up to eight bytes into a little-endian `u64`.
+const fn pack_name(name: &[u8]) -> u64 {
+    let mut key = 0u64;
+    let mut index = 0;
+    while index < name.len() {
+        key |= (name[index] as u64) << (8 * index);
+        index += 1;
+    }
+    key
+}
+
+#[inline(always)]
+const fn tag_slot(key: u64) -> usize {
+    (key.wrapping_mul(TAG_HASH_MULTIPLIER) >> 56) as usize
+}
 
 impl Tag {
     /// Look up a tag by its raw byte name using a compile-time perfect hash.
     ///
-    /// Case-insensitive: the input is lowercased inline on a stack buffer
-    /// before the PHF lookup, avoiding any heap allocation.
+    /// Case-insensitive: the name is lowercased while it is packed into one
+    /// `u64`, which then selects a single table slot to compare against.
     #[inline]
     pub fn from_bytes(name: &[u8]) -> Tag {
-        if name.is_empty() || name.len() > MAX_KNOWN_TAG_LEN {
-            return Tag::Unknown;
+        match name.len() {
+            1..=8 => {
+                let mut key = 0u64;
+                for (index, &byte) in name.iter().enumerate() {
+                    key |= u64::from(byte.to_ascii_lowercase()) << (8 * index);
+                }
+                let slot = tag_slot(key);
+                // A name containing NUL packs like a shorter one; comparing the
+                // packed length with the input length rejects it.
+                let packed_len = (64 - TAG_TABLE.keys[slot].leading_zeros()).div_ceil(8);
+                if TAG_TABLE.keys[slot] == key && packed_len as usize == name.len() {
+                    TAG_TABLE.tags[slot]
+                } else {
+                    Tag::Unknown
+                }
+            }
+            9 if name.eq_ignore_ascii_case(b"plaintext") => Tag::Plaintext,
+            _ => Tag::Unknown,
         }
-
-        // Lowercase on the stack — MAX_KNOWN_TAG_LEN is 9 so this is tiny.
-        let mut buf = [0u8; MAX_KNOWN_TAG_LEN];
-        let lower = &mut buf[..name.len()];
-        for (dst, &src) in lower.iter_mut().zip(name) {
-            *dst = src.to_ascii_lowercase();
-        }
-
-        TAG_MAP.get(lower).copied().unwrap_or(Tag::Unknown)
     }
 
     /// Returns `true` if this is a void element (self-closing, no children).
@@ -362,6 +417,41 @@ mod tests {
         assert_eq!(Tag::from_bytes(b"DIV"), Tag::Div);
         assert_eq!(Tag::from_bytes(b"Div"), Tag::Div);
         assert_eq!(Tag::from_bytes(b"TEXTAREA"), Tag::Textarea);
+    }
+
+    #[test]
+    fn every_known_tag_round_trips_in_any_case() {
+        for (index, (name, tag)) in KNOWN_TAGS.iter().enumerate() {
+            assert_eq!(
+                *tag as usize, index,
+                "KNOWN_TAGS must be in discriminant order"
+            );
+            assert_eq!(tag.as_str().map(str::as_bytes), Some(*name));
+            assert_eq!(Tag::from_bytes(name), *tag);
+            assert_eq!(Tag::from_bytes(&name.to_ascii_uppercase()), *tag);
+        }
+        assert_eq!(KNOWN_TAGS.len(), Tag::Plaintext as usize + 1);
+    }
+
+    #[test]
+    fn near_misses_are_unknown() {
+        for name in [
+            &b"di"[..],
+            b"divv",
+            b"d\0v",
+            b"div\0",
+            b"\0",
+            b"a\0",
+            b"\0\0\0\0\0\0\0\0",
+            b"plaintex",
+            b"plaintexts",
+            b"plaintex\0",
+            b"textarea1",
+            b"h7",
+            b"\xC4\xB0mg",
+        ] {
+            assert_eq!(Tag::from_bytes(name), Tag::Unknown, "{name:?}");
+        }
     }
 
     #[test]
