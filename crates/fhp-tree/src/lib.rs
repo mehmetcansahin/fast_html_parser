@@ -46,6 +46,9 @@ pub mod streaming;
 /// [`VecDeque`]: std::collections::VecDeque
 pub mod traverse;
 
+#[cfg(feature = "encoding")]
+use std::borrow::Cow;
+
 use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
@@ -228,12 +231,56 @@ pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Doc
     // Valid UTF-8 decodes to itself: parse it in place rather than copying
     // it through the decoder and validating it a second time.
     if encoding == encoding_rs::UTF_8 {
-        if let Ok(text) = std::str::from_utf8(input) {
-            return parse_with_limit(text, effective_max);
-        }
+        return match decode_utf8_with_limit(input, effective_max)? {
+            Cow::Borrowed(text) => parse_with_limit(text, effective_max),
+            Cow::Owned(text) => parse_owned_with_limit(text, effective_max),
+        };
     }
     let text = decode_with_limit(encoding, input, effective_max)?;
     parse_owned_with_limit(text, effective_max)
+}
+
+/// Decode UTF-8 with the same output as `encoding_rs`, without its chunked
+/// copies: valid input is borrowed, and otherwise each maximal invalid
+/// subpart (the WHATWG and Unicode substitution practice that
+/// `Utf8Error::error_len` reports) becomes one U+FFFD. Fails once the
+/// decoded text would exceed `max` bytes.
+#[cfg(feature = "encoding")]
+fn decode_utf8_with_limit(input: &[u8], max: usize) -> Result<Cow<'_, str>, HtmlError> {
+    let mut error = match std::str::from_utf8(input) {
+        Ok(text) => return Ok(Cow::Borrowed(text)),
+        Err(error) => error,
+    };
+
+    let mut decoded = String::with_capacity(input.len().min(max));
+    let mut rest = input;
+    loop {
+        let (valid, rest_after_valid) = rest.split_at(error.valid_up_to());
+        let valid = std::str::from_utf8(valid).expect("`valid_up_to` ends a valid prefix");
+        // `None` means the input ends inside a sequence: one replacement.
+        let invalid_len = error.error_len().unwrap_or(rest_after_valid.len());
+        push_limited(&mut decoded, valid, max)?;
+        push_limited(&mut decoded, "\u{FFFD}", max)?;
+        rest = &rest_after_valid[invalid_len..];
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                push_limited(&mut decoded, text, max)?;
+                return Ok(Cow::Owned(decoded));
+            }
+            Err(next) => error = next,
+        }
+    }
+}
+
+/// Append `text` unless `decoded` would then exceed `max` bytes.
+#[cfg(feature = "encoding")]
+fn push_limited(decoded: &mut String, text: &str, max: usize) -> Result<(), HtmlError> {
+    let size = decoded.len().saturating_add(text.len());
+    if size > max {
+        return Err(HtmlError::InputTooLarge { size, max });
+    }
+    decoded.push_str(text);
+    Ok(())
 }
 
 /// Decode a complete byte input (without its BOM) without ever retaining more
@@ -1030,6 +1077,55 @@ mod tests {
             );
             assert_eq!(from_bytes.arena().len(), from_str.arena().len());
         }
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn utf8_decoding_matches_encoding_rs() {
+        fn check(input: &[u8]) {
+            let expected = encoding_rs::UTF_8.decode_without_bom_handling(input).0;
+            let decoded = decode_utf8_with_limit(input, usize::MAX).unwrap();
+            assert_eq!(decoded, expected, "{input:x?}");
+            assert_eq!(
+                matches!(decoded, Cow::Borrowed(_)),
+                std::str::from_utf8(input).is_ok()
+            );
+        }
+
+        // Boundaries of every UTF-8 byte class, in every arrangement of up
+        // to four bytes, plus every two-byte sequence.
+        const BYTES: [u8; 20] = [
+            0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF, 0xE0,
+            0xED, 0xEF, 0xF0, 0xF4, 0xF5, 0xFF,
+        ];
+        let mut input = Vec::new();
+        for len in 1..=4u32 {
+            for mut code in 0..BYTES.len().pow(len) {
+                input.clear();
+                for _ in 0..len {
+                    input.push(BYTES[code % BYTES.len()]);
+                    code /= BYTES.len();
+                }
+                check(&input);
+            }
+        }
+        for pair in 0..=u16::MAX {
+            check(&pair.to_be_bytes());
+        }
+        check("ok \u{1F600}".as_bytes());
+        check(b"\xF0\x9F\x98 truncated emoji");
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn utf8_decoding_respects_the_limit_after_replacement() {
+        // Each lone continuation byte expands to a 3-byte U+FFFD.
+        let input = [0x80; 4];
+        assert!(decode_utf8_with_limit(&input, 12).is_ok());
+        assert!(matches!(
+            decode_utf8_with_limit(&input, 11),
+            Err(HtmlError::InputTooLarge { size: 12, max: 11 })
+        ));
     }
 
     #[test]
