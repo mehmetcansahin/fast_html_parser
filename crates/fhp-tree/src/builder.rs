@@ -1492,9 +1492,10 @@ impl TreeBuilder {
         // Rewriting the moved subtree's depths would repeat for every later
         // misnested end tag that moves it again, up to once per open element.
         // Instead, when the move shifts them (or earlier depths are already
-        // stale), mark every existing node as possibly stale: `NodeRef::depth`
-        // counts their ancestors until `finish` recomputes all depths in one
-        // pass.
+        // stale), mark every existing node except the open elements as
+        // possibly stale: `NodeRef::depth` climbs from such a node to its
+        // nearest ancestor known exact (see `Arena::exact_depth`) until
+        // `finish` recomputes all depths in one pass.
         let moved = self.arena.get(replacement).first_child;
         let moved_depth = self.arena.get(replacement).depth.saturating_add(1);
         let shifted = !moved.is_null()
