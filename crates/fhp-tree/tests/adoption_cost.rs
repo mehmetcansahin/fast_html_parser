@@ -3,6 +3,7 @@
 //! only a small constant factor over the same page without them; rewriting
 //! the moved subtree's depths on every move made it ~15x slower.
 
+use std::sync::{Mutex, PoisonError};
 use std::time::Instant;
 
 use fhp_tree::node::NodeId;
@@ -40,23 +41,31 @@ fn content_after_a_move(end_tag: &str) -> String {
     html
 }
 
-fn median_ms(mut run: impl FnMut()) -> f64 {
-    let mut samples: Vec<f64> = (0..5)
-        .map(|_| {
-            let start = Instant::now();
-            run();
-            start.elapsed().as_secs_f64() * 1e3
-        })
-        .collect();
-    samples.sort_by(f64::total_cmp);
-    samples[samples.len() / 2]
+/// Serializes the timed sections: the test harness runs this file's tests
+/// on parallel threads, and one test's work would slow the other's timing.
+static TIMING: Mutex<()> = Mutex::new(());
+
+/// Timed rounds per page.
+const ROUNDS: usize = 7;
+
+fn time_ms(run: impl FnOnce()) -> f64 {
+    let start = Instant::now();
+    run();
+    start.elapsed().as_secs_f64() * 1e3
 }
 
+/// Time `run` on the control and the misnested page in alternation and
+/// compare the fastest run of each: alternating spreads any drift over both
+/// pages, and unrelated load can only slow a run down, never speed it up.
 fn assert_constant_factor(what: &str, page: fn(&str) -> String, mut run: impl FnMut(&str)) {
     let control = page("</q>");
     let misnested = page("</b>");
-    let control_ms = median_ms(|| run(&control));
-    let misnested_ms = median_ms(|| run(&misnested));
+    let _serial = TIMING.lock().unwrap_or_else(PoisonError::into_inner);
+    let (mut control_ms, mut misnested_ms) = (f64::INFINITY, f64::INFINITY);
+    for _ in 0..ROUNDS {
+        control_ms = control_ms.min(time_ms(|| run(&control)));
+        misnested_ms = misnested_ms.min(time_ms(|| run(&misnested)));
+    }
     let ratio = misnested_ms / control_ms;
     assert!(
         ratio < MAX_RATIO,
