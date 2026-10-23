@@ -30,6 +30,34 @@ fn selector_lists_return_matches_in_document_order() {
     );
 }
 
+#[test]
+fn chained_descendant_selectors_see_ancestors_above_the_roots() {
+    // Selection pre-filters descendant selectors on the ancestors' tags,
+    // classes, and ids; for chained roots those include the roots' own
+    // ancestors, outside the searched subtrees.
+    let doc = parse(
+        "<div id='outer' class='wrap'><section><p>in</p></section></div>\
+         <section><p>out</p></section>",
+    )
+    .unwrap();
+    let sections = doc.select("section").unwrap();
+    assert_eq!(sections.len(), 2);
+
+    for css in [
+        "div p",
+        "#outer p",
+        ".wrap p",
+        "div > section p",
+        "div section > p",
+    ] {
+        let selection = sections.select(css).unwrap();
+        assert_eq!(selection.text(), "in", "{css}");
+    }
+    for css in ["span p", "#other p", ".other p", "div > p"] {
+        assert!(sections.select(css).unwrap().is_empty(), "{css}");
+    }
+}
+
 #[cfg(feature = "xpath")]
 #[test]
 fn xpath_descendant_position_is_relative_to_each_parent() {
