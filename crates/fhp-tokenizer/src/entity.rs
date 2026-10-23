@@ -11,6 +11,7 @@ enum EntityContext {
     Attribute,
 }
 
+#[derive(Debug, PartialEq)]
 enum Replacement {
     Named(&'static str),
     Numeric(char),
@@ -47,13 +48,46 @@ pub fn decode_attribute_entities(input: &str) -> Cow<'_, str> {
     decode_entities_in(input, EntityContext::Attribute)
 }
 
+/// Decode HTML character references in text content into a caller-owned
+/// buffer, so repeated calls can reuse one allocation.
+///
+/// If any reference in `input` decodes, the decoded text is appended to
+/// `output` and `true` is returned. Otherwise `output` is left unchanged and
+/// `false` is returned: `input` is then its own decoded form, exactly as
+/// [`decode_entities`] would return it borrowed.
+#[inline]
+pub fn decode_entities_into(input: &str, output: &mut String) -> bool {
+    append_if_decoded(input, EntityContext::Text, output)
+}
+
+/// Decode HTML character references in an attribute value into a
+/// caller-owned buffer, with the semantics of [`decode_attribute_entities`]
+/// and the return convention of [`decode_entities_into`].
+#[inline]
+pub fn decode_attribute_entities_into(input: &str, output: &mut String) -> bool {
+    append_if_decoded(input, EntityContext::Attribute, output)
+}
+
 fn decode_entities_in(input: &str, context: EntityContext) -> Cow<'_, str> {
+    // `String::new` does not allocate; the buffer is sized on the first
+    // decoded reference.
+    let mut output = String::new();
+    if append_if_decoded(input, context, &mut output) {
+        Cow::Owned(output)
+    } else {
+        Cow::Borrowed(input)
+    }
+}
+
+/// Append the decoded form of `input` to `output` when at least one reference
+/// decodes, and report whether one did. `output` is untouched otherwise.
+fn append_if_decoded(input: &str, context: EntityContext, output: &mut String) -> bool {
     let bytes = input.as_bytes();
     let Some(mut amp) = memchr(b'&', bytes) else {
-        return Cow::Borrowed(input);
+        return false;
     };
 
-    let mut output = None;
+    let mut decoded_any = false;
     let mut copied_until = 0usize;
 
     loop {
@@ -66,7 +100,10 @@ fn decode_entities_in(input: &str, context: EntityContext) -> Cow<'_, str> {
             continue;
         };
 
-        let output = output.get_or_insert_with(|| String::with_capacity(input.len()));
+        if !decoded_any {
+            output.reserve(input.len());
+            decoded_any = true;
+        }
         output.push_str(&input[copied_until..amp]);
         replacement.push_into(output);
         copied_until = amp + 1 + consumed;
@@ -77,17 +114,25 @@ fn decode_entities_in(input: &str, context: EntityContext) -> Cow<'_, str> {
         amp = copied_until + relative_amp;
     }
 
-    let Some(mut output) = output else {
-        return Cow::Borrowed(input);
-    };
-
-    output.push_str(&input[copied_until..]);
-    Cow::Owned(output)
+    if decoded_any {
+        output.push_str(&input[copied_until..]);
+    }
+    decoded_any
 }
 
 /// Decode the reference whose body begins at `start` (immediately after `&`).
 /// Returns the replacement and bytes consumed after the ampersand.
 fn decode_reference(
+    input: &str,
+    start: usize,
+    context: EntityContext,
+) -> Option<(Replacement, usize)> {
+    common_reference(&input.as_bytes()[start..])
+        .or_else(|| decode_any_reference(input, start, context))
+}
+
+/// The general matcher behind [`decode_reference`]'s common-name fast path.
+fn decode_any_reference(
     input: &str,
     start: usize,
     context: EntityContext,
@@ -121,6 +166,25 @@ fn decode_reference(
         Replacement::Named(matched.value),
         matched.name_len + usize::from(has_semicolon),
     ))
+}
+
+/// Match the semicolon-terminated references that dominate real-world HTML
+/// without walking the general matcher. `body` starts after the `&`.
+///
+/// Each spelling ends in `;`, which stops the general name scan, so the
+/// result is identical to the slow path in both text and attribute context.
+#[inline]
+fn common_reference(body: &[u8]) -> Option<(Replacement, usize)> {
+    match body {
+        [b'a', b'm', b'p', b';', ..] => Some((Replacement::Named("&"), 4)),
+        [b'l', b't', b';', ..] => Some((Replacement::Named("<"), 3)),
+        [b'g', b't', b';', ..] => Some((Replacement::Named(">"), 3)),
+        [b'q', b'u', b'o', b't', b';', ..] => Some((Replacement::Named("\""), 5)),
+        [b'n', b'b', b's', b'p', b';', ..] => Some((Replacement::Named("\u{00A0}"), 5)),
+        [b'a', b'p', b'o', b's', b';', ..] => Some((Replacement::Named("'"), 5)),
+        [b'#', b'3', b'9', b';', ..] => Some((Replacement::Numeric('\''), 4)),
+        _ => None,
+    }
 }
 
 fn decode_numeric_reference(input: &str, start: usize) -> Option<(Replacement, usize)> {
@@ -206,6 +270,58 @@ mod tests {
         assert_eq!(decode_entities("&&&&"), "&&&&");
         assert_eq!(decode_entities("&unknown;"), "&unknown;");
         assert_eq!(decode_entities("&#; &#x;"), "&#; &#x;");
+    }
+
+    #[test]
+    fn common_references_match_the_general_matcher() {
+        for body in ["amp;", "lt;", "gt;", "quot;", "nbsp;", "apos;", "#39;"] {
+            for suffix in ["", "x", "=", ";", " ", "&amp;"] {
+                let input = format!("&{body}{suffix}");
+                let fast = common_reference(&input.as_bytes()[1..]);
+                assert!(fast.is_some(), "{input}");
+                for context in [EntityContext::Text, EntityContext::Attribute] {
+                    assert_eq!(fast, decode_any_reference(&input, 1, context), "{input}");
+                }
+            }
+        }
+        for body in ["amp", "lt", "ampx;", "#39", "#390;", "quo;", ""] {
+            assert_eq!(common_reference(body.as_bytes()), None, "{body}");
+        }
+    }
+
+    #[test]
+    fn decoding_into_a_buffer_matches_the_cow_api() {
+        let inputs = [
+            "",
+            "plain",
+            "a & b",
+            "&&&&",
+            "&unknown;",
+            "x &amp; y &lt;z&gt;",
+            "&copy=test &notin &#60div",
+            "&CounterClockwiseContourIntegral; tail",
+        ];
+        for input in inputs {
+            let mut output = String::from("prefix:");
+            let decoded = decode_entities_into(input, &mut output);
+            match decode_entities(input) {
+                Cow::Borrowed(_) => assert!(!decoded && output == "prefix:", "{input}"),
+                Cow::Owned(expected) => {
+                    assert!(decoded, "{input}");
+                    assert_eq!(output, format!("prefix:{expected}"));
+                }
+            }
+
+            let mut output = String::from("prefix:");
+            let decoded = decode_attribute_entities_into(input, &mut output);
+            match decode_attribute_entities(input) {
+                Cow::Borrowed(_) => assert!(!decoded && output == "prefix:", "{input}"),
+                Cow::Owned(expected) => {
+                    assert!(decoded, "{input}");
+                    assert_eq!(output, format!("prefix:{expected}"));
+                }
+            }
+        }
     }
 
     #[test]

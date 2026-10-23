@@ -14,6 +14,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical token stream matches fhp-tokenizer's; lol_html and tl rows are
   labelled as less work or non-spec references. See
   [benchmarks/README.md](benchmarks/README.md#tokenizer-comparison).
+- `fhp_encoding::decode_cow`, which decodes like `decode` but borrows input
+  that is already valid UTF-8 instead of copying it.
+- `fhp_encoding::bom_length` and `fhp_encoding::PRESCAN_LIMIT`. fhp-tree now
+  uses them instead of its own BOM tables and prescan window size.
+- `fhp_tokenizer::entity::decode_entities_into` and
+  `decode_attribute_entities_into`, which decode into a caller-owned
+  `String` so repeated calls can reuse one allocation. They append only when
+  a reference decodes and report whether one did, so undecoded input can
+  stay borrowed exactly as with the `Cow` functions.
+
+### Changed
+
+- Documents with more than 512 open elements parse instead of failing with
+  `ParseError::NestingTooDeep`. A start tag past the limit inserts an empty
+  element, and the content after it goes to the innermost open element, so
+  the tree stays at most 513 levels deep. `TreeBuilder::process` and
+  `TreeBuilder::finish` no longer return errors.
+
+### Deprecated
+
+- `fhp_selector::bloom::AncestorBloom`, `build_ancestor_blooms`, `hash_tag`,
+  and `hash_str`. Selection no longer builds a per-node bloom table; it
+  filters ancestors with the tag, class, and id hashes the arena already
+  stores.
+
+### Fixed
+
+- `DecodingReader` decodes with the encoding it is given, like `decode`: a
+  BOM for a different encoding is decoded as content instead of switching
+  the decoder to UTF-8 or UTF-16.
+- `DecodingReader::read` with an empty buffer returns 0 without reading from
+  its source.
+- The `<meta>` encoding prescan follows the HTML algorithm in four more cases:
+  - A `charset` attribute that is empty or not an encoding label makes its
+    element declare nothing; it no longer falls back to that element's
+    `http-equiv` `content`.
+  - In `content`, the first `charset=` decides even when its value is not a
+    label.
+  - `charset` in `content` no longer needs whitespace or `;` before it.
+  - A tag name runs to the first whitespace or `>`, so a quote after a `/`
+    in it (`<a/b='>`) no longer hides a later `<meta>`.
+- The `detect` documentation states that the first declaring `<meta>`
+  element wins; the `charset` attribute takes precedence only within one
+  element.
+- CSS selectors accept non-ASCII names and CSS escapes (`#ürün`, `.café`,
+  `.md\:flex`, `#\31 23`), and quoted attribute values decode escapes such
+  as `\"`. Pseudo-class names are now ASCII case-insensitive
+  (`:First-Child`).
+- Only CSS whitespace around a selector is ignored: an escaped trailing
+  space or tab (`.a\ `) and characters such as U+00A0 belong to the
+  selector. XPath expressions are likewise trimmed of ASCII whitespace only.
+- `:nth-child` matches in trees built with `Arena::append_child`, which now
+  records each element's sibling index the way the parser does.
+- `find_by_attr(name, "")` matches valueless attributes such as `disabled`,
+  like `[disabled='']` and XPath `@disabled=''`.
+- Selector and XPath error messages show the offending character instead of
+  its first UTF-8 byte, and report byte offsets into the untrimmed input.
+- Misnested formatting end tags and nested `<a>` start tags follow the HTML
+  adoption agency: a block such as `div` or `p` inside the formatting element
+  moves out of it instead of being closed. `<a><div>t<a>x</a><p>d</p></div>`
+  keeps `x` and `d` inside the `div`.
+- Reopened formatting elements follow the HTML "Noah's Ark" limit of three
+  identical elements, so one misnested end tag can no longer clone every open
+  formatting element. Clones share the original's tag name and attributes
+  instead of copying them.
+- `</body>` and `</html>` no longer close anything. Content after them stays
+  in the body; only comments move to the `html` element or the document.
+- Block starts without a compact `Tag`, such as `blockquote`, `dl`, `figure`,
+  `fieldset`, `details`, and `address`, close an open `<p>`.
+- `object`, `applet`, `marquee`, and `template` bound scope checks, so end
+  tags and implied `<p>` closes no longer reach through them.
+- The newline dropped after a `<pre>`, `<textarea>`, or `<listing>` start tag
+  may be `\r\n` or `\r`, including a CRLF split across stream chunks.
+- Serializing a `<pre>`, `<textarea>`, or `<listing>` whose content starts
+  with a newline writes one extra newline, so the content survives a parse.
+- `EarlyStopParser` passes implied `tbody`, `tr`, and `colgroup` elements to
+  its predicate.
+- `Arena::text` returns `""` for elements instead of a custom element's tag
+  name.
 
 ### Performance
 
@@ -29,6 +108,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `StreamTokenizer::feed` is a further 8–17% faster on the repository
   fixtures: attribute names spelled exactly like one of 35 common names are
   returned as static strings instead of allocated. Tokens are unchanged.
+- `DecodingReader` decodes straight into the caller's buffer instead of
+  through an internal 32 KiB buffer and a second copy, and allocates 8 KiB
+  per reader instead of 40 KiB.
+- `EarlyStopParser` decodes into one reused buffer instead of allocating a
+  string for every `>`-delimited input segment.
+- Parsing is 12–19% faster and tokenizing 25–47% faster on the repository
+  fixtures (Ryzen 7800X3D, fat LTO, mimalloc to suppress allocator noise):
+  - `Tag::from_bytes` packs names of up to eight bytes into one `u64` and
+    looks them up in a compile-time multiply-shift table instead of the
+    SipHash-based `phf` map.
+  - `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&nbsp;`, `&apos;` and `&#39;` skip
+    the general reference matcher; decoding them is about 2.3x faster.
+  - The tree builder decodes text and attribute values into reused buffers
+    and reuses its table-whitespace buffer, instead of allocating a `String`
+    per decoded token or whitespace run.
+- `Arena::text`, `attr_name`, `attr_value` and `unknown_tag_name` check
+  their range in O(1) instead of re-validating UTF-8 on every call; the
+  arena's slabs are now `String`s. `text_content` is 23–42% faster and
+  attribute access 59–69% faster.
+- Selectors with a descendant combinator are 55–87% faster: selection
+  carries a filter of the ancestors' tags, classes and ids down its
+  depth-first walk instead of building a 256-bit bloom filter for every
+  node on each query. `#id` selectors are 55–73% faster because the cached
+  id hash now rejects a node without scanning its attributes.
+- `parse_bytes` parses valid UTF-8 in place instead of copying it through
+  the decoder, halving or better its overhead over `parse`.
+- Misnested formatting end tags no longer rewrite the depths of the moved
+  subtree on every adoption agency move; `TreeBuilder::finish` recomputes
+  depths once instead. A crafted 1.6 MB input that repeats such moves 250
+  times parses in 17 ms instead of 240 ms, and under `EarlyStopParser` in
+  50 ms instead of 275 ms. Mid-parse, `NodeRef::depth` stays exact: open
+  elements, and so every node created after a move, keep exact depths, and
+  an older node climbs only to its nearest ancestor known to be exact.
 
 ## [0.2.0] - 2026-10-14
 

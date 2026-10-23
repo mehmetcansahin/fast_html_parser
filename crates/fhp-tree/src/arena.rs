@@ -30,6 +30,22 @@ pub struct Attribute {
 /// Number of tag index buckets (Tag is `repr(u8)`, 256 possible values).
 const TAG_INDEX_SIZE: usize = 256;
 
+/// NUL bytes for pending-copy placeholders. Every byte is a whole character,
+/// so the placeholder can later be replaced at any byte offset.
+const NULS: &str = match std::str::from_utf8(&[0; 256]) {
+    Ok(nuls) => nuls,
+    Err(_) => panic!("NUL bytes are valid UTF-8"),
+};
+
+/// Append `len` NUL bytes in blocks rather than one character at a time.
+fn push_nul_placeholder(text: &mut String, mut len: usize) {
+    while len > 0 {
+        let block = len.min(NULS.len());
+        text.push_str(&NULS[..block]);
+        len -= block;
+    }
+}
+
 struct PendingSourceCopy {
     source_offset: usize,
     text_offset: usize,
@@ -67,17 +83,17 @@ pub struct Arena {
     /// All nodes in insertion order.
     pub(crate) nodes: Vec<Node>,
     /// All text content concatenated (for entity-decoded or owned text).
-    pub(crate) text_slab: Vec<u8>,
+    pub(crate) text_slab: String,
     /// All attributes in insertion order.
     pub(crate) attr_slab: Vec<Attribute>,
-    /// All attribute name and value bytes concatenated.
-    pub(crate) attr_str_slab: Vec<u8>,
+    /// All attribute names and values concatenated.
+    pub(crate) attr_str_slab: String,
     /// Owned copy of the original input source.
     ///
     /// Text nodes that reference entity-free (borrowed) regions of the input
     /// store offsets into this buffer via [`NodeFlags::IS_TEXT_FROM_SOURCE`].
     /// Empty for streaming parsers.
-    pub(crate) source: Vec<u8>,
+    pub(crate) source: String,
     /// Source ranges promoted into the text slab before an owned source is
     /// transferred to the arena.
     pending_source_copies: Vec<PendingSourceCopy>,
@@ -88,6 +104,22 @@ pub struct Arena {
     /// order differ from document order, so document-ordered consumers must
     /// still traverse the tree links.
     pub(crate) tag_index: Option<Box<[Vec<NodeId>; TAG_INDEX_SIZE]>>,
+    /// Which stored [`Node::depth`] values may be stale, or `None` when
+    /// every depth is exact. Tree construction defers the depth fix-up after
+    /// adoption agency moves to `TreeBuilder::finish`; until then
+    /// `Arena::exact_depth` derives the depths of the nodes this covers.
+    pub(crate) stale_depths: Option<Box<StaleDepths>>,
+}
+
+/// The nodes whose stored depths an adoption agency move may have left stale.
+#[derive(Default)]
+pub(crate) struct StaleDepths {
+    /// Nodes allocated before this index may have stale depths.
+    pub(crate) before: usize,
+    /// Indices below `before` whose depths are exact anyway, sorted: the
+    /// elements open at the last depth-shifting move, which the builder kept
+    /// exact.
+    pub(crate) exact: Vec<u32>,
 }
 
 impl Arena {
@@ -95,12 +127,13 @@ impl Arena {
     pub fn new() -> Self {
         Self {
             nodes: Vec::new(),
-            text_slab: Vec::new(),
+            text_slab: String::new(),
             attr_slab: Vec::new(),
-            attr_str_slab: Vec::new(),
-            source: Vec::new(),
+            attr_str_slab: String::new(),
+            source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
+            stale_depths: None,
         }
     }
 
@@ -108,12 +141,13 @@ impl Arena {
     pub fn with_capacity(node_cap: usize, text_cap: usize, attr_cap: usize) -> Self {
         Self {
             nodes: Vec::with_capacity(node_cap),
-            text_slab: Vec::with_capacity(text_cap),
+            text_slab: String::with_capacity(text_cap),
             attr_slab: Vec::with_capacity(attr_cap),
-            attr_str_slab: Vec::with_capacity(attr_cap * 32),
-            source: Vec::new(),
+            attr_str_slab: String::with_capacity(attr_cap * 32),
+            source: String::new(),
             pending_source_copies: Vec::new(),
             tag_index: None,
+            stale_depths: None,
         }
     }
 
@@ -155,7 +189,7 @@ impl Arena {
         }
         let offset = self.text_slab.len() as u32;
         let len = tag_name.len() as u32;
-        self.text_slab.extend_from_slice(tag_name.as_bytes());
+        self.text_slab.push_str(tag_name);
         let n = &mut self.nodes[node.index()];
         n.text_offset = offset;
         n.text_len = len;
@@ -165,7 +199,7 @@ impl Arena {
     pub fn new_text(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
         let len = text.len() as u32;
-        self.text_slab.extend_from_slice(text.as_bytes());
+        self.text_slab.push_str(text);
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node::new_text(depth, offset, len));
         id
@@ -187,7 +221,7 @@ impl Arena {
 
     /// Store an owned copy of the input source for source-backed text nodes.
     pub fn set_source(&mut self, input: &str) {
-        self.source = input.as_bytes().to_vec();
+        self.source = input.to_owned();
         self.resolve_pending_source_copies();
     }
 
@@ -196,7 +230,7 @@ impl Arena {
     /// When the caller owns the input `String` (e.g., from an HTTP response),
     /// this avoids the memcpy that [`set_source`](Arena::set_source) performs.
     pub fn set_source_owned(&mut self, source: String) {
-        self.source = source.into_bytes();
+        self.source = source;
         self.resolve_pending_source_copies();
     }
 
@@ -211,13 +245,14 @@ impl Arena {
     ) -> Option<u32> {
         let source_end = source_offset.checked_add(source_len)?;
         let new_offset = self.text_slab.len();
-        let promoted_end = new_offset.checked_add(source_len)?;
+        // Reject a promoted range whose end would overflow.
+        new_offset.checked_add(source_len)?;
         let new_offset_u32 = u32::try_from(new_offset).ok()?;
         self.text_slab
             .reserve(source_len.checked_add(content.len())?);
 
         if self.source.is_empty() {
-            self.text_slab.resize(promoted_end, 0);
+            push_nul_placeholder(&mut self.text_slab, source_len);
             self.pending_source_copies.push(PendingSourceCopy {
                 source_offset,
                 text_offset: new_offset,
@@ -225,9 +260,9 @@ impl Arena {
             });
         } else {
             let source_text = self.source.get(source_offset..source_end)?;
-            self.text_slab.extend_from_slice(source_text);
+            self.text_slab.push_str(source_text);
         }
-        self.text_slab.extend_from_slice(content.as_bytes());
+        self.text_slab.push_str(content);
         Some(new_offset_u32)
     }
 
@@ -245,11 +280,14 @@ impl Arena {
                 .source
                 .get(pending.source_offset..source_end)
                 .expect("owned source does not contain a pending text range");
-            let target = self
-                .text_slab
-                .get_mut(pending.text_offset..text_end)
-                .expect("text slab does not contain a pending source range");
-            target.copy_from_slice(source);
+            assert!(
+                text_end <= self.text_slab.len(),
+                "text slab does not contain a pending source range"
+            );
+            // The placeholder is NUL bytes, so the range is on character
+            // boundaries and the replacement keeps the slab length.
+            self.text_slab
+                .replace_range(pending.text_offset..text_end, source);
         }
     }
 
@@ -257,7 +295,7 @@ impl Arena {
     pub fn new_comment(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
         let len = text.len() as u32;
-        self.text_slab.extend_from_slice(text.as_bytes());
+        self.text_slab.push_str(text);
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node::new_comment(depth, offset, len));
         id
@@ -267,7 +305,7 @@ impl Arena {
     pub fn new_doctype(&mut self, depth: u16, text: &str) -> NodeId {
         let offset = self.text_slab.len() as u32;
         let len = text.len() as u32;
-        self.text_slab.extend_from_slice(text.as_bytes());
+        self.text_slab.push_str(text);
         let id = NodeId(self.nodes.len() as u32);
         self.nodes.push(Node::new_doctype(depth, offset, len));
         id
@@ -296,13 +334,13 @@ impl Arena {
                 continue;
             }
             let name_offset = self.attr_str_slab.len() as u32;
-            self.attr_str_slab.extend_from_slice(name);
+            self.attr_str_slab.push_str(&attr.name);
             let name_len = attr.name.len() as u32;
 
             let (value_offset, value_len, has_value) = if let Some(v) = &attr.value {
                 update_selector_hashes(name, Some(v.as_bytes()), &mut class_hash, &mut id_hash);
                 let vo = self.attr_str_slab.len() as u32;
-                self.attr_str_slab.extend_from_slice(v.as_bytes());
+                self.attr_str_slab.push_str(v);
                 (vo, v.len() as u32, true)
             } else {
                 (0, 0, false)
@@ -366,7 +404,7 @@ impl Arena {
                 continue;
             }
             let name_offset = self.attr_str_slab.len() as u32;
-            self.attr_str_slab.extend_from_slice(name);
+            self.attr_str_slab.push_str(attr.name);
 
             let (value_offset, value_len, has_value) = match attr.value {
                 Some(raw_value) => {
@@ -374,7 +412,10 @@ impl Arena {
                     let value_start = value_offset as usize;
                     update_selector_hashes(
                         name,
-                        Some(&self.attr_str_slab[value_start..value_start + value_len as usize]),
+                        Some(
+                            &self.attr_str_slab.as_bytes()
+                                [value_start..value_start + value_len as usize],
+                        ),
                         &mut class_hash,
                         &mut id_hash,
                     );
@@ -406,17 +447,21 @@ impl Arena {
     /// Write an attribute value to the string slab, with optional entity decoding.
     #[cfg(feature = "entity-decode")]
     fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
-        let offset = self.attr_str_slab.len() as u32;
-        let decoded = fhp_tokenizer::entity::decode_attribute_entities(raw_value);
-        self.attr_str_slab.extend_from_slice(decoded.as_bytes());
-        (offset, decoded.len() as u32)
+        let offset = self.attr_str_slab.len();
+        if !fhp_tokenizer::entity::decode_attribute_entities_into(
+            raw_value,
+            &mut self.attr_str_slab,
+        ) {
+            self.attr_str_slab.push_str(raw_value);
+        }
+        (offset as u32, (self.attr_str_slab.len() - offset) as u32)
     }
 
     /// Write an attribute value to the string slab (no entity decoding).
     #[cfg(not(feature = "entity-decode"))]
     fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
         let offset = self.attr_str_slab.len() as u32;
-        self.attr_str_slab.extend_from_slice(raw_value.as_bytes());
+        self.attr_str_slab.push_str(raw_value);
         (offset, raw_value.len() as u32)
     }
 
@@ -453,7 +498,9 @@ impl Arena {
     /// Append `child` as the last child of `parent`.
     ///
     /// Updates all tree links: parent, first_child, last_child, prev_sibling,
-    /// next_sibling.
+    /// next_sibling. An element child also gets its 1-based index among its
+    /// element siblings ([`Node::element_index`]), which `:nth-child`
+    /// selectors read.
     ///
     /// `child` must be a freshly allocated, not-yet-linked node, distinct from
     /// `parent` (and therefore from `parent`'s current last child).
@@ -530,6 +577,21 @@ impl Arena {
         }
         self.nodes[parent_index].last_child = child;
         self.nodes[parent_index].flags.set(NodeFlags::HAS_CHILDREN);
+
+        // The tree builder maintains this index itself; trees built through
+        // this API need it too.
+        if self.is_element(child) {
+            let mut previous = last;
+            while !previous.is_null() && !self.is_element(previous) {
+                previous = self.nodes[previous.index()].prev_sibling;
+            }
+            let index = if previous.is_null() {
+                1
+            } else {
+                self.full_element_index(previous).saturating_add(1)
+            };
+            self.set_full_element_index(child, index);
+        }
     }
 
     /// Append a node that was freshly allocated by this arena.
@@ -540,6 +602,16 @@ impl Arena {
     /// checks without charging release parsers for them.
     #[inline]
     pub(crate) fn append_child_trusted(&mut self, parent: NodeId, child: NodeId) {
+        debug_assert!(self.nodes[child.index()].first_child.is_null());
+        debug_assert!(self.nodes[child.index()].last_child.is_null());
+        self.append_subtree(parent, child);
+    }
+
+    /// Append a detached node, together with any subtree it owns, as the last
+    /// child of `parent`. Depths and element sibling indices are left to the
+    /// caller.
+    #[inline]
+    pub(crate) fn append_subtree(&mut self, parent: NodeId, child: NodeId) {
         let parent_index = parent.index();
         let child_index = child.index();
         debug_assert!(parent_index < self.nodes.len());
@@ -550,8 +622,6 @@ impl Arena {
         debug_assert!(child_node.parent.is_null());
         debug_assert!(child_node.prev_sibling.is_null());
         debug_assert!(child_node.next_sibling.is_null());
-        debug_assert!(child_node.first_child.is_null());
-        debug_assert!(child_node.last_child.is_null());
 
         let last = self.nodes[parent_index].last_child;
         debug_assert_eq!(
@@ -577,6 +647,23 @@ impl Arena {
     ///
     /// This is used by the tree builder's table foster-parenting recovery.
     pub(crate) fn insert_before(&mut self, parent: NodeId, reference: NodeId, child: NodeId) {
+        let child_node = &self.nodes[child.index()];
+        assert!(
+            child_node.first_child.is_null() && child_node.last_child.is_null(),
+            "insert_before: child is already linked"
+        );
+        self.insert_subtree_before(parent, reference, child);
+    }
+
+    /// Insert a detached node, together with any subtree it owns, immediately
+    /// before an existing child. Depths and element sibling indices are left
+    /// to the caller.
+    pub(crate) fn insert_subtree_before(
+        &mut self,
+        parent: NodeId,
+        reference: NodeId,
+        child: NodeId,
+    ) {
         let parent_index = parent.index();
         let reference_index = reference.index();
         let child_index = child.index();
@@ -589,9 +676,7 @@ impl Arena {
         assert!(
             child_node.parent.is_null()
                 && child_node.prev_sibling.is_null()
-                && child_node.next_sibling.is_null()
-                && child_node.first_child.is_null()
-                && child_node.last_child.is_null(),
+                && child_node.next_sibling.is_null(),
             "insert_before: child is already linked"
         );
 
@@ -625,51 +710,182 @@ impl Arena {
         count
     }
 
-    /// Clone an element without children for the adoption-agency reopen path.
+    /// Unlink `node`, together with its subtree, from its parent and
+    /// siblings. Later element siblings move up one element index.
+    pub(crate) fn detach(&mut self, node: NodeId) {
+        let target = &self.nodes[node.index()];
+        let (parent, previous, next) = (target.parent, target.prev_sibling, target.next_sibling);
+        if parent.is_null() {
+            return;
+        }
+
+        if previous.is_null() {
+            self.nodes[parent.index()].first_child = next;
+        } else {
+            self.nodes[previous.index()].next_sibling = next;
+        }
+        if next.is_null() {
+            self.nodes[parent.index()].last_child = previous;
+        } else {
+            self.nodes[next.index()].prev_sibling = previous;
+        }
+        if self.nodes[parent.index()].first_child.is_null() {
+            self.nodes[parent.index()]
+                .flags
+                .clear(NodeFlags::HAS_CHILDREN);
+        }
+        let target = &mut self.nodes[node.index()];
+        target.parent = NodeId::NULL;
+        target.prev_sibling = NodeId::NULL;
+        target.next_sibling = NodeId::NULL;
+
+        if self.is_element(node) {
+            let mut sibling = next;
+            while !sibling.is_null() {
+                if self.is_element(sibling) {
+                    let index = self.full_element_index(sibling).saturating_sub(1);
+                    self.set_full_element_index(sibling, index);
+                }
+                sibling = self.nodes[sibling.index()].next_sibling;
+            }
+        }
+    }
+
+    /// Move every child of `from`, in order, into the childless node `to`.
+    /// Element sibling indices stay valid; depths are left to the caller.
+    pub(crate) fn move_children(&mut self, from: NodeId, to: NodeId) {
+        debug_assert!(self.nodes[to.index()].first_child.is_null());
+        let first = self.nodes[from.index()].first_child;
+        let last = self.nodes[from.index()].last_child;
+        let mut child = first;
+        while !child.is_null() {
+            let node = &mut self.nodes[child.index()];
+            node.parent = to;
+            child = node.next_sibling;
+        }
+
+        let source = &mut self.nodes[from.index()];
+        source.first_child = NodeId::NULL;
+        source.last_child = NodeId::NULL;
+        source.flags.clear(NodeFlags::HAS_CHILDREN);
+        if !first.is_null() {
+            let target = &mut self.nodes[to.index()];
+            target.first_child = first;
+            target.last_child = last;
+            target.flags.set(NodeFlags::HAS_CHILDREN);
+        }
+    }
+
+    /// Recompute stale depths below `root` in one pass, if any are stale.
+    pub(crate) fn refresh_depths(&mut self, root: NodeId) {
+        if self.stale_depths.take().is_some() {
+            self.recompute_descendant_depths(root);
+        }
+    }
+
+    /// Mark every node allocated so far as possibly stale, except `exact`,
+    /// whose depths the caller has just made exact.
+    pub(crate) fn mark_depths_stale_except(&mut self, exact: impl IntoIterator<Item = NodeId>) {
+        let before = self.nodes.len();
+        let stale = self.stale_depths.get_or_insert_with(Box::default);
+        stale.before = before;
+        stale.exact.clear();
+        stale.exact.extend(exact.into_iter().map(|node| node.0));
+        // Open elements are mostly allocated in stack order, so this is
+        // close to a linear pass.
+        stale.exact.sort_unstable();
+    }
+
+    /// The exact depth of `node`, even mid-parse while the stored depths of
+    /// older nodes may still await the fix-up in `TreeBuilder::finish`.
+    ///
+    /// Climbs only to the nearest ancestor-or-self whose stored depth is
+    /// known exact: any node created after the last depth-shifting move, or
+    /// one open during it. New nodes and open elements answer at once.
+    pub(crate) fn exact_depth(&self, node: NodeId) -> u16 {
+        let Some(stale) = &self.stale_depths else {
+            return self.nodes[node.index()].depth;
+        };
+        let mut current = node;
+        let mut steps = 0u16;
+        loop {
+            let index = current.index();
+            if index >= stale.before || stale.exact.binary_search(&current.0).is_ok() {
+                return self.nodes[index].depth.saturating_add(steps);
+            }
+            let parent = self.nodes[index].parent;
+            if parent.is_null() {
+                // A detached node: its depth is the number of ancestors.
+                return steps;
+            }
+            current = parent;
+            steps = steps.saturating_add(1);
+        }
+    }
+
+    /// Set every descendant of `node` one level below its parent, keeping
+    /// `node`'s own depth. Allocation-free pre-order walk.
+    fn recompute_descendant_depths(&mut self, node: NodeId) {
+        // Each parent is updated before its children.
+        let mut current = self.nodes[node.index()].first_child;
+        while !current.is_null() {
+            let parent = self.nodes[current.index()].parent;
+            self.nodes[current.index()].depth = self.nodes[parent.index()].depth.saturating_add(1);
+
+            let first_child = self.nodes[current.index()].first_child;
+            if !first_child.is_null() {
+                current = first_child;
+                continue;
+            }
+            let mut climb = current;
+            current = NodeId::NULL;
+            while climb != node {
+                let entry = &self.nodes[climb.index()];
+                if !entry.next_sibling.is_null() {
+                    current = entry.next_sibling;
+                    break;
+                }
+                climb = entry.parent;
+            }
+        }
+    }
+
+    /// Clone an element without children for adoption-agency repairs.
+    ///
+    /// Tag names and attributes are never modified once written, so the clone
+    /// shares the original's slab ranges instead of copying them.
     pub(crate) fn clone_element_shallow(&mut self, source: NodeId, depth: u16) -> NodeId {
         let original = &self.nodes[source.index()];
         let tag = original.tag;
-        let attr_offset = original.attr_offset;
-        let attr_count = original.attr_count;
-        let class_hash = original.class_hash;
-        let id_hash = original.id_hash;
-        let unknown_name = if tag == Tag::Unknown && original.text_len > 0 {
-            let start = original.text_offset as usize;
-            let end = start + original.text_len as usize;
-            Some(self.text_slab[start..end].to_vec())
-        } else {
-            None
-        };
+        let (text_offset, text_len) = (original.text_offset, original.text_len);
+        let (attr_offset, attr_count) = (original.attr_offset, original.attr_count);
+        let (class_hash, id_hash) = (original.class_hash, original.id_hash);
 
         let node = self.new_element(tag, depth);
-        if let Some(name) = unknown_name {
-            let offset = self.text_slab.len() as u32;
-            self.text_slab.extend_from_slice(&name);
-            let target = &mut self.nodes[node.index()];
-            target.text_offset = offset;
-            target.text_len = name.len() as u32;
+        let target = &mut self.nodes[node.index()];
+        if tag == Tag::Unknown {
+            target.text_offset = text_offset;
+            target.text_len = text_len;
         }
-
         if attr_count > 0 {
-            let source_start = attr_offset as usize;
-            let source_end = source_start + attr_count as usize;
-            let new_offset = self.attr_slab.len() as u32;
-            self.attr_slab.extend_from_within(source_start..source_end);
-            let target = &mut self.nodes[node.index()];
-            target.attr_offset = new_offset;
+            target.attr_offset = attr_offset;
             target.attr_count = attr_count;
             target.flags.set(NodeFlags::HAS_ATTRS);
             target.class_hash = class_hash;
             target.id_hash = id_hash;
         }
-
         node
     }
 
     /// Get the name of an attribute.
     #[inline]
     pub fn attr_name(&self, attr: &Attribute) -> &str {
-        checked_attr_slice(&self.attr_str_slab, attr.name_offset, attr.name_len)
+        checked_str(
+            &self.attr_str_slab,
+            attr.name_offset,
+            attr.name_len,
+            "attribute",
+        )
     }
 
     /// Get the value of an attribute, or `None` for boolean attributes.
@@ -678,10 +894,11 @@ impl Arena {
         if !attr.has_value {
             return None;
         }
-        Some(checked_attr_slice(
+        Some(checked_str(
             &self.attr_str_slab,
             attr.value_offset,
             attr.value_len,
+            "attribute",
         ))
     }
 
@@ -698,15 +915,21 @@ impl Arena {
         &self.attr_slab[start..end]
     }
 
-    /// Get the text content for a node (direct text, not recursive).
+    /// Get the direct content of a text, comment, or doctype node. Element
+    /// nodes return an empty string.
     #[inline]
     pub fn text(&self, node: NodeId) -> &str {
         let n = &self.nodes[node.index()];
-        if n.text_len == 0 {
+        // An unknown element keeps its tag name in the text fields.
+        if n.text_len == 0
+            || !n
+                .flags
+                .has(NodeFlags::IS_TEXT | NodeFlags::IS_COMMENT | NodeFlags::IS_DOCTYPE)
+        {
             return "";
         }
         if n.flags.has(NodeFlags::IS_TEXT) && n.flags.has(NodeFlags::IS_TEXT_FROM_SOURCE) {
-            checked_text_slice(&self.source, n.text_offset, n.text_len)
+            checked_str(&self.source, n.text_offset, n.text_len, "text")
         } else {
             let text_start = n.text_offset as usize;
             let text_end = text_start
@@ -719,7 +942,7 @@ impl Arena {
                 }),
                 "source-backed text promotion is not finalized; call Arena::set_source_owned first"
             );
-            checked_text_slice(&self.text_slab, n.text_offset, n.text_len)
+            checked_str(&self.text_slab, n.text_offset, n.text_len, "text")
         }
     }
 
@@ -730,10 +953,11 @@ impl Arena {
         if n.tag != Tag::Unknown || n.text_len == 0 {
             return None;
         }
-        Some(checked_text_slice(
+        Some(checked_str(
             &self.text_slab,
             n.text_offset,
             n.text_len,
+            "text",
         ))
     }
 
@@ -744,6 +968,10 @@ impl Arena {
     }
 
     /// Get a mutable reference to a node by id.
+    ///
+    /// Text and attribute ranges are bounds-checked on every read, but the
+    /// selector hashes ([`Node::class_hash`], [`Node::id_hash`]) are trusted:
+    /// keep them in sync when editing a node's attribute range.
     #[inline]
     pub fn get_mut(&mut self, id: NodeId) -> &mut Node {
         &mut self.nodes[id.index()]
@@ -768,33 +996,37 @@ impl Default for Arena {
     }
 }
 
-/// Resolve arena-owned text metadata without trusting mutable `Node` fields.
+/// Resolve string metadata without trusting mutable `Node` fields or assuming
+/// an `Attribute` belongs to this arena: `Attribute` values can be cloned and
+/// passed to another arena through the safe public API. Both the byte range
+/// and UTF-8 boundaries are checked; `what` names the slab in panic messages.
+///
+/// Every slab is a `String`, so an in-bounds range is valid UTF-8 exactly when
+/// both ends fall on character boundaries, which is checked in O(1).
 #[inline]
-fn checked_text_slice(bytes: &[u8], offset: u32, len: u32) -> &str {
+fn checked_str<'a>(text: &'a str, offset: u32, len: u32, what: &str) -> &'a str {
     let start = offset as usize;
-    let end = start
+    match start
         .checked_add(len as usize)
-        .expect("arena text range is out of bounds");
-    let slice = bytes
-        .get(start..end)
-        .expect("arena text range is out of bounds");
-    std::str::from_utf8(slice).expect("arena text range is not valid UTF-8")
+        .and_then(|end| text.get(start..end))
+    {
+        Some(slice) => slice,
+        None => invalid_str_range(text, start, len, what),
+    }
 }
 
-/// Resolve an attribute's string metadata without assuming it belongs to this
-/// arena. `Attribute` values can be cloned and passed to another arena through
-/// the safe public API, so both the byte range and UTF-8 boundaries must be
-/// checked here.
-#[inline]
-fn checked_attr_slice(bytes: &[u8], offset: u32, len: u32) -> &str {
-    let start = offset as usize;
-    let end = start
+/// Panic for a range [`checked_str`] rejected. Kept out of line so the
+/// inlined accessors stay small on the parser's hot paths.
+#[cold]
+#[inline(never)]
+fn invalid_str_range(text: &str, start: usize, len: u32, what: &str) -> ! {
+    if start
         .checked_add(len as usize)
-        .expect("arena attribute range is out of bounds");
-    let slice = bytes
-        .get(start..end)
-        .expect("arena attribute range is out of bounds");
-    std::str::from_utf8(slice).expect("arena attribute range is not valid UTF-8")
+        .is_none_or(|end| end > text.len())
+    {
+        panic!("arena {what} range is out of bounds");
+    }
+    panic!("arena {what} range is not valid UTF-8");
 }
 
 #[cfg(test)]
@@ -856,6 +1088,28 @@ mod tests {
 
         assert_eq!(arena.get(c3).prev_sibling, c2);
         assert!(arena.get(c3).next_sibling.is_null());
+    }
+
+    #[test]
+    fn append_child_indexes_element_siblings() {
+        let mut arena = Arena::new();
+        let parent = arena.new_element(Tag::Div, 0);
+        let leading_text = arena.new_text(1, "a");
+        let first = arena.new_element(Tag::Span, 1);
+        let comment = arena.new_comment(1, "c");
+        let text = arena.new_text(1, "b");
+        let second = arena.new_element(Tag::P, 1);
+        for child in [leading_text, first, comment, text, second] {
+            arena.append_child(parent, child);
+        }
+
+        assert_eq!(arena.get(first).element_index, 1);
+        assert_eq!(arena.full_element_index(first), 1);
+        assert_eq!(arena.get(second).element_index, 2);
+        assert_eq!(arena.full_element_index(second), 2);
+        for non_element in [leading_text, comment, text] {
+            assert_eq!(arena.get(non_element).element_index, 0);
+        }
     }
 
     #[test]

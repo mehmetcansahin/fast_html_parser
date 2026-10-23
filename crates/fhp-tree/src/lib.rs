@@ -46,6 +46,9 @@ pub mod streaming;
 /// [`VecDeque`]: std::collections::VecDeque
 pub mod traverse;
 
+#[cfg(feature = "encoding")]
+use std::borrow::Cow;
+
 use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
@@ -98,6 +101,10 @@ pub(crate) const MAX_REPRESENTABLE_INPUT_SIZE: usize = 1 << 31;
 /// Parse an HTML string into a [`Document`].
 ///
 /// Runs the tokenizer and tree builder in sequence.
+///
+/// At most 512 elements are open at once. A start tag beyond that inserts an
+/// empty element, and the content after it goes to the innermost open
+/// element, so deeply nested input still parses with a bounded tree depth.
 ///
 /// # Errors
 ///
@@ -219,17 +226,73 @@ pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Doc
     ensure_input_size(input.len(), max_input_size)?;
 
     let effective_max = max_input_size.min(MAX_REPRESENTABLE_INPUT_SIZE);
-    let text = decode_with_limit(input, effective_max)?;
+    let encoding = fhp_encoding::detect(input);
+    let input = &input[fhp_encoding::bom_length(input, encoding)..];
+    // Valid UTF-8 decodes to itself: parse it in place rather than copying
+    // it through the decoder and validating it a second time.
+    if encoding == encoding_rs::UTF_8 {
+        return match decode_utf8_with_limit(input, effective_max)? {
+            Cow::Borrowed(text) => parse_with_limit(text, effective_max),
+            Cow::Owned(text) => parse_owned_with_limit(text, effective_max),
+        };
+    }
+    let text = decode_with_limit(encoding, input, effective_max)?;
     parse_owned_with_limit(text, effective_max)
 }
 
-/// Decode a complete byte input without ever retaining more than `max` bytes
-/// of decoded UTF-8. This keeps the byte-entry-point limit useful as a memory
-/// bound instead of allocating the decoder's worst-case expansion first.
+/// Decode UTF-8 with the same output as `encoding_rs`, without its chunked
+/// copies: valid input is borrowed, and otherwise each maximal invalid
+/// subpart (the WHATWG and Unicode substitution practice that
+/// `Utf8Error::error_len` reports) becomes one U+FFFD. Fails once the
+/// decoded text would exceed `max` bytes.
 #[cfg(feature = "encoding")]
-fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
-    let encoding = fhp_encoding::detect(input);
-    let input = strip_matching_bom(input, encoding);
+fn decode_utf8_with_limit(input: &[u8], max: usize) -> Result<Cow<'_, str>, HtmlError> {
+    let mut error = match std::str::from_utf8(input) {
+        Ok(text) => return Ok(Cow::Borrowed(text)),
+        Err(error) => error,
+    };
+
+    let mut decoded = String::with_capacity(input.len().min(max));
+    let mut rest = input;
+    loop {
+        let (valid, rest_after_valid) = rest.split_at(error.valid_up_to());
+        let valid = std::str::from_utf8(valid).expect("`valid_up_to` ends a valid prefix");
+        // `None` means the input ends inside a sequence: one replacement.
+        let invalid_len = error.error_len().unwrap_or(rest_after_valid.len());
+        push_limited(&mut decoded, valid, max)?;
+        push_limited(&mut decoded, "\u{FFFD}", max)?;
+        rest = &rest_after_valid[invalid_len..];
+        match std::str::from_utf8(rest) {
+            Ok(text) => {
+                push_limited(&mut decoded, text, max)?;
+                return Ok(Cow::Owned(decoded));
+            }
+            Err(next) => error = next,
+        }
+    }
+}
+
+/// Append `text` unless `decoded` would then exceed `max` bytes.
+#[cfg(feature = "encoding")]
+fn push_limited(decoded: &mut String, text: &str, max: usize) -> Result<(), HtmlError> {
+    let size = decoded.len().saturating_add(text.len());
+    if size > max {
+        return Err(HtmlError::InputTooLarge { size, max });
+    }
+    decoded.push_str(text);
+    Ok(())
+}
+
+/// Decode a complete byte input (without its BOM) without ever retaining more
+/// than `max` bytes of decoded UTF-8. This keeps the byte-entry-point limit
+/// useful as a memory bound instead of allocating the decoder's worst-case
+/// expansion first.
+#[cfg(feature = "encoding")]
+fn decode_with_limit(
+    encoding: &'static encoding_rs::Encoding,
+    input: &[u8],
+    max: usize,
+) -> Result<String, HtmlError> {
     let mut decoder = encoding.new_decoder_without_bom_handling();
     let mut decoded = String::with_capacity(input.len().min(max));
     let mut offset = 0usize;
@@ -269,19 +332,6 @@ fn decode_with_limit(input: &[u8], max: usize) -> Result<String, HtmlError> {
     }
 
     Ok(decoded)
-}
-
-#[cfg(feature = "encoding")]
-fn strip_matching_bom<'a>(input: &'a [u8], encoding: &'static encoding_rs::Encoding) -> &'a [u8] {
-    if encoding == encoding_rs::UTF_8 && input.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        &input[3..]
-    } else if (encoding == encoding_rs::UTF_16LE && input.starts_with(&[0xFF, 0xFE]))
-        || (encoding == encoding_rs::UTF_16BE && input.starts_with(&[0xFE, 0xFF]))
-    {
-        &input[2..]
-    } else {
-        input
-    }
 }
 
 fn ensure_input_size(size: usize, max: usize) -> Result<(), HtmlError> {
@@ -380,9 +430,11 @@ impl<'a> NodeRef<'a> {
         self.arena.get(self.id).tag
     }
 
-    /// The nesting depth.
+    /// The nesting depth: 0 for the document root.
     pub fn depth(&self) -> u16 {
-        self.arena.get(self.id).depth
+        // Mid-parse (an early-stop predicate), depths of nodes that existed
+        // before an adoption agency move may await the fix-up in `finish`.
+        self.arena.exact_depth(self.id)
     }
 
     /// Whether this is a text node.
@@ -415,15 +467,7 @@ impl<'a> NodeRef<'a> {
     ///
     /// For element nodes, returns `""`. For text nodes, returns the text.
     pub fn text(&self) -> &'a str {
-        let node = self.arena.get(self.id);
-        if node.flags.has(NodeFlags::IS_TEXT)
-            || node.flags.has(NodeFlags::IS_COMMENT)
-            || node.flags.has(NodeFlags::IS_DOCTYPE)
-        {
-            self.arena.text(self.id)
-        } else {
-            ""
-        }
+        self.arena.text(self.id)
     }
 
     /// Recursively collect all text content from this node and its
@@ -491,10 +535,8 @@ impl<'a> NodeRef<'a> {
             // Raw text elements (script/style/plaintext/...) must not be
             // escaped per HTML spec.
             let parent_id = node.parent;
-            let is_raw_text = !parent_id.is_null() && {
-                let parent_tag = self.arena.get(parent_id).tag;
-                parent_tag.is_raw_text() || parent_tag == Tag::Plaintext
-            };
+            let is_raw_text =
+                !parent_id.is_null() && builder::opens_raw_text(self.arena.get(parent_id).tag);
             if is_raw_text {
                 out.push_str(text);
             } else {
@@ -546,6 +588,26 @@ impl<'a> NodeRef<'a> {
                     return;
                 }
                 out.push('>');
+
+                // The parser drops a newline right after these start tags, so
+                // content that starts with one needs an extra newline to
+                // survive a round trip.
+                let drops_leading_newline = matches!(node.tag, Tag::Pre | Tag::Textarea)
+                    || (node.tag == Tag::Unknown && name.eq_ignore_ascii_case("listing"));
+                if drops_leading_newline
+                    && !node.first_child.is_null()
+                    && self
+                        .arena
+                        .get(node.first_child)
+                        .flags
+                        .has(NodeFlags::IS_TEXT)
+                    && matches!(
+                        self.arena.text(node.first_child).as_bytes().first(),
+                        Some(b'\n' | b'\r')
+                    )
+                {
+                    out.push('\n');
+                }
             }
         }
 
@@ -1002,6 +1064,74 @@ mod tests {
 
     #[test]
     #[cfg(feature = "encoding")]
+    fn parse_bytes_parses_valid_utf8_like_parse() {
+        for html in [
+            "<p>caf\u{e9} &amp; na\u{ef}ve</p>",
+            "\u{feff}<p>bom</p>",
+            "<meta charset=utf-8><p>\u{1F600}</p>",
+            "",
+        ] {
+            let from_bytes = parse_bytes(html.as_bytes()).unwrap();
+            let from_str = parse(html.trim_start_matches('\u{feff}')).unwrap();
+            assert_eq!(
+                from_bytes.root().text_content(),
+                from_str.root().text_content()
+            );
+            assert_eq!(from_bytes.arena().len(), from_str.arena().len());
+        }
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn utf8_decoding_matches_encoding_rs() {
+        fn check(input: &[u8]) {
+            let expected = encoding_rs::UTF_8.decode_without_bom_handling(input).0;
+            let decoded = decode_utf8_with_limit(input, usize::MAX).unwrap();
+            assert_eq!(decoded, expected, "{input:x?}");
+            assert_eq!(
+                matches!(decoded, Cow::Borrowed(_)),
+                std::str::from_utf8(input).is_ok()
+            );
+        }
+
+        // Boundaries of every UTF-8 byte class, in every arrangement of up
+        // to four bytes, plus every two-byte sequence.
+        const BYTES: [u8; 20] = [
+            0x00, 0x41, 0x7F, 0x80, 0x8F, 0x90, 0x9F, 0xA0, 0xBF, 0xC0, 0xC1, 0xC2, 0xDF, 0xE0,
+            0xED, 0xEF, 0xF0, 0xF4, 0xF5, 0xFF,
+        ];
+        let mut input = Vec::new();
+        for len in 1..=4u32 {
+            for mut code in 0..BYTES.len().pow(len) {
+                input.clear();
+                for _ in 0..len {
+                    input.push(BYTES[code % BYTES.len()]);
+                    code /= BYTES.len();
+                }
+                check(&input);
+            }
+        }
+        for pair in 0..=u16::MAX {
+            check(&pair.to_be_bytes());
+        }
+        check("ok \u{1F600}".as_bytes());
+        check(b"\xF0\x9F\x98 truncated emoji");
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
+    fn utf8_decoding_respects_the_limit_after_replacement() {
+        // Each lone continuation byte expands to a 3-byte U+FFFD.
+        let input = [0x80; 4];
+        assert!(decode_utf8_with_limit(&input, 12).is_ok());
+        assert!(matches!(
+            decode_utf8_with_limit(&input, 11),
+            Err(HtmlError::InputTooLarge { size: 12, max: 11 })
+        ));
+    }
+
+    #[test]
+    #[cfg(feature = "encoding")]
     fn parse_bytes_replaces_malformed_input() {
         let doc = parse_bytes_with_limit(b"<p>\xFF</p>", 1_024).unwrap();
 
@@ -1156,5 +1286,33 @@ mod tests {
         let html = doc.to_html();
         assert!(html.contains("<my-widget>"), "html: {html}");
         assert!(html.contains("</my-widget>"), "html: {html}");
+    }
+
+    #[test]
+    fn leading_newline_of_pre_textarea_and_listing_survives_a_round_trip() {
+        for html in [
+            "<pre>\n\nx</pre>",
+            "<textarea>\n\nx</textarea>",
+            "<listing>\n\nx</listing>",
+        ] {
+            let serialized = parse(html).unwrap().to_html();
+            assert_eq!(serialized, html);
+            assert_eq!(parse(&serialized).unwrap().root().text_content(), "\nx");
+        }
+        assert_eq!(parse("<pre>x</pre>").unwrap().to_html(), "<pre>x</pre>");
+        assert_eq!(
+            parse("<pre><!--\n-->x</pre>").unwrap().to_html(),
+            "<pre><!--\n-->x</pre>"
+        );
+    }
+
+    #[test]
+    fn arena_text_of_an_unknown_element_is_empty() {
+        let doc = parse("<my-widget>x</my-widget>").unwrap();
+        let widget = doc.root().first_child().unwrap();
+
+        assert_eq!(doc.arena().unknown_tag_name(widget.id()), Some("my-widget"));
+        assert_eq!(doc.arena().text(widget.id()), "");
+        assert_eq!(widget.text(), "");
     }
 }

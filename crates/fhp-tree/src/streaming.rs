@@ -10,15 +10,13 @@
 
 use encoding_rs::Encoding;
 use fhp_core::error::ParseError;
+use fhp_encoding::PRESCAN_LIMIT;
 use fhp_tokenizer::streaming::StreamTokenizer;
 use fhp_tokenizer::token::Token;
 
-use crate::builder::TreeBuilder;
+use crate::builder::{TreeBuilder, recycle_buffer};
 use crate::node::NodeId;
 use crate::{Document, HtmlError, MAX_INPUT_SIZE, NodeRef};
-
-/// Maximum bytes retained for HTML encoding prescan.
-const PRESCAN_LIMIT: usize = 1024;
 
 /// Maximum amount of raw input processed as one internal unit.
 const PROCESS_BLOCK_SIZE: usize = 64 * 1024;
@@ -115,7 +113,7 @@ struct DecoderState {
 impl DecoderState {
     fn detect(sample: &[u8], max_input_size: usize) -> (Self, usize) {
         let encoding = fhp_encoding::detect(sample);
-        let bom_len = bom_length(sample, encoding);
+        let bom_len = fhp_encoding::bom_length(sample, encoding);
         (
             Self {
                 decoder: encoding.new_decoder_without_bom_handling(),
@@ -144,20 +142,28 @@ impl DecoderState {
     /// [`Self::decode`], decoded-size accounting is committed by the caller
     /// after it has checked for an early match.
     fn decode_lossy(&mut self, bytes: &[u8], last: bool) -> String {
+        let mut output = String::new();
+        self.decode_lossy_into(bytes, last, &mut output);
+        output
+    }
+
+    /// [`Self::decode_lossy`] into `output`, replacing its contents but
+    /// reusing its allocation.
+    fn decode_lossy_into(&mut self, bytes: &[u8], last: bool, output: &mut String) {
         let max_len = self
             .decoder
             .max_utf8_buffer_length(bytes.len())
             .unwrap_or_else(|| bytes.len().saturating_mul(4).saturating_add(4));
-        let mut output = String::with_capacity(max_len);
+        output.clear();
+        output.reserve(max_len);
         let mut pos = 0;
 
         loop {
             let (result, read, _had_errors) =
-                self.decoder
-                    .decode_to_string(&bytes[pos..], &mut output, last);
+                self.decoder.decode_to_string(&bytes[pos..], output, last);
             pos += read;
             match result {
-                encoding_rs::CoderResult::InputEmpty => return output,
+                encoding_rs::CoderResult::InputEmpty => return,
                 encoding_rs::CoderResult::OutputFull => {
                     let additional = self
                         .decoder
@@ -347,6 +353,9 @@ pub struct EarlyStopParser {
     seen_input_size: usize,
     max_input_size: usize,
     terminal: bool,
+    /// Decoded text of the current segment. Input is decoded one `>` at a
+    /// time, so the allocation is reused across segments.
+    decode_buffer: String,
 }
 
 impl EarlyStopParser {
@@ -374,6 +383,7 @@ impl EarlyStopParser {
             seen_input_size: 0,
             max_input_size: effective_max(MAX_INPUT_SIZE),
             terminal: false,
+            decode_buffer: String::new(),
         }
     }
 
@@ -442,7 +452,7 @@ impl EarlyStopParser {
             self.initial_buf.extend_from_slice(&chunk[..take]);
             chunk = &chunk[take..];
 
-            if explicit_bom_length(&self.initial_buf).is_some() {
+            if Encoding::for_bom(&self.initial_buf).is_some() {
                 self.flush_initial_buf()?;
                 if self.found.is_some() {
                     return Ok(EarlyStopProgress::Matched);
@@ -568,11 +578,23 @@ impl EarlyStopParser {
     }
 
     fn decode_and_check(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
+        let mut text = core::mem::take(&mut self.decode_buffer);
+        let result = self.decode_into_and_check(bytes, last, &mut text);
+        self.decode_buffer = recycle_buffer(text);
+        result
+    }
+
+    fn decode_into_and_check(
+        &mut self,
+        bytes: &[u8],
+        last: bool,
+        text: &mut String,
+    ) -> Result<(), HtmlError> {
         let decoder = self
             .decoder
             .as_mut()
             .expect("decoder initialized before processing");
-        let text = decoder.decode_lossy(bytes, last);
+        decoder.decode_lossy_into(bytes, last, text);
         let decoded_before = decoder.decoded_size;
         let decoded_size = decoded_before.saturating_add(text.len());
         let remaining = self.max_input_size.saturating_sub(decoded_before);
@@ -621,7 +643,7 @@ impl EarlyStopParser {
             let flushed = self.builder.finish_observed_text_run();
             check_early_nodes(
                 &self.builder,
-                [flushed, None],
+                flushed,
                 self.predicate.as_ref(),
                 self.mode,
                 &mut self.pending_match,
@@ -720,45 +742,38 @@ fn process_early_token(
     pending_match: &mut Option<NodeId>,
     found: &mut Option<(NodeId, MatchCompleteness)>,
 ) -> Result<(), ParseError> {
-    if !matches!(token, Token::Text { .. } | Token::CData { .. }) {
+    let is_text = matches!(token, Token::Text { .. } | Token::CData { .. });
+    if !is_text {
         let flushed = builder.finish_observed_text_run();
-        check_early_nodes(
-            builder,
-            [flushed, None],
-            predicate,
-            mode,
-            pending_match,
-            found,
-        );
+        check_early_nodes(builder, flushed, predicate, mode, pending_match, found);
         if found.is_some() {
             return Ok(());
         }
     }
 
-    let is_text = matches!(token, Token::Text { .. } | Token::CData { .. });
-    let created = builder.process(token)?;
+    let created = builder.process(token)?.filter(|_| !is_text);
     let flushed = builder.take_flushed_text_node();
-    check_early_nodes(
-        builder,
-        [flushed, (!is_text).then_some(created).flatten()],
-        predicate,
-        mode,
-        pending_match,
-        found,
-    );
+    // Implied `tbody`, `tr`, and `colgroup` elements precede the element the
+    // token itself created.
+    let builder: &TreeBuilder = builder;
+    let nodes = flushed
+        .into_iter()
+        .chain(builder.implied_elements().iter().copied())
+        .chain(created);
+    check_early_nodes(builder, nodes, predicate, mode, pending_match, found);
     Ok(())
 }
 
 fn check_early_nodes(
     builder: &TreeBuilder,
-    created: [Option<NodeId>; 2],
+    created: impl IntoIterator<Item = NodeId>,
     predicate: &NodePredicate,
     mode: EarlyStopMode,
     pending_match: &mut Option<NodeId>,
     found: &mut Option<(NodeId, MatchCompleteness)>,
 ) {
     if pending_match.is_none() {
-        for node_id in created.into_iter().flatten() {
+        for node_id in created {
             let node = NodeRef {
                 arena: &builder.arena,
                 id: node_id,
@@ -809,28 +824,6 @@ pub fn parse_stream_with_limit<'a>(
 
 fn effective_max(max_input_size: usize) -> usize {
     max_input_size.min(crate::MAX_REPRESENTABLE_INPUT_SIZE)
-}
-
-fn explicit_bom_length(input: &[u8]) -> Option<usize> {
-    if input.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        Some(3)
-    } else if input.starts_with(&[0xFF, 0xFE]) || input.starts_with(&[0xFE, 0xFF]) {
-        Some(2)
-    } else {
-        None
-    }
-}
-
-fn bom_length(input: &[u8], encoding: &'static Encoding) -> usize {
-    if encoding == encoding_rs::UTF_8 && input.starts_with(&[0xEF, 0xBB, 0xBF]) {
-        3
-    } else if (encoding == encoding_rs::UTF_16LE && input.starts_with(&[0xFF, 0xFE]))
-        || (encoding == encoding_rs::UTF_16BE && input.starts_with(&[0xFE, 0xFF]))
-    {
-        2
-    } else {
-        0
-    }
 }
 
 #[cfg(test)]
