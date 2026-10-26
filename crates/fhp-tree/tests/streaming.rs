@@ -922,6 +922,7 @@ fn stream_equiv_review_fixtures() {
         "<p>a<blockquote>b</blockquote>c",
         "<p>a<object><p>b</object>c",
         "<html><body>x</body>\n<!--a--></html><!--b--><p>y",
+        "<body><select><option>a</body><!--c--></select><table><colgroup><col></html><col>",
         "<img alt=it's><p>visible</p><p>it's done</p>",
         "<div a\"b>x</div><p>y</p>",
         "<?xml version=\"1.0\"?><p>hi</p>",

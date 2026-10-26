@@ -1011,7 +1011,14 @@ impl TreeBuilder {
 
     fn handle_close_tag(&mut self, tag: Tag, name: &str) -> Option<NodeId> {
         self.end_text_run();
-        if matches!(tag, Tag::Body | Tag::Html) {
+        // "In select" ignores these end tags and "in column group" first
+        // closes the column group; both modes are handled further down.
+        if matches!(tag, Tag::Body | Tag::Html)
+            && !matches!(
+                self.insertion_mode,
+                InsertionMode::InSelect | InsertionMode::InColumnGroup
+            )
+        {
             // Neither end tag closes anything: content after them still
             // belongs to the body. Only later comments move out of it.
             if self
@@ -2929,6 +2936,32 @@ mod tests {
         let comment = arena.get(arena.get(body).first_child).next_sibling;
         assert!(arena.get(comment).flags.has(NodeFlags::IS_COMMENT));
         assert!(arena.get(body).next_sibling.is_null());
+    }
+
+    #[test]
+    fn body_and_html_end_tags_follow_select_and_column_group_rules() {
+        for end_tag in ["</body>", "</html>"] {
+            // "In select" ignores the end tag, so a later comment stays put.
+            let html = format!("<body><select><option>a{end_tag}<!--c--></select>");
+            let (arena, root) = parse(&html).unwrap();
+            let body = arena.get(root).first_child;
+            let option = arena.get(arena.get(body).first_child).first_child;
+            let comment = arena.get(option).last_child;
+            assert!(
+                arena.get(comment).flags.has(NodeFlags::IS_COMMENT),
+                "{end_tag}"
+            );
+            assert!(arena.get(body).next_sibling.is_null(), "{end_tag}");
+
+            // "In column group" closes the column group first, so the next
+            // `col` implies a new one.
+            let html = format!("<body><table><colgroup><col>{end_tag}<col></table>");
+            assert_eq!(
+                parse_checked_outline(&html),
+                "<body><table><colgroup><col></colgroup><colgroup><col></colgroup></table></body>",
+                "{end_tag}"
+            );
+        }
     }
 
     #[test]

@@ -81,6 +81,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of copying them.
 - `</body>` and `</html>` no longer close anything. Content after them stays
   in the body; only comments move to the `html` element or the document.
+  Inside a `select` they are ignored, and inside a column group they close
+  the column group, as in HTML.
 - Block starts without a compact `Tag`, such as `blockquote`, `dl`, `figure`,
   `fieldset`, `details`, and `address`, close an open `<p>`.
 - `object`, `applet`, `marquee`, and `template` bound scope checks, so end

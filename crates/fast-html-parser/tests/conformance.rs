@@ -267,6 +267,10 @@ fn supported_recovery_subset_matches_html5ever() {
             "object bounds the paragraph scope",
             "<p>a<object><p>b</object>c</p>",
         ),
+        (
+            "body end tag closes a column group",
+            "<table><colgroup><col></body><col></table>",
+        ),
         ("plaintext", "<plaintext><b>x&amp;"),
         (
             "duplicate attributes are first-wins",
