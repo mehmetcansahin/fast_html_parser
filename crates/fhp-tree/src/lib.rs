@@ -592,9 +592,7 @@ impl<'a> NodeRef<'a> {
                 // The parser drops a newline right after these start tags, so
                 // content that starts with one needs an extra newline to
                 // survive a round trip.
-                let drops_leading_newline = matches!(node.tag, Tag::Pre | Tag::Textarea)
-                    || (node.tag == Tag::Unknown && name.eq_ignore_ascii_case("listing"));
-                if drops_leading_newline
+                if builder::drops_leading_newline(node.tag, name)
                     && !node.first_child.is_null()
                     && self
                         .arena

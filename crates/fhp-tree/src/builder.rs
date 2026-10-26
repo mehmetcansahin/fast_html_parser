@@ -269,6 +269,15 @@ pub(crate) fn opens_raw_text(tag: Tag) -> bool {
     tag.is_raw_text() || tag == Tag::Plaintext
 }
 
+/// Whether a newline right after this start tag is dropped: `pre`,
+/// `textarea`, and `listing` (matched by `name`, which has no compact
+/// [`Tag`]). The serializer writes an extra newline for these elements.
+#[inline]
+pub(crate) fn drops_leading_newline(tag: Tag, name: &str) -> bool {
+    matches!(tag, Tag::Pre | Tag::Textarea)
+        || (tag == Tag::Unknown && name.eq_ignore_ascii_case("listing"))
+}
+
 #[inline]
 fn matches_ascii_name(name: &str, expected: &[&str]) -> bool {
     expected
@@ -883,10 +892,7 @@ impl TreeBuilder {
         };
         let node = self.insert_element(tag, name, kind, attributes, source_self_closing, location);
         // Only an element that opened receives the content after it.
-        if self.is_current(node)
-            && (matches!(tag, Tag::Pre | Tag::Textarea)
-                || (tag == Tag::Unknown && name.eq_ignore_ascii_case("listing")))
-        {
+        if self.is_current(node) && drops_leading_newline(tag, name) {
             self.newline_skip = NewlineSkip::Newline;
         }
         Some(node)
