@@ -23,6 +23,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `String` so repeated calls can reuse one allocation. They append only when
   a reference decodes and report whether one did, so undecoded input can
   stay borrowed exactly as with the `Cow` functions.
+- `fhp_tokenizer::streaming::StreamTokenizer::with_undecoded_text` and
+  `fhp_tree::builder::TreeBuilder::decode_text_tokens`. The tokenizer then
+  emits text with its character references as written, split exactly as
+  before, and the builder decodes it the way it decodes `TreeSink` text, so
+  it can tell a newline written in the source from one written as a
+  reference. The streaming parsers use the pair.
 
 ### Changed
 
@@ -88,7 +94,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `object`, `applet`, `marquee`, and `template` bound scope checks, so end
   tags and implied `<p>` closes no longer reach through them.
 - The newline dropped after a `<pre>`, `<textarea>`, or `<listing>` start tag
-  may be `\r\n` or `\r`, including a CRLF split across stream chunks.
+  may be `\r\n` or `\r`, including a CRLF split across stream chunks. A CR
+  written there as a character reference (`&#13;`) is kept, as in HTML, by
+  the one-shot and the streaming parsers.
 - Serializing a `<pre>`, `<textarea>`, or `<listing>` whose content starts
   with a newline writes one extra newline, so the content survives a parse.
 - `EarlyStopParser` passes implied `tbody`, `tr`, and `colgroup` elements to

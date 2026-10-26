@@ -72,10 +72,13 @@ happened. Doctype content is exposed as a single string, so only the doctype
 name is compared.
 
 Because newlines are not normalized, the tree builder treats a leading CR or
-CRLF after a `pre`, `textarea`, or `listing` start tag as the newline it drops.
-A CR written as a character reference (`&#13;`) in that position is dropped
-too, where the specification keeps it: text tokens arrive decoded, so the two
-cannot be told apart.
+CRLF after a `pre`, `textarea`, or `listing` start tag as the newline it drops,
+and keeps a CR written as a character reference (`&#13;`), as the
+specification does. It decodes text itself to tell them apart. A program that
+feeds `TreeBuilder::process` already-decoded text tokens loses that
+distinction, and a leading CR is then taken to be a source newline; pairing
+`StreamTokenizer::with_undecoded_text` with `TreeBuilder::decode_text_tokens`
+keeps it, as the streaming parsers do.
 
 ## Intentionally unsupported in 0.2
 

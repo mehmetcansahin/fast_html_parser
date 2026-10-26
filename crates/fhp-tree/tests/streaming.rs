@@ -910,6 +910,40 @@ mod async_std_tests {
     }
 }
 
+/// A CR written as a character reference right after `<pre>` is content for
+/// every parser, also when the reference is long enough for the streaming
+/// tokenizer to compact its digits.
+#[cfg(feature = "entity-decode")]
+#[test]
+fn referenced_cr_after_pre_is_kept_by_every_parser() {
+    let overlong = format!("<pre>&#{}13;x</pre>", "0".repeat(5000));
+    for html in ["<pre>&#13;x</pre>", "<pre>&#xd;x</pre>", overlong.as_str()] {
+        let context = format!("{html:.20}");
+        assert_eq!(
+            parse(html).unwrap().root().text_content(),
+            "\rx",
+            "{context}"
+        );
+        for chunk_size in [1, 7, 64, html.len()] {
+            let streamed = parse_stream(html.as_bytes().chunks(chunk_size)).unwrap();
+            assert_eq!(
+                streamed.root().text_content(),
+                "\rx",
+                "{context} in {chunk_size}-byte chunks"
+            );
+
+            let mut parser = EarlyStopParser::stop_after_element(|node| node.tag() == Tag::Pre);
+            for chunk in html.as_bytes().chunks(chunk_size) {
+                parser.feed(chunk).unwrap();
+            }
+            let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+                panic!("{context}: pre not found");
+            };
+            assert_eq!(found.node().text_content(), "\rx", "{context}");
+        }
+    }
+}
+
 /// Tokenizer review fixtures (WHATWG tag grammar, bogus comments, EOF
 /// handling, legacy raw text, script escapes) and tree-builder conformance
 /// fixtures: streaming must build the one-shot DOM at every chunk size.
@@ -975,6 +1009,7 @@ fn stream_equiv_review_fixtures() {
         "<pre>\ncode</pre><textarea>\ntext</textarea>",
         "<pre>\r\ncode</pre><textarea>\r\ntext</textarea><pre>\rx</pre>",
         "<pre>&#13;x</pre><textarea>&#13;&#10;y</textarea><listing>&#10;z</listing>",
+        "<pre>\r&#10;x</pre><pre>&#x0D;\ny</pre><pre>&NewLine;\nz</pre>",
         "<b><div>x</b>y</div>",
         "<a href=1><div>t<a href=2>x</a><p>d</p></div></a>",
         "<a><b><i><u><s><div>x</a>y",

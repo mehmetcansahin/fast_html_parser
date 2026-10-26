@@ -482,6 +482,9 @@ pub struct TreeBuilder {
     /// Reusable buffer for entity-decoded character tokens.
     #[cfg(feature = "entity-decode")]
     decoded_text: String,
+    /// Whether `Token::Text` content is source text whose character
+    /// references the builder decodes ([`Self::decode_text_tokens`]).
+    decode_text_tokens: bool,
     /// Text node flushed immediately before the most recently processed
     /// non-text token.
     flushed_text_node: Option<NodeId>,
@@ -541,6 +544,7 @@ impl TreeBuilder {
             table_text_run_foster: false,
             #[cfg(feature = "entity-decode")]
             decoded_text: String::new(),
+            decode_text_tokens: false,
             flushed_text_node: None,
             ignored_raw_text: None,
         }
@@ -553,6 +557,23 @@ impl TreeBuilder {
     /// after foster parenting; see [`Arena::tag_index`].
     pub fn enable_tag_index(&mut self) {
         self.arena.enable_tag_index();
+    }
+
+    /// Decode the character references in `Token::Text` content passed to
+    /// [`Self::process`] instead of expecting decoded text.
+    ///
+    /// Use this for tokens from a [`StreamTokenizer`] made with
+    /// [`StreamTokenizer::with_undecoded_text`]. The builder then decodes
+    /// text wherever an element's content is decoded, as it does for
+    /// [`TreeSink`] input, and can tell a newline written in the source from
+    /// one written as a character reference: a `&#13;` right after a `pre`,
+    /// `textarea`, or `listing` start tag is kept, as HTML specifies.
+    ///
+    /// [`StreamTokenizer`]: fhp_tokenizer::streaming::StreamTokenizer
+    /// [`StreamTokenizer::with_undecoded_text`]: fhp_tokenizer::streaming::StreamTokenizer::with_undecoded_text
+    /// [`TreeSink`]: fhp_tokenizer::TreeSink
+    pub fn decode_text_tokens(&mut self) {
+        self.decode_text_tokens = true;
     }
 
     /// Enable source-backed text nodes.
@@ -611,7 +632,9 @@ impl TreeBuilder {
                 }
                 self.handle_close_tag(*tag, name.as_ref())
             }
-            Token::Text { content } if self.ignored_raw_text.is_some() => {
+            Token::Text { content }
+                if self.decode_text_tokens || self.ignored_raw_text.is_some() =>
+            {
                 self.handle_raw_text(content.as_ref())
             }
             Token::Text { content } => self.handle_text(content.as_ref()),
@@ -1663,32 +1686,20 @@ impl TreeBuilder {
         }
     }
 
-    /// Handle text content (already entity-decoded by the tokenizer).
-    fn handle_text(&mut self, mut content: &str) -> Option<NodeId> {
+    /// Handle text whose source form is unknown: CDATA, or text the tokenizer
+    /// already entity-decoded.
+    fn handle_text(&mut self, content: &str) -> Option<NodeId> {
+        self.handle_text_from(content, None)
+    }
+
+    /// Handle character data. `source` is the text as written, before the
+    /// builder decoded its character references, when it is known.
+    fn handle_text_from(&mut self, mut content: &str, source: Option<&str>) -> Option<NodeId> {
         if content.is_empty() {
             return None;
         }
-        match core::mem::replace(&mut self.newline_skip, NewlineSkip::None) {
-            NewlineSkip::None => {}
-            NewlineSkip::Newline => {
-                if let Some(rest) = content
-                    .strip_prefix("\r\n")
-                    .or_else(|| content.strip_prefix('\n'))
-                {
-                    content = rest;
-                } else if let Some(rest) = content.strip_prefix('\r') {
-                    if rest.is_empty() {
-                        // The `\n` of a CRLF may arrive in the next token.
-                        self.newline_skip = NewlineSkip::LineFeedAfterCr;
-                    }
-                    content = rest;
-                }
-            }
-            NewlineSkip::LineFeedAfterCr => {
-                if let Some(rest) = content.strip_prefix('\n') {
-                    content = rest;
-                }
-            }
+        if self.newline_skip != NewlineSkip::None {
+            content = self.skip_leading_newline(content, source);
         }
         if content.is_empty() {
             return None;
@@ -1734,6 +1745,44 @@ impl TreeBuilder {
         }
 
         self.insert_text(content, false)
+    }
+
+    /// Drop the newline that follows a `pre`, `textarea`, or `listing` start
+    /// tag from the start of `content`.
+    ///
+    /// The tokenizer does not normalize newlines, so a source newline may be
+    /// `\n`, `\r\n`, or a lone `\r`, and a CRLF may be split across tokens.
+    /// Decoding copies source newlines unchanged, so `source` tells them
+    /// apart from a newline written as a character reference: HTML drops a
+    /// referenced LF but keeps a referenced CR. Without `source`, a leading
+    /// CR is taken to be a source newline.
+    ///
+    /// Only the text right after those start tags gets here, so keep it out
+    /// of the per-token path.
+    #[cold]
+    #[inline(never)]
+    fn skip_leading_newline<'c>(&mut self, content: &'c str, source: Option<&str>) -> &'c str {
+        let written = source.unwrap_or(content);
+        match core::mem::replace(&mut self.newline_skip, NewlineSkip::None) {
+            NewlineSkip::None => content,
+            NewlineSkip::Newline => {
+                if written.starts_with("\r\n") {
+                    &content[2..]
+                } else if written.starts_with('\r') {
+                    if written.len() == 1 {
+                        // The `\n` of a CRLF may arrive in the next token.
+                        self.newline_skip = NewlineSkip::LineFeedAfterCr;
+                    }
+                    &content[1..]
+                } else {
+                    // A source LF, or an LF written as a reference.
+                    content.strip_prefix('\n').unwrap_or(content)
+                }
+            }
+            // Only a source LF completes the CRLF.
+            NewlineSkip::LineFeedAfterCr if written.starts_with('\n') => &content[1..],
+            NewlineSkip::LineFeedAfterCr => content,
+        }
     }
 
     fn insert_text(&mut self, content: &str, foster: bool) -> Option<NodeId> {
@@ -1792,7 +1841,8 @@ impl TreeBuilder {
         self.take_flushed_text_node().or(stable_text)
     }
 
-    /// Handle raw text from TreeSink (not entity-decoded).
+    /// Handle text as written in the source (not entity-decoded): from a
+    /// TreeSink, or a `Token::Text` from a tokenizer that leaves it undecoded.
     fn handle_raw_text(&mut self, raw: &str) -> Option<NodeId> {
         if raw.is_empty() {
             return None;
@@ -1801,16 +1851,16 @@ impl TreeBuilder {
         #[cfg(feature = "entity-decode")]
         {
             if opens_raw_text(self.arena.get(self.current_parent()).tag) {
-                return self.handle_text(raw);
+                return self.handle_text_from(raw, Some(raw));
             }
             // Text without a decoded reference is passed through unchanged so
             // it can stay source-backed; decoded text goes through a reused
             // buffer instead of a fresh `String` per token.
             let mut decoded = std::mem::take(&mut self.decoded_text);
             let inserted = if fhp_tokenizer::entity::decode_entities_into(raw, &mut decoded) {
-                self.handle_text(&decoded)
+                self.handle_text_from(&decoded, Some(raw))
             } else {
-                self.handle_text(raw)
+                self.handle_text_from(raw, Some(raw))
             };
             self.decoded_text = recycle_buffer(decoded);
             inserted
@@ -1818,7 +1868,7 @@ impl TreeBuilder {
 
         #[cfg(not(feature = "entity-decode"))]
         {
-            self.handle_text(raw)
+            self.handle_text_from(raw, Some(raw))
         }
     }
 
@@ -3037,16 +3087,25 @@ mod tests {
 
     #[cfg(feature = "entity-decode")]
     #[test]
-    fn leading_character_reference_cr_is_dropped_like_a_source_newline() {
-        // A known difference from HTML, which keeps this CR: newlines are not
-        // normalized, and streaming tokens arrive decoded, so the builder
-        // cannot tell `&#13;` from a source CR (see COMPATIBILITY.md).
-        assert_eq!(
-            parse_outline("<pre>&#13;x</pre><textarea>&#13;&#10;y</textarea>"),
-            "<pre>x</pre><textarea>y</textarea>"
-        );
-        // Elsewhere the reference's CR is kept.
-        assert_eq!(parse_outline("<p>&#13;x</p>"), "<p>\rx</p>");
+    fn a_leading_newline_written_as_a_reference_is_dropped_only_if_it_is_lf() {
+        for (html, outline) in [
+            // HTML keeps a CR written as a reference.
+            ("<pre>&#13;x</pre>", "<pre>\rx</pre>"),
+            (
+                "<textarea>&#13;&#10;y</textarea>",
+                "<textarea>\r\ny</textarea>",
+            ),
+            ("<pre>&#x0D;\nx</pre>", "<pre>\r\nx</pre>"),
+            // An LF written as a reference is dropped like a source one.
+            ("<listing>&#10;z</listing>", "<listing>z</listing>"),
+            ("<pre>&NewLine;\nx</pre>", "<pre>\nx</pre>"),
+            // A source CR is the dropped newline; a referenced LF after it
+            // is content.
+            ("<pre>\r&#10;x</pre>", "<pre>\nx</pre>"),
+            ("<p>&#13;x</p>", "<p>\rx</p>"),
+        ] {
+            assert_eq!(parse_checked_outline(html), outline, "{html:?}");
+        }
     }
 
     #[test]
@@ -3057,5 +3116,32 @@ mod tests {
         process(&mut builder, &make_text("\ncode"));
         let (arena, _) = finish(builder);
         assert_eq!(arena.text(arena.get(pre).first_child), "code");
+    }
+
+    #[cfg(feature = "entity-decode")]
+    #[test]
+    fn undecoded_text_tokens_keep_a_leading_referenced_cr() {
+        let pre_text = |tokens: &[&'static str], decode: bool| {
+            let mut builder = TreeBuilder::new();
+            if decode {
+                builder.decode_text_tokens();
+            }
+            let pre = process(&mut builder, &make_open(Tag::Pre)).unwrap();
+            for &text in tokens {
+                process(&mut builder, &make_text(text));
+            }
+            let (arena, _) = finish(builder);
+            arena.text(arena.get(pre).first_child).to_owned()
+        };
+
+        assert_eq!(pre_text(&["&#13;x"], true), "\rx");
+        assert_eq!(pre_text(&["&amp;"], true), "&");
+        // A CRLF split across tokens is one source newline; an LF written as
+        // a reference after a source CR is content.
+        assert_eq!(pre_text(&["\r", "\ncode"], true), "code");
+        assert_eq!(pre_text(&["\r", "&#10;code"], true), "\ncode");
+        // Decoded tokens do not show how a CR was written, so it is taken
+        // to be a source newline.
+        assert_eq!(pre_text(&["\rx"], false), "x");
     }
 }

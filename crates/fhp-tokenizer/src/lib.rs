@@ -122,7 +122,18 @@ const BLOCK_SIZE: usize = 64;
 /// tokenize_with("<div>hello</div>", |_token| { count += 1; });
 /// assert!(count >= 3); // OpenTag, Text, CloseTag
 /// ```
-pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
+#[inline]
+pub fn tokenize_with<'a>(input: &'a str, on_token: impl FnMut(Token<'a>)) {
+    tokenize_with_text_decoding(input, true, on_token);
+}
+
+/// [`tokenize_with`], optionally emitting data and RCDATA text as written
+/// instead of decoding its character references.
+pub(crate) fn tokenize_with_text_decoding<'a>(
+    input: &'a str,
+    decode_text: bool,
+    mut on_token: impl FnMut(Token<'a>),
+) {
     let bytes = input.as_bytes();
     let len = bytes.len();
 
@@ -133,6 +144,9 @@ pub fn tokenize_with<'a>(input: &'a str, mut on_token: impl FnMut(Token<'a>)) {
     let dispatch = ops();
     let compute = dispatch.compute_all_masks;
     let mut parser = extract::Parser::new(input);
+    if !decode_text {
+        parser.keep_text_undecoded();
+    }
 
     let mut block_start = 0;
 

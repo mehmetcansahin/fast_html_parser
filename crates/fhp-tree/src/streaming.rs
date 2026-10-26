@@ -198,9 +198,10 @@ impl StreamParser {
     /// Limits above 2 GiB are capped because arena offsets use `u32`.
     pub fn with_max_input_size(max_input_size: usize) -> Self {
         let max_input_size = effective_max(max_input_size);
+        let (tokenizer, builder) = text_decoding_pipeline();
         Self {
-            tokenizer: StreamTokenizer::new(),
-            builder: TreeBuilder::new(),
+            tokenizer,
+            builder,
             decoder: None,
             initial_buf: Vec::with_capacity(PRESCAN_LIMIT),
             seen_input_size: 0,
@@ -370,9 +371,10 @@ impl EarlyStopParser {
     }
 
     fn new(predicate: impl for<'a> Fn(NodeRef<'a>) -> bool + 'static, mode: EarlyStopMode) -> Self {
+        let (tokenizer, builder) = text_decoding_pipeline();
         Self {
-            tokenizer: StreamTokenizer::new(),
-            builder: TreeBuilder::new(),
+            tokenizer,
+            builder,
             decoder: None,
             initial_buf: Vec::with_capacity(PRESCAN_LIMIT),
             prescan_processed_ascii: 0,
@@ -546,8 +548,7 @@ impl EarlyStopParser {
     /// Reset the tokenizer, tree, and match state built from the eagerly
     /// processed ASCII prefix.
     fn discard_prescan_work(&mut self) {
-        self.tokenizer = StreamTokenizer::new();
-        self.builder = TreeBuilder::new();
+        (self.tokenizer, self.builder) = text_decoding_pipeline();
         self.prescan_processed_ascii = 0;
         self.pending_match = None;
         self.found = None;
@@ -824,6 +825,14 @@ pub fn parse_stream_with_limit<'a>(
 
 fn effective_max(max_input_size: usize) -> usize {
     max_input_size.min(crate::MAX_REPRESENTABLE_INPUT_SIZE)
+}
+
+/// A tokenizer that leaves text undecoded and a builder that decodes it, as
+/// on the one-shot `TreeSink` path, so the builder sees newlines as written.
+fn text_decoding_pipeline() -> (StreamTokenizer, TreeBuilder) {
+    let mut builder = TreeBuilder::new();
+    builder.decode_text_tokens();
+    (StreamTokenizer::new().with_undecoded_text(), builder)
 }
 
 #[cfg(test)]

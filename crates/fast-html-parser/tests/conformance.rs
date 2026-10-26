@@ -436,6 +436,10 @@ fn supported_recovery_subset_matches_html5ever() {
             "full, multi-codepoint, and legacy entities",
             "<p title='&copy=test' data-ok='&copy test'>&CounterClockwiseContourIntegral;|&NotEqualTilde;|&copy test</p>",
         ));
+        cases.push((
+            "leading newline written as a character reference",
+            "<pre>&#13;x</pre><textarea>&#13;&#10;y</textarea><listing>&#10;z</listing><pre>\r&#10;w</pre>",
+        ));
     }
 
     for (name, html) in cases {
