@@ -156,9 +156,11 @@ let created = builder.process(token)?;
 let (arena, root) = builder.finish()?;
 ```
 
-Nesting is limited to 512 elements, excluding the synthetic root. A
-513th nested element returns `ParseError::NestingTooDeep`; a partial `Document`
-is not returned.
+At most 512 elements are open at once, excluding the synthetic root. A start
+tag past that limit inserts an empty element, and the content after it goes to
+the innermost open element, so deeply nested input still parses into a tree at
+most 513 levels deep. Tree construction does not currently fail; the `Result`
+leaves room for future limits.
 
 For `TreeSink` implementors, the `self_closing` argument now means only that a
 slash appeared in the source start tag. Determine HTML voidness with
