@@ -3035,6 +3035,20 @@ mod tests {
         assert_eq!(parse_outline("<pre>\r\n\r\nx</pre>"), "<pre>\r\nx</pre>");
     }
 
+    #[cfg(feature = "entity-decode")]
+    #[test]
+    fn leading_character_reference_cr_is_dropped_like_a_source_newline() {
+        // A known difference from HTML, which keeps this CR: newlines are not
+        // normalized, and streaming tokens arrive decoded, so the builder
+        // cannot tell `&#13;` from a source CR (see COMPATIBILITY.md).
+        assert_eq!(
+            parse_outline("<pre>&#13;x</pre><textarea>&#13;&#10;y</textarea>"),
+            "<pre>x</pre><textarea>y</textarea>"
+        );
+        // Elsewhere the reference's CR is kept.
+        assert_eq!(parse_outline("<p>&#13;x</p>"), "<p>\rx</p>");
+    }
+
     #[test]
     fn crlf_split_across_character_tokens_is_dropped_once() {
         let mut builder = TreeBuilder::new();

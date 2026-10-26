@@ -71,6 +71,12 @@ does this while preprocessing the input stream, and the suite assumes it has
 happened. Doctype content is exposed as a single string, so only the doctype
 name is compared.
 
+Because newlines are not normalized, the tree builder treats a leading CR or
+CRLF after a `pre`, `textarea`, or `listing` start tag as the newline it drops.
+A CR written as a character reference (`&#13;`) in that position is dropped
+too, where the specification keeps it: text tokens arrive decoded, so the two
+cannot be told apart.
+
 ## Intentionally unsupported in 0.2
 
 - browser `html`/`head`/`body` wrapper synthesis;

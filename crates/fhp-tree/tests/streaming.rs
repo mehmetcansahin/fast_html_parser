@@ -974,6 +974,7 @@ fn stream_equiv_review_fixtures() {
         "<select><option>a</option><script>s</script></select>",
         "<pre>\ncode</pre><textarea>\ntext</textarea>",
         "<pre>\r\ncode</pre><textarea>\r\ntext</textarea><pre>\rx</pre>",
+        "<pre>&#13;x</pre><textarea>&#13;&#10;y</textarea><listing>&#10;z</listing>",
         "<b><div>x</b>y</div>",
         "<a href=1><div>t<a href=2>x</a><p>d</p></div></a>",
         "<a><b><i><u><s><div>x</a>y",
