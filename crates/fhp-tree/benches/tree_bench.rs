@@ -39,6 +39,15 @@ fn bench_parse(c: &mut Criterion) {
                 BatchSize::LargeInput,
             );
         });
+        // Parse into the same document: lifecycle minus the allocation and
+        // first-touch cost of fresh buffers.
+        group.bench_with_input(BenchmarkId::new("reuse", name), *input, |b, html| {
+            let mut doc = fhp_tree::parse(html).unwrap();
+            b.iter(|| {
+                doc.reparse(std::hint::black_box(html.as_str())).unwrap();
+                std::hint::black_box(doc.node_count());
+            });
+        });
     }
     group.finish();
 }

@@ -729,3 +729,87 @@ fn fostered_elements_before_a_table_parse_in_linear_time() {
         "40 000 fostered elements took {elapsed:?}"
     );
 }
+
+// ---------------------------------------------------------------
+// Reusing a document's allocations
+// ---------------------------------------------------------------
+
+fn testdata(name: &str) -> String {
+    let path = format!("{}/../../testdata/{name}", env!("CARGO_MANIFEST_DIR"));
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("failed to read {path}: {e}"))
+}
+
+/// Everything a document exposes that a reparse could get wrong.
+fn digest(doc: &fhp_tree::Document) -> (usize, String, String) {
+    (doc.node_count(), doc.to_html(), doc.root().text_content())
+}
+
+#[test]
+fn reparse_builds_the_same_tree_as_a_fresh_parse() {
+    let inputs = [
+        testdata("medium_100kb.html"),
+        testdata("small_1kb.html"),
+        testdata("github.html"),
+        String::from("<p>a &amp; b</p><!-- c --><table>x<td>y</td></table>"),
+        testdata("wikipedia.html"),
+    ];
+    let mut doc = parse("<p>seed</p>").unwrap();
+    for input in &inputs {
+        doc.reparse(input).unwrap();
+        assert_eq!(digest(&doc), digest(&parse(input).unwrap()));
+    }
+}
+
+#[test]
+fn reparse_owned_builds_the_same_tree_as_a_fresh_parse() {
+    let input = testdata("medium_100kb.html");
+    let mut doc = parse(&testdata("github.html")).unwrap();
+    doc.reparse_owned(input.clone()).unwrap();
+    assert_eq!(digest(&doc), digest(&parse(&input).unwrap()));
+    // A second owned reparse releases the first source buffer.
+    doc.reparse_owned(String::from("<p>x &lt; y</p>")).unwrap();
+    assert_eq!(doc.root().text_content(), "x < y");
+}
+
+#[cfg(feature = "encoding")]
+#[test]
+fn reparse_bytes_detects_the_encoding_like_a_fresh_parse() {
+    let mut doc = parse(&testdata("small_1kb.html")).unwrap();
+    for input in [
+        &b"\xEF\xBB\xBF<p>bom</p>"[..],
+        &b"<meta charset=\"windows-1252\"><p>caf\xE9</p>"[..],
+        &b"<p>plain</p>"[..],
+        &b"<p>bad \xFF utf8</p>"[..],
+    ] {
+        doc.reparse_bytes(input).unwrap();
+        assert_eq!(digest(&doc), digest(&fhp_tree::parse_bytes(input).unwrap()));
+    }
+    assert_eq!(doc.root().text_content(), "bad \u{FFFD} utf8");
+}
+
+#[test]
+fn reparse_of_an_oversized_input_leaves_the_document_unchanged() {
+    let mut doc = parse("<p>kept</p>").unwrap();
+    let before = digest(&doc);
+    let err = doc
+        .reparse_with_limit("<p>far too long for the limit</p>", 8)
+        .unwrap_err();
+    assert!(matches!(err, fhp_tree::HtmlError::InputTooLarge { .. }));
+    assert_eq!(digest(&doc), before);
+    let err = doc
+        .reparse_owned_with_limit(String::from("<p>too long</p>"), 8)
+        .unwrap_err();
+    assert!(matches!(err, fhp_tree::HtmlError::InputTooLarge { .. }));
+    assert_eq!(digest(&doc), before);
+}
+
+#[test]
+fn reparse_forgets_the_previous_document() {
+    let mut doc = parse("<div id=\"old\" class=\"gone\"><p>old text</p></div>").unwrap();
+    doc.reparse("<span>new</span>").unwrap();
+    let html = doc.to_html();
+    assert!(!html.contains("old"), "{html}");
+    assert!(!html.contains("gone"), "{html}");
+    assert_eq!(doc.node_count(), 3);
+    assert_eq!(doc.root().children().count(), 1);
+}
