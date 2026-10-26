@@ -132,12 +132,21 @@ pub(crate) struct PrefixStop {
 /// the streaming tokenizer bounds that text itself. The emitted tokens are
 /// the leading tokens the one-shot tokenizer emits for any document that
 /// starts with `input`.
-pub(crate) fn tokenize_prefix<'a>(input: &'a str, emit: &mut impl FnMut(Token<'a>)) -> PrefixStop {
+///
+/// `decode_text` is off for a streaming tokenizer that emits text undecoded.
+pub(crate) fn tokenize_prefix<'a>(
+    input: &'a str,
+    decode_text: bool,
+    emit: &mut impl FnMut(Token<'a>),
+) -> PrefixStop {
     const BLOCK_SIZE: usize = 64;
 
     let bytes = input.as_bytes();
     let compute = fhp_simd::dispatch::ops().compute_all_masks;
     let mut parser = Parser::new(input);
+    if !decode_text {
+        parser.keep_text_undecoded();
+    }
 
     let mut block_start = 0;
     while block_start < bytes.len() {
@@ -385,6 +394,9 @@ pub(crate) struct Parser<'a> {
     bogus_data_start: usize,
     /// Escape state while inside `<script>` text.
     script_escape: ScriptEscape,
+    /// Whether data and RCDATA text tokens have their character references
+    /// decoded. When off they carry the source text as written.
+    decode_text: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -401,7 +413,14 @@ impl<'a> Parser<'a> {
             tag_scan_pos: 0,
             bogus_data_start: 0,
             script_escape: ScriptEscape::None,
+            decode_text: true,
         }
+    }
+
+    /// Emit data and RCDATA text as written instead of decoding its
+    /// character references.
+    pub(crate) fn keep_text_undecoded(&mut self) {
+        self.decode_text = false;
     }
 
     /// Process a structural delimiter (Vec mode).
@@ -569,7 +588,11 @@ impl<'a> Parser<'a> {
         if pos > self.cursor {
             let raw = self.str_slice(self.cursor, pos);
             if !raw.is_empty() {
-                let content = maybe_decode_entities(raw);
+                let content = if self.decode_text {
+                    maybe_decode_entities(raw)
+                } else {
+                    Cow::Borrowed(raw)
+                };
                 emit(Token::Text { content });
             }
         }

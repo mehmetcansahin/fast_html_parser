@@ -2,6 +2,8 @@
 //!
 //! Uses [`encoding_rs`] for the actual byte-to-character conversion.
 
+use std::borrow::Cow;
+
 use encoding_rs::Encoding;
 
 /// Decode raw bytes using a known encoding.
@@ -12,7 +14,7 @@ use encoding_rs::Encoding;
 /// U+FFFD REPLACEMENT CHARACTER, so decoding never fails.
 ///
 /// Returns an owned decoded UTF-8 string. Valid UTF-8 is still copied because
-/// the return type owns its storage.
+/// the return type owns its storage; use [`decode_cow`] to borrow it instead.
 ///
 /// # Example
 ///
@@ -24,8 +26,27 @@ use encoding_rs::Encoding;
 /// assert_eq!(decode(b"caf\xe9", UTF_8), "caf\u{FFFD}");
 /// ```
 pub fn decode(input: &[u8], encoding: &'static Encoding) -> String {
-    let input = strip_bom(input, encoding);
-    encoding.decode_without_bom_handling(input).0.into_owned()
+    decode_cow(input, encoding).into_owned()
+}
+
+/// Decode raw bytes using a known encoding, borrowing the input when it is
+/// already valid UTF-8 (or ASCII in an ASCII-compatible encoding).
+///
+/// Handles BOMs and malformed sequences exactly like [`decode`], but only
+/// allocates when the decoded text differs from the input bytes.
+///
+/// # Example
+///
+/// ```
+/// use std::borrow::Cow;
+/// use fhp_encoding::decode_cow;
+/// use encoding_rs::{UTF_8, WINDOWS_1252};
+///
+/// assert!(matches!(decode_cow(b"\xEF\xBB\xBFHello", UTF_8), Cow::Borrowed("Hello")));
+/// assert!(matches!(decode_cow(b"caf\xe9", WINDOWS_1252), Cow::Owned(_)));
+/// ```
+pub fn decode_cow<'a>(input: &'a [u8], encoding: &'static Encoding) -> Cow<'a, str> {
+    encoding.decode_with_bom_removal(input).0
 }
 
 /// Auto-detect encoding and decode in one step.
@@ -48,25 +69,26 @@ pub fn decode_or_detect(input: &[u8]) -> (String, &'static Encoding) {
     (decode(input, encoding), encoding)
 }
 
-/// Strip the BOM prefix if it matches the given encoding.
-fn strip_bom<'a>(input: &'a [u8], encoding: &'static Encoding) -> &'a [u8] {
-    if encoding == encoding_rs::UTF_8
-        && input.len() >= 3
-        && input[0] == 0xEF
-        && input[1] == 0xBB
-        && input[2] == 0xBF
-    {
-        return &input[3..];
+/// Length of the BOM at the start of `input` if it matches `encoding`, else 0.
+///
+/// This is the prefix [`decode`] strips. A BOM for a different encoding is
+/// not counted, because it is decoded as content with `encoding`.
+///
+/// # Example
+///
+/// ```
+/// use fhp_encoding::bom_length;
+/// use encoding_rs::{UTF_8, UTF_16LE};
+///
+/// assert_eq!(bom_length(b"\xEF\xBB\xBF<p>", UTF_8), 3);
+/// assert_eq!(bom_length(b"\xFF\xFE<\x00", UTF_16LE), 2);
+/// assert_eq!(bom_length(b"\xFF\xFE<\x00", UTF_8), 0);
+/// ```
+pub fn bom_length(input: &[u8], encoding: &'static Encoding) -> usize {
+    match Encoding::for_bom(input) {
+        Some((bom_encoding, length)) if bom_encoding == encoding => length,
+        _ => 0,
     }
-    if encoding == encoding_rs::UTF_16LE && input.len() >= 2 && input[0] == 0xFF && input[1] == 0xFE
-    {
-        return &input[2..];
-    }
-    if encoding == encoding_rs::UTF_16BE && input.len() >= 2 && input[0] == 0xFE && input[1] == 0xFF
-    {
-        return &input[2..];
-    }
-    input
 }
 
 #[cfg(test)]
@@ -142,5 +164,37 @@ mod tests {
             decode(b"\xFF\xFEa", encoding_rs::UTF_8),
             "\u{FFFD}\u{FFFD}a"
         );
+    }
+
+    #[test]
+    fn decode_cow_borrows_unchanged_input() {
+        assert!(matches!(
+            decode_cow(b"<p>caf\xC3\xA9</p>", encoding_rs::UTF_8),
+            Cow::Borrowed("<p>caf\u{e9}</p>")
+        ));
+        assert!(matches!(
+            decode_cow(b"\xEF\xBB\xBFa", encoding_rs::UTF_8),
+            Cow::Borrowed("a")
+        ));
+        assert!(matches!(
+            decode_cow(b"abc", encoding_rs::WINDOWS_1254),
+            Cow::Borrowed("abc")
+        ));
+        assert_eq!(decode_cow(b"\xFE", encoding_rs::WINDOWS_1254), "\u{15F}");
+        assert_eq!(
+            decode_cow(b"\xFF\xFEa", encoding_rs::UTF_8),
+            decode(b"\xFF\xFEa", encoding_rs::UTF_8)
+        );
+    }
+
+    #[test]
+    fn bom_length_counts_only_a_matching_bom() {
+        assert_eq!(bom_length(b"\xEF\xBB\xBFa", encoding_rs::UTF_8), 3);
+        assert_eq!(bom_length(b"\xEF\xBB\xBFa", encoding_rs::WINDOWS_1252), 0);
+        assert_eq!(bom_length(b"\xFF\xFEa\x00", encoding_rs::UTF_16LE), 2);
+        assert_eq!(bom_length(b"\xFF\xFEa\x00", encoding_rs::UTF_16BE), 0);
+        assert_eq!(bom_length(b"\xFE\xFF\x00a", encoding_rs::UTF_16BE), 2);
+        assert_eq!(bom_length(b"\xEF\xBB", encoding_rs::UTF_8), 0);
+        assert_eq!(bom_length(b"", encoding_rs::UTF_8), 0);
     }
 }

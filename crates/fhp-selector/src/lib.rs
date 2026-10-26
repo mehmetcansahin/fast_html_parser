@@ -57,7 +57,8 @@
 
 /// CSS selector AST types.
 pub mod ast;
-/// Bloom filter for ancestor pre-filtering.
+/// Ancestor pre-filtering for descendant combinators. Its per-node
+/// `AncestorBloom` table is deprecated.
 pub mod bloom;
 /// Right-to-left matching engine.
 pub mod matcher;
@@ -465,6 +466,9 @@ pub trait Selectable {
     fn find_by_class(&self, class: &str) -> Selection<'_>;
 
     /// Find all elements with an attribute matching a value.
+    ///
+    /// As in `[name='']`, a valueless attribute such as `disabled` has the
+    /// empty string as its value.
     fn find_by_attr(&self, name: &str, value: &str) -> Selection<'_>;
 
     /// Evaluate an XPath expression against the document.
@@ -582,7 +586,7 @@ impl Selectable for Document {
             let attrs = arena.attrs(id);
             for attr in attrs {
                 if arena.attr_name(attr).eq_ignore_ascii_case(name)
-                    && arena.attr_value(attr) == Some(value)
+                    && arena.attr_value(attr).unwrap_or("") == value
                 {
                     nodes.push(id);
                     break;

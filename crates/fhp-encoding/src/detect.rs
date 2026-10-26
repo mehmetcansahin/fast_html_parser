@@ -4,19 +4,27 @@
 //! algorithm: BOM → meta prescan → UTF-8 fallback.
 
 use encoding_rs::Encoding;
-use fhp_core::attr::{TagScanState, iter_raw_attrs, tag_name_offset};
+use fhp_core::attr::{TagScanState, iter_raw_attrs};
 use fhp_core::is_html_whitespace;
 
-/// Maximum number of bytes to prescan for `<meta>` tags.
-const PRESCAN_LIMIT: usize = 1024;
+/// Number of leading bytes [`detect`] prescans for `<meta>` declarations.
+///
+/// A caller that buffers the start of a stream for [`detect`] gets the same
+/// result as for the complete input once it has buffered this many bytes (or
+/// the whole input).
+pub const PRESCAN_LIMIT: usize = 1024;
 
 /// Detect the character encoding of raw HTML bytes.
 ///
 /// The detection order is:
 /// 1. **BOM** — UTF-8 (`EF BB BF`), UTF-16 LE (`FF FE`), UTF-16 BE (`FE FF`)
-/// 2. **`<meta charset="...">`** — first occurrence in the first 1 KB
-/// 3. **`<meta http-equiv="Content-Type" content="...charset=...">`**
-/// 4. **Fallback** — UTF-8
+/// 2. **`<meta>` prescan** — the first `<meta>` element in the first
+///    [`PRESCAN_LIMIT`] bytes that declares an encoding, either with
+///    `charset="..."` or with `http-equiv="Content-Type"` and
+///    `content="...charset=..."`. Elements are considered in document order;
+///    within one element, a `charset` attribute takes precedence over
+///    `content`.
+/// 3. **Fallback** — UTF-8
 ///
 /// # Example
 ///
@@ -28,38 +36,23 @@ const PRESCAN_LIMIT: usize = 1024;
 /// ```
 pub fn detect(input: &[u8]) -> &'static Encoding {
     // 1. BOM detection.
-    if let Some(enc) = detect_bom(input) {
+    if let Some((enc, _)) = Encoding::for_bom(input) {
         return enc;
     }
 
-    // 2–3. Meta prescan.
+    // 2. Meta prescan.
     if let Some(enc) = prescan_meta(input) {
         return enc;
     }
 
-    // 4. Fallback.
+    // 3. Fallback.
     encoding_rs::UTF_8
-}
-
-/// Check for a Byte Order Mark at the start of the input.
-fn detect_bom(input: &[u8]) -> Option<&'static Encoding> {
-    if input.len() >= 3 && input[0] == 0xEF && input[1] == 0xBB && input[2] == 0xBF {
-        return Some(encoding_rs::UTF_8);
-    }
-    if input.len() >= 2 {
-        if input[0] == 0xFF && input[1] == 0xFE {
-            return Some(encoding_rs::UTF_16LE);
-        }
-        if input[0] == 0xFE && input[1] == 0xFF {
-            return Some(encoding_rs::UTF_16BE);
-        }
-    }
-    None
 }
 
 /// Prescan the first [`PRESCAN_LIMIT`] bytes for `<meta>` encoding declarations.
 ///
-/// Looks for two patterns:
+/// Follows the HTML spec's "prescan a byte stream to determine its encoding"
+/// algorithm and looks for two patterns:
 /// - `<meta charset="ENCODING">`
 /// - `<meta http-equiv="Content-Type" content="...charset=ENCODING...">`
 ///
@@ -69,23 +62,19 @@ fn detect_bom(input: &[u8]) -> Option<&'static Encoding> {
 /// matching browser behaviour, a BOM-less UTF-16 body without one falls back to
 /// UTF-8 detection.
 fn prescan_meta(input: &[u8]) -> Option<&'static Encoding> {
-    let limit = input.len().min(PRESCAN_LIMIT);
-    let haystack = &input[..limit];
+    let haystack = &input[..input.len().min(PRESCAN_LIMIT)];
 
     // Walk complete markup so a `<meta`-like byte sequence inside a comment or
     // another tag's quoted attribute value cannot be mistaken for a tag.
     let mut pos = 0;
-    while pos < haystack.len() {
-        let Some(lt) = memchr_byte(b'<', &haystack[pos..]) else {
-            break;
-        };
-        let lt = pos + lt;
+    while let Some(offset) = memchr::memchr(b'<', &haystack[pos..]) {
+        let lt = pos + offset;
         let markup = &haystack[lt..];
 
         if markup.starts_with(b"<!--") {
             // The opener's dashes may also close the comment, so `<!-->` and
             // `<!--->` are complete comments.
-            let Some(end) = find_subsequence(&markup[2..], b"-->") else {
+            let Some(end) = memchr::memmem::find(&markup[2..], b"-->") else {
                 break;
             };
             pos = lt + 2 + end + 3;
@@ -95,14 +84,22 @@ fn prescan_meta(input: &[u8]) -> Option<&'static Encoding> {
         let Some(&after_lt) = markup.get(1) else {
             break;
         };
+        // `<meta` followed by whitespace or `/` starts a meta element. This
+        // excludes elements such as `<metadata>` and `<metaverse>`.
+        let is_meta = starts_with_ci(markup, b"<meta")
+            && markup
+                .get(5)
+                .is_some_and(|&byte| is_html_whitespace(byte) || byte == b'/');
         let is_tag = after_lt.is_ascii_alphabetic()
             || (after_lt == b'/' && markup.get(2).is_some_and(u8::is_ascii_alphabetic));
-        let gt = if is_tag {
-            find_tag_end(markup)
+        let gt = if is_meta {
+            find_tag_end(markup, b"<meta".len())
+        } else if is_tag {
+            tag_name_end(markup).and_then(|name_end| find_tag_end(markup, name_end))
         } else if matches!(after_lt, b'!' | b'/' | b'?') {
             // Declarations, bogus comments, and `</` + non-letter end at the
             // first `>`, quotes included.
-            memchr_byte(b'>', markup)
+            memchr::memchr(b'>', markup)
         } else {
             pos = lt + 1;
             continue;
@@ -110,36 +107,33 @@ fn prescan_meta(input: &[u8]) -> Option<&'static Encoding> {
         let Some(gt) = gt else {
             break;
         };
-        let tag = &markup[..=gt];
         pos = lt + gt + 1;
 
-        // Require a real tag-name boundary after "meta". This excludes
-        // elements such as `<metadata>` and `<metaverse>`.
-        if !starts_with_ci(tag, b"<meta")
-            || !tag
-                .get(5)
-                .is_some_and(|byte| is_html_whitespace(*byte) || matches!(*byte, b'/' | b'>'))
-        {
-            continue;
-        }
-
-        if let Some(enc) = meta_encoding(tag) {
-            return Some(remap_meta_encoding(enc));
+        if is_meta {
+            if let Some(enc) = meta_encoding(&markup[b"<meta".len()..gt]) {
+                return Some(remap_meta_encoding(enc));
+            }
         }
     }
     None
 }
 
-/// Encoding declared by one complete `<meta ...>` tag.
+/// Encoding declared by one `<meta>` element, given the bytes between `<meta`
+/// and its closing `>`.
 ///
-/// Tries `<meta charset="...">` first, then
-/// `<meta http-equiv="Content-Type" content="...charset=...">`.
-fn meta_encoding(tag: &[u8]) -> Option<&'static Encoding> {
-    // The bytes strictly between `<meta` and the closing `>`. Legacy bytes in
-    // an unrelated attribute value are replaced; charset labels are ASCII.
-    let region = String::from_utf8_lossy(&tag[b"<meta".len()..tag.len() - 1]);
+/// A `charset` attribute decides alone: when its value is not an encoding
+/// label, the element declares nothing, even if it also carries a
+/// `http-equiv="Content-Type"` pragma. Without one, the pragma's `content`
+/// is used.
+fn meta_encoding(region: &[u8]) -> Option<&'static Encoding> {
+    // Legacy bytes in an unrelated attribute value are replaced; charset
+    // labels are ASCII.
+    let region = String::from_utf8_lossy(region);
     let attributes = MetaAttributes::parse(&region);
-    extract_charset_attr(&attributes).or_else(|| extract_http_equiv_charset(&attributes))
+    match attributes.charset {
+        Some(value) => Encoding::for_label(value?.as_bytes()),
+        None => extract_http_equiv_charset(&attributes),
+    }
 }
 
 /// The first occurrence of each attribute relevant to encoding detection.
@@ -173,11 +167,6 @@ impl<'a> MetaAttributes<'a> {
     }
 }
 
-/// Extract encoding from `charset="VALUE"` or `charset=VALUE` in a `<meta>` tag.
-fn extract_charset_attr(attributes: &MetaAttributes<'_>) -> Option<&'static Encoding> {
-    Encoding::for_label(attributes.charset.flatten()?.as_bytes())
-}
-
 /// Extract encoding from `http-equiv="Content-Type" content="...charset=..."`.
 fn extract_http_equiv_charset(attributes: &MetaAttributes<'_>) -> Option<&'static Encoding> {
     if !attributes
@@ -192,46 +181,51 @@ fn extract_http_equiv_charset(attributes: &MetaAttributes<'_>) -> Option<&'stati
 }
 
 /// Extract a charset parameter from an HTTP Content-Type attribute value.
+///
+/// Follows the HTML spec's "extracting a character encoding from a meta
+/// element" algorithm: `charset` may appear anywhere, and the first one
+/// followed by `=` decides, even when its value is not an encoding label.
 fn extract_charset_from_content(content: &[u8]) -> Option<&'static Encoding> {
-    for (index, candidate) in content.windows(b"charset".len()).enumerate() {
-        if !candidate.eq_ignore_ascii_case(b"charset") {
-            continue;
-        }
-        if index > 0 && !is_html_whitespace(content[index - 1]) && content[index - 1] != b';' {
-            continue;
-        }
+    const CHARSET: &[u8] = b"charset";
 
-        let mut pos = index + b"charset".len();
-        while pos < content.len() && is_html_whitespace(content[pos]) {
-            pos += 1;
-        }
+    let mut pos = 0;
+    loop {
+        pos += content[pos..]
+            .windows(CHARSET.len())
+            .position(|candidate| candidate.eq_ignore_ascii_case(CHARSET))?
+            + CHARSET.len();
+        pos += skip_whitespace(&content[pos..]);
         if content.get(pos) != Some(&b'=') {
+            // Resume the search at the byte that was not `=`.
             continue;
         }
         pos += 1;
-        while pos < content.len() && is_html_whitespace(content[pos]) {
-            pos += 1;
-        }
+        pos += skip_whitespace(&content[pos..]);
 
-        let value = if matches!(content.get(pos), Some(b'\'' | b'"')) {
-            let quote = content[pos];
-            pos += 1;
-            let end = memchr_byte(quote, &content[pos..])?;
-            &content[pos..pos + end]
-        } else {
-            let end = content[pos..]
-                .iter()
-                .position(|byte| is_html_whitespace(*byte) || *byte == b';')
-                .unwrap_or(content.len() - pos);
-            &content[pos..pos + end]
+        let value = match content.get(pos)? {
+            &quote @ (b'"' | b'\'') => {
+                let rest = &content[pos + 1..];
+                &rest[..memchr::memchr(quote, rest)?]
+            }
+            _ => {
+                let rest = &content[pos..];
+                let end = rest
+                    .iter()
+                    .position(|&byte| is_html_whitespace(byte) || byte == b';')
+                    .unwrap_or(rest.len());
+                &rest[..end]
+            }
         };
-
-        if let Some(encoding) = Encoding::for_label(value) {
-            return Some(encoding);
-        }
+        return Encoding::for_label(value);
     }
+}
 
-    None
+/// Number of leading HTML whitespace bytes in `bytes`.
+fn skip_whitespace(bytes: &[u8]) -> usize {
+    bytes
+        .iter()
+        .position(|&byte| !is_html_whitespace(byte))
+        .unwrap_or(bytes.len())
 }
 
 /// Apply the HTML spec's meta-prescan encoding remap.
@@ -255,25 +249,24 @@ fn remap_meta_encoding(enc: &'static Encoding) -> &'static Encoding {
 // Helper utilities
 // ---------------------------------------------------------------------------
 
-/// Simple `memchr`-like byte search (no external dep, just for 1KB prescan).
-#[inline]
-fn memchr_byte(needle: u8, haystack: &[u8]) -> Option<usize> {
-    haystack.iter().position(|&b| b == needle)
+/// Index just past the name of the start or end tag beginning at
+/// `markup[0] == b'<'`.
+///
+/// As in the prescan algorithm (and unlike the tokenizer), the name runs to
+/// the first whitespace or `>`, so a `/` or a quote is part of the name and
+/// cannot open an attribute value.
+fn tag_name_end(markup: &[u8]) -> Option<usize> {
+    markup
+        .iter()
+        .position(|&byte| is_html_whitespace(byte) || byte == b'>')
 }
 
-/// Find the first occurrence of `needle` in `haystack`.
-fn find_subsequence(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|window| window == needle)
-}
-
-/// Index of the `>` that closes the start or end tag beginning at
-/// `markup[0] == b'<'`, following the shared tag grammar: a `>` inside a
+/// Index of the `>` that closes a tag whose attributes start at
+/// `attrs_start`, following the shared attribute grammar: a `>` inside a
 /// quoted attribute value is literal, any other `>` ends the tag.
-fn find_tag_end(markup: &[u8]) -> Option<usize> {
-    let mut state = TagScanState::START;
-    for (index, &byte) in markup.iter().enumerate().skip(tag_name_offset(markup)) {
+fn find_tag_end(markup: &[u8], attrs_start: usize) -> Option<usize> {
+    let mut state = TagScanState::BeforeAttrName;
+    for (index, &byte) in markup.iter().enumerate().skip(attrs_start) {
         if byte == b'>' && !state.gt_is_literal() {
             return Some(index);
         }
@@ -446,5 +439,109 @@ mod tests {
     fn less_than_text_does_not_hide_a_later_meta_element() {
         let input = b"<p>1 < 2</p><meta charset=windows-1252>";
         assert_eq!(detect(input).name(), "windows-1252");
+    }
+
+    #[test]
+    fn unknown_charset_attribute_does_not_fall_back_to_the_pragma() {
+        for charset in ["charset=bogus", "charset", "charset=''"] {
+            let input = format!(
+                "<meta {charset} http-equiv=Content-Type \
+                 content='text/html; charset=windows-1252'>"
+            );
+            assert_eq!(detect(input.as_bytes()).name(), "UTF-8", "{charset}");
+        }
+    }
+
+    #[test]
+    fn unknown_charset_attribute_does_not_stop_the_prescan() {
+        let input = b"<meta charset=bogus><meta charset=windows-1254>";
+        assert_eq!(detect(input).name(), "windows-1254");
+    }
+
+    #[test]
+    fn charset_attribute_wins_over_an_earlier_pragma_in_the_same_element() {
+        let input = b"<meta content='text/html; charset=windows-1254' \
+                      http-equiv=content-type charset=windows-1252>";
+        assert_eq!(detect(input).name(), "windows-1252");
+    }
+
+    #[test]
+    fn earlier_element_wins_over_a_later_charset_attribute() {
+        let input = b"<meta http-equiv=content-type content='text/html; charset=windows-1254'>\
+                      <meta charset=windows-1252>";
+        assert_eq!(detect(input).name(), "windows-1254");
+    }
+
+    #[test]
+    fn pragma_without_http_equiv_is_ignored() {
+        let input = b"<meta content='text/html; charset=windows-1254'>";
+        assert_eq!(detect(input).name(), "UTF-8");
+    }
+
+    fn content_charset(content: &str) -> Option<&'static str> {
+        extract_charset_from_content(content.as_bytes()).map(Encoding::name)
+    }
+
+    #[test]
+    fn content_charset_follows_the_spec_algorithm() {
+        assert_eq!(
+            content_charset("text/html; charset=windows-1254"),
+            Some("windows-1254")
+        );
+        assert_eq!(
+            content_charset("text/html;CHARSET = 'windows-1254'"),
+            Some("windows-1254")
+        );
+        assert_eq!(
+            content_charset("text/html; charset=\"koi8-r\" x"),
+            Some("KOI8-R")
+        );
+        // `charset` needs no word boundary before it.
+        assert_eq!(
+            content_charset("text/html,charset=windows-1254"),
+            Some("windows-1254")
+        );
+        assert_eq!(
+            content_charset("xcharset=windows-1254"),
+            Some("windows-1254")
+        );
+        // A `charset` not followed by `=` is skipped.
+        assert_eq!(
+            content_charset("charset windows-1252; charset=windows-1254"),
+            Some("windows-1254")
+        );
+        assert_eq!(
+            content_charset("charsetcharset=windows-1254"),
+            Some("windows-1254")
+        );
+        // The first `charset=` decides, even when it is not a label.
+        assert_eq!(content_charset("charset=bogus; charset=windows-1254"), None);
+        assert_eq!(content_charset("charset='windows-1254"), None);
+        assert_eq!(content_charset("charset="), None);
+        assert_eq!(content_charset("text/html"), None);
+    }
+
+    #[test]
+    fn slash_and_quote_in_a_tag_name_do_not_hide_a_later_meta() {
+        let input = b"<a/b='><meta charset=windows-1254>";
+        assert_eq!(detect(input).name(), "windows-1254");
+    }
+
+    #[test]
+    fn meta_name_may_end_with_a_slash() {
+        assert_eq!(
+            detect(b"<meta/charset=windows-1254>").name(),
+            "windows-1254"
+        );
+        assert_eq!(
+            detect(b"<META\x0Ccharset=windows-1254>").name(),
+            "windows-1254"
+        );
+    }
+
+    #[test]
+    fn quoted_greater_than_inside_meta_is_part_of_the_value() {
+        let input = b"<meta name='a>b' charset=windows-1254>";
+        assert_eq!(detect(input).name(), "windows-1254");
     }
 }

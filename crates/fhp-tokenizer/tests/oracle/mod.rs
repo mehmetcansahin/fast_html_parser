@@ -10,6 +10,8 @@
 //! - `tokenize_with` and `tokenize_into` must match `tokenize` exactly;
 //! - `StreamTokenizer::feed` and `feed_str_with` must match it for any
 //!   chunking, up to how text runs are split;
+//! - with `with_undecoded_text`, `feed_str_with` must split text exactly as
+//!   without it, and decoding each data or RCDATA token must give its tokens;
 //! - the `tokenize_into` spans must borrow from the input in order, never lose
 //!   text bytes, and never contain bytes that start markup in their context;
 //! - tags, attributes, comments, doctypes, and CDATA sections must be
@@ -163,6 +165,7 @@ pub fn check(input: &str, chunking: Chunking, shift: usize) {
     let expected = merge_text(expected);
     run.check_stream_bytes(&expected);
     run.check_stream_str(&expected);
+    run.check_stream_undecoded();
     run.check_block_shift(&expected);
     run.check_round_trip(&expected);
 }
@@ -486,7 +489,16 @@ impl Run<'_> {
     }
 
     fn check_stream_str(&self, expected: &[Event]) {
-        let mut tokenizer = StreamTokenizer::new();
+        let events = self.stream_str_events(StreamTokenizer::new());
+        self.assert_same(
+            "StreamTokenizer::feed_str_with",
+            expected,
+            &merge_text(events),
+        );
+    }
+
+    /// The tokens `feed_str_with` emits for this run's chunking, unmerged.
+    fn stream_str_events(&self, mut tokenizer: StreamTokenizer) -> Vec<Event> {
         let mut events = Vec::new();
         let mut start = 0;
         for mut end in self.chunking.boundaries(self.input.len()) {
@@ -502,10 +514,42 @@ impl Run<'_> {
             start = end;
         }
         tokenizer.finish_with(|token| events.push(Event::from_token(token)));
+        events
+    }
+
+    /// `with_undecoded_text` splits text exactly where the default tokenizer
+    /// does, so decoding each data or RCDATA text token on its own must
+    /// reproduce the default tokens one for one.
+    fn check_stream_undecoded(&self) {
+        if !self.decoding {
+            return;
+        }
+        let expected = self.stream_str_events(StreamTokenizer::new());
+        let mut context = TextContext::Data;
+        let actual: Vec<Event> = self
+            .stream_str_events(StreamTokenizer::new().with_undecoded_text())
+            .into_iter()
+            .map(|event| match event {
+                Event::Open { tag, .. } => {
+                    context = TextContext::after_open(tag);
+                    event
+                }
+                Event::Close { tag, .. }
+                    if matches!(context, TextContext::RawText(open) | TextContext::RcData(open) if open == tag) =>
+                {
+                    context = TextContext::Data;
+                    event
+                }
+                Event::Text(text) if context.decodes_entities() => {
+                    Event::Text(decode_entities(&text).into_owned())
+                }
+                other => other,
+            })
+            .collect();
         self.assert_same(
-            "StreamTokenizer::feed_str_with",
-            expected,
-            &merge_text(events),
+            "StreamTokenizer::with_undecoded_text, decoded per token",
+            &expected,
+            &actual,
         );
     }
 

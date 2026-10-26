@@ -2,8 +2,7 @@
 //! subset. This is not an html5lib replacement: each fixture below records a
 //! behavior that fast-html-parser intentionally promises.
 
-use fast_html_parser::core_types::error::ParseError;
-use fast_html_parser::{Document, HtmlError, HtmlParser, NodeRef};
+use fast_html_parser::{Document, HtmlParser, NodeRef};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum CanonicalEvent {
@@ -240,6 +239,38 @@ fn supported_recovery_subset_matches_html5ever() {
         ("code formatting adoption repair", "<code><i>x</code>y</i>"),
         ("tt formatting adoption repair", "<tt><i>x</tt>y</i>"),
         ("nested anchor start repair", "<a>one<a>two</a>"),
+        (
+            "formatting end tag moves the furthest block out",
+            "<b><div>x</b>y</div>",
+        ),
+        (
+            "nested anchor keeps the enclosing block open",
+            "<a href=1><div>t<a href=2>x</a><p>d</p></div></a>",
+        ),
+        (
+            "adoption clones the three nearest formatting elements",
+            "<a><b><i><u><s><div>x</a>y",
+        ),
+        (
+            "adoption drops ordinary elements from the stack",
+            "<b><span><em><div><p>x</p>y</b>z",
+        ),
+        (
+            "Noah's Ark limits reopened formatting",
+            "<a><b><b><b><b>x</a>y",
+        ),
+        (
+            "named block starts close a paragraph",
+            "<p>a<blockquote>b</blockquote>c<p>d<dl><dt>e</dl><p>f<figure>g</figure>",
+        ),
+        (
+            "object bounds the paragraph scope",
+            "<p>a<object><p>b</object>c</p>",
+        ),
+        (
+            "body end tag closes a column group",
+            "<table><colgroup><col></body><col></table>",
+        ),
         ("plaintext", "<plaintext><b>x&amp;"),
         (
             "duplicate attributes are first-wins",
@@ -357,6 +388,10 @@ fn supported_recovery_subset_matches_html5ever() {
             "<pre>\ncode</pre><textarea>\ntext</textarea>",
         ),
         (
+            "leading CRLF after pre and textarea",
+            "<pre>\r\ncode</pre><textarea>\r\ntext</textarea>",
+        ),
+        (
             "end tag name with equals and quote",
             "<div>a</div=\"x>b<p>visible</p>",
         ),
@@ -401,6 +436,10 @@ fn supported_recovery_subset_matches_html5ever() {
             "full, multi-codepoint, and legacy entities",
             "<p title='&copy=test' data-ok='&copy test'>&CounterClockwiseContourIntegral;|&NotEqualTilde;|&copy test</p>",
         ));
+        cases.push((
+            "leading newline written as a character reference",
+            "<pre>&#13;x</pre><textarea>&#13;&#10;y</textarea><listing>&#10;z</listing><pre>\r&#10;w</pre>",
+        ));
     }
 
     for (name, html) in cases {
@@ -408,32 +447,50 @@ fn supported_recovery_subset_matches_html5ever() {
     }
 }
 
-fn assert_nesting_error(html: String) {
+fn empty_element(name: &str) -> [CanonicalEvent; 2] {
+    [
+        CanonicalEvent::Start {
+            name: name.to_owned(),
+            attrs: Vec::new(),
+        },
+        CanonicalEvent::End(name.to_owned()),
+    ]
+}
+
+/// Canonical DOM of `depth` nested `div` elements around `inner`.
+fn nested_divs(depth: usize, inner: Vec<CanonicalEvent>) -> CanonicalDom {
+    let [start, end] = empty_element("div");
+    let mut events = vec![start; depth];
+    events.extend(inner);
+    events.extend(std::iter::repeat_n(end, depth));
+    CanonicalDom(events)
+}
+
+fn assert_parses_to(html: &str, expected: &CanonicalDom) {
     for result in [
-        HtmlParser::parse(&html),
-        HtmlParser::parse_owned(html.clone()),
+        HtmlParser::parse(html),
+        HtmlParser::parse_owned(html.to_owned()),
     ] {
-        match result {
-            Err(HtmlError::Parse(ParseError::NestingTooDeep { depth, limit })) => {
-                assert_eq!(depth, 513);
-                assert_eq!(limit, 512);
-            }
-            Err(other) => panic!("513-deep input returned the wrong error: {other}"),
-            Ok(_) => panic!("513-deep input returned a partial document"),
-        }
+        let document = result.unwrap_or_else(|error| panic!("deep input failed: {error}"));
+        assert_eq!(&canonical_fhp(&document), expected);
     }
 }
 
 #[test]
-fn nesting_limit_accepts_512_and_rejects_513_without_a_partial_document() {
+fn elements_past_512_open_elements_are_inserted_empty() {
     let mut at_limit = "<div>".repeat(512);
     at_limit.push('x');
     at_limit.push_str(&"</div>".repeat(512));
     assert_oracle_case("512 nested elements", &at_limit);
 
-    assert_nesting_error("<div>".repeat(513));
+    // The 513th element stays empty, and the text after it goes to the 512th.
+    let mut over_limit = "<div>".repeat(513);
+    over_limit.push('x');
+    let mut inner = empty_element("div").to_vec();
+    inner.push(CanonicalEvent::Text("x".to_owned()));
+    assert_parses_to(&over_limit, &nested_divs(512, inner));
 
-    let mut void_leaf_over_limit = "<div>".repeat(512);
-    void_leaf_over_limit.push_str("<br>");
-    assert_nesting_error(void_leaf_over_limit);
+    let mut void_leaf = "<div>".repeat(512);
+    void_leaf.push_str("<br>");
+    assert_parses_to(&void_leaf, &nested_divs(512, empty_element("br").to_vec()));
 }

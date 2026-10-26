@@ -12,7 +12,7 @@ use fhp_tree::streaming::{
     EarlyStopOutcome, EarlyStopParser, EarlyStopProgress, StreamParser, parse_stream,
     parse_stream_with_limit,
 };
-use fhp_tree::{parse, parse_bytes};
+use fhp_tree::{NodeRef, parse, parse_bytes};
 
 fn canonical_arena(arena: &Arena, root: NodeId) -> String {
     fn push_field(output: &mut String, kind: char, value: &str) {
@@ -317,33 +317,46 @@ fn unfinished_raw_close_tag_is_dropped_at_eof() {
 }
 
 #[test]
-fn depth_error_is_identical_for_one_shot_owned_sink_and_streaming() {
-    let html = format!("{}x", "<div>".repeat(513));
-    let is_depth_error = |result: Result<fhp_tree::Document, fhp_tree::HtmlError>| {
-        matches!(
-            result,
-            Err(fhp_tree::HtmlError::Parse(
-                fhp_core::error::ParseError::NestingTooDeep {
-                    depth: 513,
-                    limit: 512
-                }
-            ))
-        )
-    };
-
-    assert!(is_depth_error(parse(&html)));
-    assert!(is_depth_error(fhp_tree::parse_owned(html.clone())));
-    assert!(is_depth_error(parse_stream(html.as_bytes().chunks(17))));
-
+fn depth_limit_is_identical_for_one_shot_owned_sink_and_streaming() {
+    // Past 512 open elements a start tag inserts an empty element, raw-text
+    // ones included; what follows lands in the deepest open element.
+    let html = format!(
+        "{}<span>x</span><script>a&amp;b</script><p>y",
+        "<div>".repeat(512)
+    );
+    let one_shot = parse(&html).unwrap();
+    let owned = fhp_tree::parse_owned(html.clone()).unwrap();
+    let streamed = parse_stream(html.as_bytes().chunks(17)).unwrap();
     let mut builder = TreeBuilder::new();
     fhp_tokenizer::tokenize_into(&html, &mut builder);
-    assert!(matches!(
-        builder.finish(),
-        Err(fhp_core::error::ParseError::NestingTooDeep {
-            depth: 513,
-            limit: 512
-        })
-    ));
+    let (sink_arena, sink_root) = builder.finish().unwrap();
+
+    let expected = canonical_arena(one_shot.arena(), one_shot.root().id());
+    assert_eq!(canonical_arena(owned.arena(), owned.root().id()), expected);
+    assert_eq!(
+        canonical_arena(streamed.arena(), streamed.root().id()),
+        expected
+    );
+    assert_eq!(canonical_arena(&sink_arena, sink_root), expected);
+
+    let deepest = (0..512).fold(one_shot.root(), |node, _| node.first_child().unwrap());
+    let children: Vec<_> = deepest
+        .children()
+        .map(|child| one_shot.get(child))
+        .collect();
+    assert_eq!(children.len(), 6);
+    assert_eq!(children[0].tag(), Tag::Span);
+    assert_eq!(children[1].text(), "x");
+    assert_eq!(children[2].tag(), Tag::Script);
+    let script_text = if cfg!(feature = "entity-decode") {
+        "a&b"
+    } else {
+        "a&amp;b"
+    };
+    assert_eq!(children[3].text(), script_text);
+    assert_eq!(children[4].tag(), Tag::P);
+    assert_eq!(children[5].text(), "y");
+    assert!(children.iter().all(|child| !child.has_children()));
 }
 
 #[test]
@@ -569,6 +582,92 @@ fn early_stop_by_text_flag() {
     assert_eq!(parser.feed(html).unwrap(), EarlyStopProgress::Matched);
 }
 
+#[test]
+fn early_stop_observes_implied_table_elements() {
+    for (tag, html) in [
+        (Tag::Tbody, &b"<table><tr><td>x</td></tr></table>"[..]),
+        (Tag::Tr, &b"<table><td>x</td></table>"[..]),
+    ] {
+        let mut parser = EarlyStopParser::stop_on_create(move |node| node.tag() == tag);
+        assert_eq!(parser.feed(html).unwrap(), EarlyStopProgress::Matched);
+        let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+            panic!("implied {tag:?} was not observed")
+        };
+        assert_eq!(found.node().tag(), tag);
+    }
+
+    // The implied `colgroup` is the only unknown element inside the table.
+    let mut parser = EarlyStopParser::stop_on_create(|node| {
+        node.tag() == Tag::Unknown
+            && node
+                .parent()
+                .is_some_and(|parent| parent.tag() == Tag::Table)
+    });
+    assert_eq!(
+        parser.feed(b"<table><col></table>").unwrap(),
+        EarlyStopProgress::Matched
+    );
+}
+
+#[test]
+fn early_stop_observes_adoption_agency_clones() {
+    type Predicate = fn(NodeRef<'_>) -> bool;
+    fn child_of(node: NodeRef<'_>, tag: Tag, parent: Tag) -> bool {
+        node.tag() == tag
+            && node
+                .parent()
+                .is_some_and(|parent_node| parent_node.tag() == parent)
+    }
+
+    // Each predicate matches only a clone: the formatting element's
+    // replacement inside the furthest block, a clone wrapping the moved
+    // block, and a formatting element reopened after a misnested end tag.
+    let cases: [(&str, Predicate, &str); 3] = [
+        (
+            "<b><p>one</b>two</p>",
+            |node| child_of(node, Tag::B, Tag::P),
+            "<b>one</b>",
+        ),
+        (
+            "<a><b><div>x</a>y</b>",
+            |node| node.tag() == Tag::B && node.depth() == 1,
+            "<b></b>",
+        ),
+        (
+            "<div><i><b>x</i>y</b></div>",
+            |node| child_of(node, Tag::B, Tag::Div),
+            "<b>y</b>",
+        ),
+    ];
+    for (html, predicate, complete) in cases {
+        let document = parse(html).unwrap();
+        assert!(
+            document
+                .root()
+                .descendants()
+                .any(|id| predicate(document.get(id))),
+            "{html}: parse finds no match"
+        );
+
+        let mut parser = EarlyStopParser::stop_on_create(predicate);
+        assert_eq!(
+            parser.feed(html.as_bytes()).unwrap(),
+            EarlyStopProgress::Matched
+        );
+        let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+            panic!("{html}: no match on create");
+        };
+        assert!(predicate(found.node()), "{html}");
+
+        let mut parser = EarlyStopParser::stop_after_element(predicate);
+        parser.feed(html.as_bytes()).unwrap();
+        let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+            panic!("{html}: no match after the element");
+        };
+        assert_eq!(found.node().outer_html(), complete, "{html}");
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Encoding + streaming
 // ---------------------------------------------------------------------------
@@ -752,21 +851,15 @@ mod async_tests {
     }
 
     #[tokio::test]
-    async fn async_parser_returns_the_same_typed_depth_error() {
-        let html = format!("{}x", "<div>".repeat(513));
-        let result = AsyncParser::new(html.as_bytes())
+    async fn async_parser_applies_the_same_depth_limit() {
+        let html = format!("{}x<p>y", "<div>".repeat(513));
+        let expected = fhp_tree::parse(&html).unwrap().to_html();
+        let doc = AsyncParser::new(html.as_bytes())
             .with_buf_size(19)
             .parse()
-            .await;
-        assert!(matches!(
-            result,
-            Err(HtmlError::Parse(
-                fhp_core::error::ParseError::NestingTooDeep {
-                    depth: 513,
-                    limit: 512
-                }
-            ))
-        ));
+            .await
+            .unwrap();
+        assert_eq!(doc.to_html(), expected);
     }
 }
 
@@ -775,7 +868,6 @@ mod async_std_tests {
     use std::future::Future;
     use std::task::{Context, Poll, Waker};
 
-    use fhp_tree::HtmlError;
     use fhp_tree::async_std_parser::AsyncStdParser;
 
     fn block_on<F: Future>(future: F) -> F::Output {
@@ -804,23 +896,51 @@ mod async_std_tests {
     }
 
     #[test]
-    fn async_std_returns_the_same_typed_depth_error() {
+    fn async_std_applies_the_same_depth_limit() {
         block_on(async {
-            let html = format!("{}x", "<div>".repeat(513));
-            let result = AsyncStdParser::new(html.as_bytes())
+            let html = format!("{}x<p>y", "<div>".repeat(513));
+            let expected = fhp_tree::parse(&html).unwrap().to_html();
+            let actual = AsyncStdParser::new(html.as_bytes())
                 .with_buf_size(23)
                 .parse()
-                .await;
-            assert!(matches!(
-                result,
-                Err(HtmlError::Parse(
-                    fhp_core::error::ParseError::NestingTooDeep {
-                        depth: 513,
-                        limit: 512
-                    }
-                ))
-            ));
+                .await
+                .unwrap();
+            assert_eq!(actual.to_html(), expected);
         });
+    }
+}
+
+/// A CR written as a character reference right after `<pre>` is content for
+/// every parser, also when the reference is long enough for the streaming
+/// tokenizer to compact its digits.
+#[cfg(feature = "entity-decode")]
+#[test]
+fn referenced_cr_after_pre_is_kept_by_every_parser() {
+    let overlong = format!("<pre>&#{}13;x</pre>", "0".repeat(5000));
+    for html in ["<pre>&#13;x</pre>", "<pre>&#xd;x</pre>", overlong.as_str()] {
+        let context = format!("{html:.20}");
+        assert_eq!(
+            parse(html).unwrap().root().text_content(),
+            "\rx",
+            "{context}"
+        );
+        for chunk_size in [1, 7, 64, html.len()] {
+            let streamed = parse_stream(html.as_bytes().chunks(chunk_size)).unwrap();
+            assert_eq!(
+                streamed.root().text_content(),
+                "\rx",
+                "{context} in {chunk_size}-byte chunks"
+            );
+
+            let mut parser = EarlyStopParser::stop_after_element(|node| node.tag() == Tag::Pre);
+            for chunk in html.as_bytes().chunks(chunk_size) {
+                parser.feed(chunk).unwrap();
+            }
+            let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+                panic!("{context}: pre not found");
+            };
+            assert_eq!(found.node().text_content(), "\rx", "{context}");
+        }
     }
 }
 
@@ -887,6 +1007,17 @@ fn stream_equiv_review_fixtures() {
         "<table><tr><td>a</td></tr></table><td>b</td>",
         "<select><option>a</option><script>s</script></select>",
         "<pre>\ncode</pre><textarea>\ntext</textarea>",
+        "<pre>\r\ncode</pre><textarea>\r\ntext</textarea><pre>\rx</pre>",
+        "<pre>&#13;x</pre><textarea>&#13;&#10;y</textarea><listing>&#10;z</listing>",
+        "<pre>\r&#10;x</pre><pre>&#x0D;\ny</pre><pre>&NewLine;\nz</pre>",
+        "<b><div>x</b>y</div>",
+        "<a href=1><div>t<a href=2>x</a><p>d</p></div></a>",
+        "<a><b><i><u><s><div>x</a>y",
+        "<a><b><b><b><b>x</a>y",
+        "<p>a<blockquote>b</blockquote>c",
+        "<p>a<object><p>b</object>c",
+        "<html><body>x</body>\n<!--a--></html><!--b--><p>y",
+        "<body><select><option>a</body><!--c--></select><table><colgroup><col></html><col>",
         "<img alt=it's><p>visible</p><p>it's done</p>",
         "<div a\"b>x</div><p>y</p>",
         "<?xml version=\"1.0\"?><p>hi</p>",

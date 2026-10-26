@@ -15,6 +15,7 @@ exclude = ["benches/", "tests/"]
 [dependencies]
 fhp-core = { version = "0.2.0", path = "../fhp-core" }
 encoding_rs = { workspace = true }
+memchr = "2"
 
 [package.metadata.docs.rs]
 all-features = true
