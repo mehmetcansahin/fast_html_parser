@@ -448,9 +448,10 @@ pub struct TreeBuilder {
     /// (the document). Neither end tag closes anything, so everything else
     /// after them still goes to the current node.
     after_body_comment_parent: Option<NodeId>,
-    /// Elements the most recently processed token implied (`tbody`, `tr`,
-    /// `colgroup`), in creation order.
-    implied_elements: Vec<NodeId>,
+    /// Elements the most recently processed token created besides the node
+    /// it returns: implied `tbody`, `tr`, and `colgroup` elements and
+    /// adoption agency clones.
+    created_elements: Vec<NodeId>,
     /// Randomly keyed hasher for Noah's Ark identities.
     identity_state: RandomState,
     /// The synthetic root node (document root).
@@ -521,7 +522,7 @@ impl TreeBuilder {
             insertion_mode: InsertionMode::InBody,
             newline_skip: NewlineSkip::None,
             after_body_comment_parent: None,
-            implied_elements: Vec::new(),
+            created_elements: Vec::new(),
             identity_state: RandomState::new(),
             root,
             source_base: 0,
@@ -573,7 +574,7 @@ impl TreeBuilder {
     #[inline]
     pub fn process(&mut self, token: &Token<'_>) -> Result<Option<NodeId>, ParseError> {
         self.flushed_text_node = None;
-        self.implied_elements.clear();
+        self.created_elements.clear();
         let created = match token {
             Token::OpenTag {
                 tag,
@@ -631,12 +632,13 @@ impl TreeBuilder {
         self.flushed_text_node.take()
     }
 
-    /// Elements implied by the most recently processed token (`tbody`, `tr`,
-    /// `colgroup`), in creation order. They precede the element the token
-    /// itself created.
+    /// Elements the most recently processed token created besides the node
+    /// [`Self::process`] returned: implied `tbody`, `tr`, and `colgroup`
+    /// elements and the clones the adoption agency made, outer elements
+    /// first. They precede that node in document order.
     #[cfg(feature = "encoding")]
-    pub(crate) fn implied_elements(&self) -> &[NodeId] {
-        &self.implied_elements
+    pub(crate) fn created_elements(&self) -> &[NodeId] {
+        &self.created_elements
     }
 
     /// Whether a node is still present on the open-elements stack.
@@ -899,7 +901,7 @@ impl TreeBuilder {
             false,
             InsertionLocation::Append(self.current_parent()),
         );
-        self.implied_elements.push(node);
+        self.created_elements.push(node);
     }
 
     /// Pop `node` if it is the current node. Elements inserted at the nesting
@@ -1366,6 +1368,7 @@ impl TreeBuilder {
             let depth = self.arena.get(location.parent()).depth.saturating_add(1);
             let node = self.arena.clone_element_shallow(old.id, depth);
             self.attach_element(node, location);
+            self.created_elements.push(node);
             self.push_entry(OpenElement {
                 id: node,
                 element_child_count: 0,
@@ -1486,6 +1489,10 @@ impl TreeBuilder {
         self.arena.append_subtree(furthest.id, replacement);
         self.arena.set_full_element_index(replacement, 1);
         self.attach_moved_element(last_node, location);
+        // The chain was built inside out; report it outside in.
+        let clones = chain.iter().rev().map(|entry| entry.id);
+        self.created_elements.extend(clones);
+        self.created_elements.push(replacement);
 
         // The chain down to the replacement is a handful of nodes. The
         // furthest block's former children keep their depth unless the chain
@@ -1954,13 +1961,15 @@ fn is_select_breakout_start(tag: Tag, name: &str) -> bool {
 
 impl fhp_tokenizer::TreeSink for TreeBuilder {
     fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool) {
-        // Only incremental observers read the implied elements; keep the
+        // Only incremental observers read the created elements; keep the
         // one-shot path from accumulating them.
-        self.implied_elements.clear();
+        self.created_elements.clear();
         self.handle_open_tag(tag, name, PendingAttrs::Raw(attr_raw), self_closing);
     }
 
     fn close_tag(&mut self, tag: Tag, name: &str) {
+        // Misnested end tags make adoption agency clones.
+        self.created_elements.clear();
         self.handle_close_tag(tag, name);
     }
 

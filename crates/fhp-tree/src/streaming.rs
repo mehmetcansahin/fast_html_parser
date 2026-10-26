@@ -753,12 +753,12 @@ fn process_early_token(
 
     let created = builder.process(token)?.filter(|_| !is_text);
     let flushed = builder.take_flushed_text_node();
-    // Implied `tbody`, `tr`, and `colgroup` elements precede the element the
-    // token itself created.
+    // Implied `tbody`, `tr`, and `colgroup` elements and adoption agency
+    // clones precede the element the token itself created.
     let builder: &TreeBuilder = builder;
     let nodes = flushed
         .into_iter()
-        .chain(builder.implied_elements().iter().copied())
+        .chain(builder.created_elements().iter().copied())
         .chain(created);
     check_early_nodes(builder, nodes, predicate, mode, pending_match, found);
     Ok(())

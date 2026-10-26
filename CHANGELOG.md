@@ -92,7 +92,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Serializing a `<pre>`, `<textarea>`, or `<listing>` whose content starts
   with a newline writes one extra newline, so the content survives a parse.
 - `EarlyStopParser` passes implied `tbody`, `tr`, and `colgroup` elements to
-  its predicate.
+  its predicate, and the formatting elements the adoption agency clones, so
+  it finds matches that only exist after a misnesting repair.
 - `Arena::text` returns `""` for elements instead of a custom element's tag
   name.
 

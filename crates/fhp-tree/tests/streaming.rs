@@ -12,7 +12,7 @@ use fhp_tree::streaming::{
     EarlyStopOutcome, EarlyStopParser, EarlyStopProgress, StreamParser, parse_stream,
     parse_stream_with_limit,
 };
-use fhp_tree::{parse, parse_bytes};
+use fhp_tree::{NodeRef, parse, parse_bytes};
 
 fn canonical_arena(arena: &Arena, root: NodeId) -> String {
     fn push_field(output: &mut String, kind: char, value: &str) {
@@ -607,6 +607,65 @@ fn early_stop_observes_implied_table_elements() {
         parser.feed(b"<table><col></table>").unwrap(),
         EarlyStopProgress::Matched
     );
+}
+
+#[test]
+fn early_stop_observes_adoption_agency_clones() {
+    type Predicate = fn(NodeRef<'_>) -> bool;
+    fn child_of(node: NodeRef<'_>, tag: Tag, parent: Tag) -> bool {
+        node.tag() == tag
+            && node
+                .parent()
+                .is_some_and(|parent_node| parent_node.tag() == parent)
+    }
+
+    // Each predicate matches only a clone: the formatting element's
+    // replacement inside the furthest block, a clone wrapping the moved
+    // block, and a formatting element reopened after a misnested end tag.
+    let cases: [(&str, Predicate, &str); 3] = [
+        (
+            "<b><p>one</b>two</p>",
+            |node| child_of(node, Tag::B, Tag::P),
+            "<b>one</b>",
+        ),
+        (
+            "<a><b><div>x</a>y</b>",
+            |node| node.tag() == Tag::B && node.depth() == 1,
+            "<b></b>",
+        ),
+        (
+            "<div><i><b>x</i>y</b></div>",
+            |node| child_of(node, Tag::B, Tag::Div),
+            "<b>y</b>",
+        ),
+    ];
+    for (html, predicate, complete) in cases {
+        let document = parse(html).unwrap();
+        assert!(
+            document
+                .root()
+                .descendants()
+                .any(|id| predicate(document.get(id))),
+            "{html}: parse finds no match"
+        );
+
+        let mut parser = EarlyStopParser::stop_on_create(predicate);
+        assert_eq!(
+            parser.feed(html.as_bytes()).unwrap(),
+            EarlyStopProgress::Matched
+        );
+        let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+            panic!("{html}: no match on create");
+        };
+        assert!(predicate(found.node()), "{html}");
+
+        let mut parser = EarlyStopParser::stop_after_element(predicate);
+        parser.feed(html.as_bytes()).unwrap();
+        let EarlyStopOutcome::Matched(found) = parser.finish().unwrap() else {
+            panic!("{html}: no match after the element");
+        };
+        assert_eq!(found.node().outer_html(), complete, "{html}");
+    }
 }
 
 // ---------------------------------------------------------------------------
