@@ -99,7 +99,9 @@ assert_eq!(doc.root().text_content(), "third");
 ```
 
 `Document::reparse`, `reparse_owned` and `reparse_bytes` do the same with
-the default limits.
+the default limits. Node ids from the previous page mean nothing afterwards.
+The buffers only grow: after one large page the document keeps that capacity
+until `Document::shrink_to_fit` releases it.
 
 ### XPath
 

@@ -448,6 +448,14 @@ impl Document {
     /// Limits, repairs and the resulting tree are exactly those of
     /// [`parse`].
     ///
+    /// Node ids from the previous tree mean nothing afterwards: one that is
+    /// still in bounds names an unrelated node of the new tree. Borrowed
+    /// [`NodeRef`]s cannot outlive the call.
+    ///
+    /// The buffers only grow. After one large page the document keeps that
+    /// capacity for every later page; [`Document::shrink_to_fit`] releases
+    /// it. Should building the tree panic, the document is empty afterwards.
+    ///
     /// # Errors
     ///
     /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
@@ -480,9 +488,10 @@ impl Document {
     ) -> Result<(), HtmlError> {
         ensure_input_size(input.len(), max_input_size)?;
 
-        let builder = TreeBuilder::reusing(self.take_arena(), input.len());
-        let (arena, root) = build_copying_source(builder, input)?;
-        self.replace_tree(arena, root);
+        let mut reparse = Reparse::begin(self);
+        let builder = TreeBuilder::reusing(reparse.take_arena(), input.len());
+        let built = build_copying_source(builder, input)?;
+        reparse.finish(built);
         Ok(())
     }
 
@@ -514,9 +523,10 @@ impl Document {
     ) -> Result<(), HtmlError> {
         ensure_input_size(input.len(), max_input_size)?;
 
-        let builder = TreeBuilder::reusing(self.take_arena(), input.len());
-        let (arena, root) = build_taking_source(builder, input)?;
-        self.replace_tree(arena, root);
+        let mut reparse = Reparse::begin(self);
+        let builder = TreeBuilder::reusing(reparse.take_arena(), input.len());
+        let built = build_taking_source(builder, input)?;
+        reparse.finish(built);
         Ok(())
     }
 
@@ -554,16 +564,52 @@ impl Document {
         }
     }
 
-    /// Take the arena out for reuse. Until [`Document::replace_tree`] puts a
-    /// tree back, the document is empty.
-    fn take_arena(&mut self) -> Arena {
-        self.root = NodeId::NULL;
-        std::mem::take(&mut self.arena)
+    /// Release the capacity the buffers keep beyond the current tree.
+    ///
+    /// The buffers of a reused document only grow, so after one large page
+    /// they keep that capacity for every later page. Call this when the
+    /// document will not see a page that large again.
+    pub fn shrink_to_fit(&mut self) {
+        self.arena.shrink_to_fit();
+    }
+}
+
+/// A reparse in progress: the document's arena is out with the builder.
+///
+/// Dropping the guard without [`Reparse::finish`], on an error or a panic
+/// while building, installs an empty document, so the document never
+/// exposes a tree that is not there.
+struct Reparse<'a> {
+    doc: &'a mut Document,
+    done: bool,
+}
+
+impl<'a> Reparse<'a> {
+    fn begin(doc: &'a mut Document) -> Self {
+        Self { doc, done: false }
     }
 
-    fn replace_tree(&mut self, arena: Arena, root: NodeId) {
-        self.arena = arena;
-        self.root = root;
+    /// Take the arena out for the builder.
+    fn take_arena(&mut self) -> Arena {
+        self.doc.root = NodeId::NULL;
+        std::mem::take(&mut self.doc.arena)
+    }
+
+    /// Put the built tree into the document.
+    fn finish(mut self, (arena, root): (Arena, NodeId)) {
+        self.doc.arena = arena;
+        self.doc.root = root;
+        self.done = true;
+    }
+}
+
+impl Drop for Reparse<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let mut arena = Arena::new();
+            self.doc.root = arena.new_element(Tag::Unknown, 0);
+            self.doc.arena = arena;
+        }
     }
 }
 
@@ -1513,5 +1559,43 @@ mod reuse_tests {
         assert!(index[Tag::Div as u8 as usize].is_empty());
         assert_eq!(arena.len(), 3);
         assert_eq!(root, NodeId(0));
+    }
+
+    #[test]
+    fn an_abandoned_reparse_leaves_an_empty_document() {
+        let mut doc = parse("<div><p>old</p></div>").unwrap();
+        {
+            let mut reparse = Reparse::begin(&mut doc);
+            let arena = reparse.take_arena();
+            assert_eq!(arena.len(), 4);
+            // Dropped without `finish`, as an error or a panic would.
+        }
+        assert_eq!(doc.node_count(), 1);
+        assert_eq!(doc.root_id(), NodeId(0));
+        assert_eq!(doc.root().tag(), Tag::Unknown);
+        assert!(!doc.root().has_children());
+        assert_eq!(doc.root().text_content(), "");
+        // The empty document is usable again.
+        doc.reparse("<p>new</p>").unwrap();
+        assert_eq!(doc.root().text_content(), "new");
+    }
+
+    #[test]
+    fn shrink_to_fit_releases_the_retained_capacity() {
+        let big: String = "<div class=\"c\" id=\"i\">text &amp; more</div>".repeat(2000);
+        let mut doc = parse(&big).unwrap();
+        doc.reparse("<p>small</p>").unwrap();
+        assert!(doc.arena.nodes.capacity() >= 4000);
+        assert!(doc.arena.source.capacity() >= big.len());
+
+        doc.shrink_to_fit();
+        assert_eq!(doc.root().text_content(), "small");
+        assert_eq!(doc.arena.nodes.capacity(), doc.arena.nodes.len());
+        assert_eq!(doc.arena.source.capacity(), doc.arena.source.len());
+        assert_eq!(doc.arena.attr_slab.capacity(), doc.arena.attr_slab.len());
+        assert_eq!(
+            doc.arena.attr_str_slab.capacity(),
+            doc.arena.attr_str_slab.len()
+        );
     }
 }

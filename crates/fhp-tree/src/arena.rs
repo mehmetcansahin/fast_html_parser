@@ -172,6 +172,24 @@ impl Arena {
         self.stale_depths = None;
     }
 
+    /// Release the capacity every buffer holds beyond its contents.
+    ///
+    /// The counterpart of [`Arena::clear`] for an arena that will not see
+    /// a document as large as the ones it held.
+    pub fn shrink_to_fit(&mut self) {
+        self.nodes.shrink_to_fit();
+        self.text_slab.shrink_to_fit();
+        self.attr_slab.shrink_to_fit();
+        self.attr_str_slab.shrink_to_fit();
+        self.source.shrink_to_fit();
+        self.pending_source_copies.shrink_to_fit();
+        if let Some(index) = &mut self.tag_index {
+            for bucket in index.iter_mut() {
+                bucket.shrink_to_fit();
+            }
+        }
+    }
+
     /// Grow the buffers to the capacities [`Arena::with_capacity`] would
     /// allocate, where they are smaller.
     pub(crate) fn reserve(&mut self, node_cap: usize, text_cap: usize, attr_cap: usize) {

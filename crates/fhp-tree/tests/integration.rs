@@ -813,3 +813,41 @@ fn reparse_forgets_the_previous_document() {
     assert_eq!(doc.node_count(), 3);
     assert_eq!(doc.root().children().count(), 1);
 }
+
+#[test]
+fn reparse_after_parse_owned_reuses_the_transferred_source() {
+    let first = testdata("medium_100kb.html");
+    let second = testdata("github.html");
+    let mut doc = fhp_tree::parse_owned(first).unwrap();
+    // The transferred `String` is now the source buffer; a borrowed reparse
+    // copies into it.
+    doc.reparse(&second).unwrap();
+    assert_eq!(digest(&doc), digest(&parse(&second).unwrap()));
+    let third = String::from("<p>a &amp; b</p>");
+    doc.reparse_owned(third.clone()).unwrap();
+    assert_eq!(digest(&doc), digest(&parse(&third).unwrap()));
+}
+
+#[cfg(feature = "encoding")]
+#[test]
+fn reparse_of_a_streamed_document_builds_the_same_tree_as_a_fresh_parse() {
+    // A streamed document has no source buffer and keeps all text in the
+    // slab; a reparse switches it to the one-shot layout.
+    let streamed = testdata("hackernews.html");
+    let mut doc = fhp_tree::streaming::parse_stream(streamed.as_bytes().chunks(1000)).unwrap();
+    assert_eq!(digest(&doc), digest(&parse(&streamed).unwrap()));
+    let next = testdata("medium_100kb.html");
+    doc.reparse(&next).unwrap();
+    assert_eq!(digest(&doc), digest(&parse(&next).unwrap()));
+}
+
+#[test]
+fn shrink_to_fit_keeps_the_tree() {
+    let mut doc = parse(&testdata("medium_100kb.html")).unwrap();
+    let before = digest(&doc);
+    doc.shrink_to_fit();
+    assert_eq!(digest(&doc), before);
+    doc.reparse("<p>after</p>").unwrap();
+    doc.shrink_to_fit();
+    assert_eq!(doc.root().text_content(), "after");
+}
