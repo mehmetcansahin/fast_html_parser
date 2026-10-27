@@ -234,6 +234,15 @@ impl Arena {
         id
     }
 
+    /// Allocate the synthetic document root and return its id.
+    ///
+    /// Every document starts with this node: an unknown-tag element at
+    /// depth 0 that owns the whole tree. Call it on an empty arena.
+    pub(crate) fn new_root(&mut self) -> NodeId {
+        debug_assert!(self.is_empty(), "the document root is the first node");
+        self.new_element(Tag::Unknown, 0)
+    }
+
     /// Store the original tag name for an unknown/custom element.
     pub fn set_unknown_tag_name(&mut self, node: NodeId, tag_name: &str) {
         if tag_name.is_empty() || self.nodes[node.index()].tag != Tag::Unknown {

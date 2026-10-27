@@ -458,8 +458,9 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
-    /// The document is left unchanged then.
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB;
+    /// the document is left unchanged then. Any failure after the size
+    /// check, like a panic while building, leaves an empty document.
     ///
     /// # Example
     ///
@@ -479,8 +480,9 @@ impl Document {
     /// # Errors
     ///
     /// Returns [`HtmlError::InputTooLarge`] if the input exceeds
-    /// `max_input_size` or the 2 GiB arena representation limit. The
-    /// document is left unchanged then.
+    /// `max_input_size` or the 2 GiB arena representation limit; the
+    /// document is left unchanged then. Any failure after the size check
+    /// leaves an empty document, as for [`Document::reparse`].
     pub fn reparse_with_limit(
         &mut self,
         input: &str,
@@ -503,8 +505,9 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
-    /// The document is left unchanged then.
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB;
+    /// the document is left unchanged then. Any failure after the size
+    /// check leaves an empty document, as for [`Document::reparse`].
     pub fn reparse_owned(&mut self, input: String) -> Result<(), HtmlError> {
         self.reparse_owned_with_limit(input, MAX_INPUT_SIZE)
     }
@@ -514,8 +517,9 @@ impl Document {
     /// # Errors
     ///
     /// Returns [`HtmlError::InputTooLarge`] if the input exceeds
-    /// `max_input_size` or the 2 GiB arena representation limit. The
-    /// document is left unchanged then.
+    /// `max_input_size` or the 2 GiB arena representation limit; the
+    /// document is left unchanged then. Any failure after the size check
+    /// leaves an empty document, as for [`Document::reparse`].
     pub fn reparse_owned_with_limit(
         &mut self,
         input: String,
@@ -535,8 +539,9 @@ impl Document {
     ///
     /// # Errors
     ///
-    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB.
-    /// The document is left unchanged then.
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB;
+    /// the document is left unchanged then. Any failure after the size
+    /// checks leaves an empty document, as for [`Document::reparse`].
     #[cfg(feature = "encoding")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
     pub fn reparse_bytes(&mut self, input: &[u8]) -> Result<(), HtmlError> {
@@ -549,7 +554,8 @@ impl Document {
     ///
     /// Returns [`HtmlError::InputTooLarge`] if either the raw or decoded
     /// input exceeds `max_input_size` or the 2 GiB arena representation
-    /// limit. The document is left unchanged then.
+    /// limit; the document is left unchanged then. Any failure after the
+    /// size checks leaves an empty document, as for [`Document::reparse`].
     #[cfg(feature = "encoding")]
     #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
     pub fn reparse_bytes_with_limit(
@@ -607,7 +613,7 @@ impl Drop for Reparse<'_> {
     fn drop(&mut self) {
         if !self.done {
             let mut arena = Arena::new();
-            self.doc.root = arena.new_element(Tag::Unknown, 0);
+            self.doc.root = arena.new_root();
             self.doc.arena = arena;
         }
     }
@@ -1590,12 +1596,11 @@ mod reuse_tests {
 
         doc.shrink_to_fit();
         assert_eq!(doc.root().text_content(), "small");
-        assert_eq!(doc.arena.nodes.capacity(), doc.arena.nodes.len());
-        assert_eq!(doc.arena.source.capacity(), doc.arena.source.len());
-        assert_eq!(doc.arena.attr_slab.capacity(), doc.arena.attr_slab.len());
-        assert_eq!(
-            doc.arena.attr_str_slab.capacity(),
-            doc.arena.attr_str_slab.len()
-        );
+        // `shrink_to_fit` may keep some excess capacity, so only check that
+        // the large page's capacity is gone.
+        assert!(doc.arena.nodes.capacity() < 4000);
+        assert!(doc.arena.source.capacity() < big.len());
+        assert!(doc.arena.attr_slab.capacity() < 4000);
+        assert!(doc.arena.attr_str_slab.capacity() < big.len());
     }
 }

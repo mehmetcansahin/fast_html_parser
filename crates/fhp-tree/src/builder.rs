@@ -535,12 +535,7 @@ impl TreeBuilder {
 
     /// Start a builder over an empty arena.
     fn from_arena(mut arena: Arena) -> Self {
-        debug_assert!(
-            arena.is_empty(),
-            "a tree builder starts from an empty arena"
-        );
-        // Create a synthetic document root.
-        let root = arena.new_element(Tag::Unknown, 0);
+        let root = arena.new_root();
         let mut open_elements = Vec::with_capacity(32);
         open_elements.push(OpenElement {
             id: root,
