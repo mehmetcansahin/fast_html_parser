@@ -26,6 +26,20 @@
 //!     .unwrap();
 //! ```
 //!
+//! ## Reusing a Document
+//!
+//! A scraper that parses page after page can parse into the same
+//! [`Document`] and keep its buffers, which skips the allocation and
+//! first-touch page faults of fresh buffers on every page:
+//!
+//! ```
+//! use fast_html_parser::HtmlParser;
+//!
+//! let mut doc = HtmlParser::parse("<p>first</p>").unwrap();
+//! doc.reparse("<p>second</p>").unwrap();
+//! assert_eq!(doc.root().text_content(), "second");
+//! ```
+//!
 //! ## CSS Selectors
 //!
 //! ```
@@ -334,6 +348,60 @@ impl HtmlParser {
     #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
     pub fn parse_raw(&self, input: &[u8]) -> Result<Document, HtmlError> {
         fhp_tree::parse_bytes_with_limit(input, self.max_input_size)
+    }
+
+    /// Parse an HTML string into an existing document with the current
+    /// configuration, reusing the document's allocations.
+    ///
+    /// The previous tree is discarded and the document's buffers keep their
+    /// capacity, so a loop over many pages skips the allocation and
+    /// first-touch page faults of fresh buffers. See [`Document::reparse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds the
+    /// configured limit. The document is left unchanged then.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fast_html_parser::HtmlParser;
+    ///
+    /// let parser = HtmlParser::builder().build();
+    /// let mut doc = parser.parse_str("<p>first</p>").unwrap();
+    /// for page in ["<p>second</p>", "<p>third</p>"] {
+    ///     parser.reparse_str(&mut doc, page).unwrap();
+    /// }
+    /// assert_eq!(doc.root().text_content(), "third");
+    /// ```
+    pub fn reparse_str(&self, doc: &mut Document, input: &str) -> Result<(), HtmlError> {
+        doc.reparse_with_limit(input, self.max_input_size)
+    }
+
+    /// Parse an owned `String` into an existing document with the current
+    /// configuration, reusing the document's allocations and transferring
+    /// `input` as the source buffer like [`HtmlParser::parse_str_owned`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds the
+    /// configured limit. The document is left unchanged then.
+    pub fn reparse_str_owned(&self, doc: &mut Document, input: String) -> Result<(), HtmlError> {
+        doc.reparse_owned_with_limit(input, self.max_input_size)
+    }
+
+    /// Parse raw bytes into an existing document with the current
+    /// configuration, reusing the document's allocations and auto-detecting
+    /// the encoding like [`HtmlParser::parse_raw`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the raw or decoded input exceeds
+    /// the configured limit. The document is left unchanged then.
+    #[cfg(feature = "encoding")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
+    pub fn reparse_raw(&self, doc: &mut Document, input: &[u8]) -> Result<(), HtmlError> {
+        doc.reparse_bytes_with_limit(input, self.max_input_size)
     }
 }
 

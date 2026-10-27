@@ -506,14 +506,36 @@ impl TreeBuilder {
     /// Uses heuristics to estimate node, text, and attribute counts from the
     /// input byte length, reducing reallocations for large documents.
     pub fn with_capacity_hint(input_len: usize) -> Self {
+        let (node_cap, text_cap, attr_cap) = Self::capacities_for(input_len);
+        Self::from_arena(Arena::with_capacity(node_cap, text_cap, attr_cap))
+    }
+
+    /// Create a tree builder that parses into an arena from an earlier parse.
+    ///
+    /// The arena is emptied first; its node, text and attribute buffers keep
+    /// their allocations and grow to the capacity hint for `input_len` where
+    /// they are smaller. The builder starts exactly like
+    /// [`TreeBuilder::with_capacity_hint`] otherwise.
+    pub fn reusing(mut arena: Arena, input_len: usize) -> Self {
+        arena.clear();
+        let (node_cap, text_cap, attr_cap) = Self::capacities_for(input_len);
+        arena.reserve(node_cap, text_cap, attr_cap);
+        Self::from_arena(arena)
+    }
+
+    /// Node, text and attribute capacities estimated from the input length.
+    fn capacities_for(input_len: usize) -> (usize, usize, usize) {
         let capacity_hint_len = input_len.min(MAX_CAPACITY_HINT_INPUT);
         let node_cap = (capacity_hint_len / 32).max(256);
         // Source-backed text uses offsets, not slab — smaller alloc suffices.
         let text_cap = (capacity_hint_len / 16).max(4096);
         let attr_cap = (capacity_hint_len / 128).max(64);
-        let mut arena = Arena::with_capacity(node_cap, text_cap, attr_cap);
-        // Create a synthetic document root.
-        let root = arena.new_element(Tag::Unknown, 0);
+        (node_cap, text_cap, attr_cap)
+    }
+
+    /// Start a builder over an empty arena.
+    fn from_arena(mut arena: Arena) -> Self {
+        let root = arena.new_root();
         let mut open_elements = Vec::with_capacity(32);
         open_elements.push(OpenElement {
             id: root,

@@ -79,6 +79,30 @@ let doc = HtmlParser::parse_owned(body).unwrap();
 assert_eq!(doc.root().text_content(), "Hello");
 ```
 
+### Reusing a Document
+
+When you parse many pages in one process, parse into the same `Document`.
+Its node, text, attribute and source buffers keep their capacity, so each
+page after the first skips the allocation and first-touch page faults of
+fresh buffers. On multi-megabyte pages that is up to a fifth of the parse
+time; on pages under a few hundred kilobytes it makes no difference.
+
+```rust
+use fast_html_parser::HtmlParser;
+
+let parser = HtmlParser::builder().build();
+let mut doc = parser.parse_str("<p>first</p>").unwrap();
+for page in ["<p>second</p>", "<p>third</p>"] {
+    parser.reparse_str(&mut doc, page).unwrap();
+}
+assert_eq!(doc.root().text_content(), "third");
+```
+
+`Document::reparse`, `reparse_owned` and `reparse_bytes` do the same with
+the default limits. Node ids from the previous page mean nothing afterwards.
+The buffers only grow: after one large page the document keeps that capacity
+until `Document::shrink_to_fit` releases it.
+
 ### XPath
 
 XPath is opt-in. Enable the `xpath` feature in your dependency:

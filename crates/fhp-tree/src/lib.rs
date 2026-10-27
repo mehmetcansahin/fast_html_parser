@@ -132,12 +132,36 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
 pub fn parse_with_limit(input: &str, max_input_size: usize) -> Result<Document, HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
-    let mut builder = TreeBuilder::with_capacity_hint(input.len());
-    builder.set_source(input);
-    fhp_tokenizer::tokenize_into(input, &mut builder);
-    let (arena, root) = builder.finish()?;
+    let builder = TreeBuilder::with_capacity_hint(input.len());
+    let (arena, root) = build_copying_source(builder, input)?;
 
     Ok(Document { arena, root })
+}
+
+/// Tokenize `input` into `builder`, with the arena keeping its own copy of
+/// the source for source-backed text.
+fn build_copying_source(
+    mut builder: TreeBuilder,
+    input: &str,
+) -> Result<(Arena, NodeId), HtmlError> {
+    builder.set_source(input);
+    fhp_tokenizer::tokenize_into(input, &mut builder);
+    Ok(builder.finish()?)
+}
+
+/// Tokenize `input` into `builder`, then transfer the `String` to the arena
+/// as its source without copying.
+fn build_taking_source(
+    mut builder: TreeBuilder,
+    input: String,
+) -> Result<(Arena, NodeId), HtmlError> {
+    // Set source pointer tracking without copying data.
+    builder.set_source_ptr(&input);
+    fhp_tokenizer::tokenize_into(&input, &mut builder);
+    let (mut arena, root) = builder.finish()?;
+    // Transfer the String's allocation directly — no memcpy.
+    arena.set_source_owned(input);
+    Ok((arena, root))
 }
 
 /// Parse an owned `String` into a [`Document`], transferring the allocation.
@@ -173,13 +197,8 @@ pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
 pub fn parse_owned_with_limit(input: String, max_input_size: usize) -> Result<Document, HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
-    let mut builder = TreeBuilder::with_capacity_hint(input.len());
-    // Set source pointer tracking without copying data.
-    builder.set_source_ptr(&input);
-    fhp_tokenizer::tokenize_into(&input, &mut builder);
-    let (mut arena, root) = builder.finish()?;
-    // Transfer the String's allocation directly — no memcpy.
-    arena.set_source_owned(input);
+    let builder = TreeBuilder::with_capacity_hint(input.len());
+    let (arena, root) = build_taking_source(builder, input)?;
 
     Ok(Document { arena, root })
 }
@@ -223,6 +242,20 @@ pub fn parse_bytes(input: &[u8]) -> Result<Document, HtmlError> {
 #[cfg(feature = "encoding")]
 #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
 pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Document, HtmlError> {
+    let (text, effective_max) = decode_bytes_with_limit(input, max_input_size)?;
+    match text {
+        Cow::Borrowed(text) => parse_with_limit(text, effective_max),
+        Cow::Owned(text) => parse_owned_with_limit(text, effective_max),
+    }
+}
+
+/// Decode `input` for [`parse_bytes_with_limit`]: the text, borrowed when
+/// the input is valid UTF-8, and the limit that applies to the decoded text.
+#[cfg(feature = "encoding")]
+fn decode_bytes_with_limit(
+    input: &[u8],
+    max_input_size: usize,
+) -> Result<(Cow<'_, str>, usize), HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
     let effective_max = max_input_size.min(MAX_REPRESENTABLE_INPUT_SIZE);
@@ -231,13 +264,10 @@ pub fn parse_bytes_with_limit(input: &[u8], max_input_size: usize) -> Result<Doc
     // Valid UTF-8 decodes to itself: parse it in place rather than copying
     // it through the decoder and validating it a second time.
     if encoding == encoding_rs::UTF_8 {
-        return match decode_utf8_with_limit(input, effective_max)? {
-            Cow::Borrowed(text) => parse_with_limit(text, effective_max),
-            Cow::Owned(text) => parse_owned_with_limit(text, effective_max),
-        };
+        return Ok((decode_utf8_with_limit(input, effective_max)?, effective_max));
     }
     let text = decode_with_limit(encoding, input, effective_max)?;
-    parse_owned_with_limit(text, effective_max)
+    Ok((Cow::Owned(text), effective_max))
 }
 
 /// Decode UTF-8 with the same output as `encoding_rs`, without its chunked
@@ -406,6 +436,186 @@ impl Document {
     /// Root node id.
     pub fn root_id(&self) -> NodeId {
         self.root
+    }
+
+    /// Parse `input` into this document, reusing its allocations.
+    ///
+    /// The previous tree is discarded. The node, text, attribute and source
+    /// buffers keep their capacity, so a loop that parses many documents
+    /// skips the allocation and first-touch page faults of fresh buffers:
+    /// on multi-megabyte documents that is up to a fifth of the parse time,
+    /// on documents under a few hundred kilobytes it makes no difference.
+    /// Limits, repairs and the resulting tree are exactly those of
+    /// [`parse`].
+    ///
+    /// Node ids from the previous tree mean nothing afterwards: one that is
+    /// still in bounds names an unrelated node of the new tree. Borrowed
+    /// [`NodeRef`]s cannot outlive the call.
+    ///
+    /// The buffers only grow. After one large page the document keeps that
+    /// capacity for every later page; [`Document::shrink_to_fit`] releases
+    /// it. Should building the tree panic, the document is empty afterwards.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB;
+    /// the document is left unchanged then. Any failure after the size
+    /// check, like a panic while building, leaves an empty document.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use fhp_tree::parse;
+    ///
+    /// let mut doc = parse("<p>first</p>").unwrap();
+    /// doc.reparse("<p>second</p>").unwrap();
+    /// assert_eq!(doc.root().text_content(), "second");
+    /// ```
+    pub fn reparse(&mut self, input: &str) -> Result<(), HtmlError> {
+        self.reparse_with_limit(input, MAX_INPUT_SIZE)
+    }
+
+    /// [`Document::reparse`] with a caller-provided maximum input size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds
+    /// `max_input_size` or the 2 GiB arena representation limit; the
+    /// document is left unchanged then. Any failure after the size check
+    /// leaves an empty document, as for [`Document::reparse`].
+    pub fn reparse_with_limit(
+        &mut self,
+        input: &str,
+        max_input_size: usize,
+    ) -> Result<(), HtmlError> {
+        ensure_input_size(input.len(), max_input_size)?;
+
+        let mut reparse = Reparse::begin(self);
+        let builder = TreeBuilder::reusing(reparse.take_arena(), input.len());
+        let built = build_copying_source(builder, input)?;
+        reparse.finish(built);
+        Ok(())
+    }
+
+    /// Parse an owned `String` into this document, reusing its allocations
+    /// and transferring `input` as the source buffer like [`parse_owned`].
+    ///
+    /// The previous source buffer is released; the other buffers keep their
+    /// capacity as in [`Document::reparse`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB;
+    /// the document is left unchanged then. Any failure after the size
+    /// check leaves an empty document, as for [`Document::reparse`].
+    pub fn reparse_owned(&mut self, input: String) -> Result<(), HtmlError> {
+        self.reparse_owned_with_limit(input, MAX_INPUT_SIZE)
+    }
+
+    /// [`Document::reparse_owned`] with a caller-provided maximum input size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds
+    /// `max_input_size` or the 2 GiB arena representation limit; the
+    /// document is left unchanged then. Any failure after the size check
+    /// leaves an empty document, as for [`Document::reparse`].
+    pub fn reparse_owned_with_limit(
+        &mut self,
+        input: String,
+        max_input_size: usize,
+    ) -> Result<(), HtmlError> {
+        ensure_input_size(input.len(), max_input_size)?;
+
+        let mut reparse = Reparse::begin(self);
+        let builder = TreeBuilder::reusing(reparse.take_arena(), input.len());
+        let built = build_taking_source(builder, input)?;
+        reparse.finish(built);
+        Ok(())
+    }
+
+    /// Parse raw bytes into this document, reusing its allocations and
+    /// detecting the encoding like [`parse_bytes`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if the input exceeds 256 MiB;
+    /// the document is left unchanged then. Any failure after the size
+    /// checks leaves an empty document, as for [`Document::reparse`].
+    #[cfg(feature = "encoding")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
+    pub fn reparse_bytes(&mut self, input: &[u8]) -> Result<(), HtmlError> {
+        self.reparse_bytes_with_limit(input, MAX_INPUT_SIZE)
+    }
+
+    /// [`Document::reparse_bytes`] with a caller-provided maximum input size.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HtmlError::InputTooLarge`] if either the raw or decoded
+    /// input exceeds `max_input_size` or the 2 GiB arena representation
+    /// limit; the document is left unchanged then. Any failure after the
+    /// size checks leaves an empty document, as for [`Document::reparse`].
+    #[cfg(feature = "encoding")]
+    #[cfg_attr(docsrs, doc(cfg(feature = "encoding")))]
+    pub fn reparse_bytes_with_limit(
+        &mut self,
+        input: &[u8],
+        max_input_size: usize,
+    ) -> Result<(), HtmlError> {
+        let (text, effective_max) = decode_bytes_with_limit(input, max_input_size)?;
+        match text {
+            Cow::Borrowed(text) => self.reparse_with_limit(text, effective_max),
+            Cow::Owned(text) => self.reparse_owned_with_limit(text, effective_max),
+        }
+    }
+
+    /// Release the capacity the buffers keep beyond the current tree.
+    ///
+    /// The buffers of a reused document only grow, so after one large page
+    /// they keep that capacity for every later page. Call this when the
+    /// document will not see a page that large again.
+    pub fn shrink_to_fit(&mut self) {
+        self.arena.shrink_to_fit();
+    }
+}
+
+/// A reparse in progress: the document's arena is out with the builder.
+///
+/// Dropping the guard without [`Reparse::finish`], on an error or a panic
+/// while building, installs an empty document, so the document never
+/// exposes a tree that is not there.
+struct Reparse<'a> {
+    doc: &'a mut Document,
+    done: bool,
+}
+
+impl<'a> Reparse<'a> {
+    fn begin(doc: &'a mut Document) -> Self {
+        Self { doc, done: false }
+    }
+
+    /// Take the arena out for the builder.
+    fn take_arena(&mut self) -> Arena {
+        self.doc.root = NodeId::NULL;
+        std::mem::take(&mut self.doc.arena)
+    }
+
+    /// Put the built tree into the document.
+    fn finish(mut self, (arena, root): (Arena, NodeId)) {
+        self.doc.arena = arena;
+        self.doc.root = root;
+        self.done = true;
+    }
+}
+
+impl Drop for Reparse<'_> {
+    fn drop(&mut self) {
+        if !self.done {
+            let mut arena = Arena::new();
+            self.doc.root = arena.new_root();
+            self.doc.arena = arena;
+        }
     }
 }
 
@@ -1312,5 +1522,85 @@ mod tests {
         assert_eq!(doc.arena().unknown_tag_name(widget.id()), Some("my-widget"));
         assert_eq!(doc.arena().text(widget.id()), "");
         assert_eq!(widget.text(), "");
+    }
+}
+
+#[cfg(test)]
+mod reuse_tests {
+    use super::*;
+
+    #[test]
+    fn reparse_keeps_the_buffer_capacities() {
+        let big: String = "<div class=\"c\" id=\"i\">text &amp; more</div>".repeat(2000);
+        let mut doc = parse(&big).unwrap();
+        let nodes = doc.arena.nodes.capacity();
+        let text = doc.arena.text_slab.capacity();
+        let attrs = doc.arena.attr_slab.capacity();
+        let attr_strs = doc.arena.attr_str_slab.capacity();
+        let source = doc.arena.source.capacity();
+        assert!(nodes >= 4000 && attrs >= 4000 && source >= big.len());
+
+        doc.reparse("<p>small</p>").unwrap();
+        assert_eq!(doc.root().text_content(), "small");
+        assert_eq!(doc.arena.nodes.capacity(), nodes);
+        assert_eq!(doc.arena.text_slab.capacity(), text);
+        assert_eq!(doc.arena.attr_slab.capacity(), attrs);
+        assert_eq!(doc.arena.attr_str_slab.capacity(), attr_strs);
+        assert_eq!(doc.arena.source.capacity(), source);
+    }
+
+    #[test]
+    fn reusing_clears_a_tag_index_without_disabling_it() {
+        let mut builder = TreeBuilder::with_capacity_hint(0);
+        builder.enable_tag_index();
+        fhp_tokenizer::tokenize_into("<div><p>a</p><p>b</p></div>", &mut builder);
+        let (arena, _) = builder.finish().unwrap();
+        assert_eq!(arena.tag_index().unwrap()[Tag::P as u8 as usize].len(), 2);
+
+        let mut builder = TreeBuilder::reusing(arena, 0);
+        fhp_tokenizer::tokenize_into("<p>only</p>", &mut builder);
+        let (arena, root) = builder.finish().unwrap();
+        let index = arena.tag_index().unwrap();
+        assert_eq!(index[Tag::P as u8 as usize].len(), 1);
+        assert!(index[Tag::Div as u8 as usize].is_empty());
+        assert_eq!(arena.len(), 3);
+        assert_eq!(root, NodeId(0));
+    }
+
+    #[test]
+    fn an_abandoned_reparse_leaves_an_empty_document() {
+        let mut doc = parse("<div><p>old</p></div>").unwrap();
+        {
+            let mut reparse = Reparse::begin(&mut doc);
+            let arena = reparse.take_arena();
+            assert_eq!(arena.len(), 4);
+            // Dropped without `finish`, as an error or a panic would.
+        }
+        assert_eq!(doc.node_count(), 1);
+        assert_eq!(doc.root_id(), NodeId(0));
+        assert_eq!(doc.root().tag(), Tag::Unknown);
+        assert!(!doc.root().has_children());
+        assert_eq!(doc.root().text_content(), "");
+        // The empty document is usable again.
+        doc.reparse("<p>new</p>").unwrap();
+        assert_eq!(doc.root().text_content(), "new");
+    }
+
+    #[test]
+    fn shrink_to_fit_releases_the_retained_capacity() {
+        let big: String = "<div class=\"c\" id=\"i\">text &amp; more</div>".repeat(2000);
+        let mut doc = parse(&big).unwrap();
+        doc.reparse("<p>small</p>").unwrap();
+        assert!(doc.arena.nodes.capacity() >= 4000);
+        assert!(doc.arena.source.capacity() >= big.len());
+
+        doc.shrink_to_fit();
+        assert_eq!(doc.root().text_content(), "small");
+        // `shrink_to_fit` may keep some excess capacity, so only check that
+        // the large page's capacity is gone.
+        assert!(doc.arena.nodes.capacity() < 4000);
+        assert!(doc.arena.source.capacity() < big.len());
+        assert!(doc.arena.attr_slab.capacity() < 4000);
+        assert!(doc.arena.attr_str_slab.capacity() < big.len());
     }
 }

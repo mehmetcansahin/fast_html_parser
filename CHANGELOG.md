@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `Document::reparse`, `reparse_owned` and `reparse_bytes` (each with a
+  `_with_limit` variant), and `HtmlParser::reparse_str`, `reparse_str_owned`
+  and `reparse_raw`: parse the next input into an existing document, keeping
+  its node, text, attribute and source buffers. A loop over many pages then
+  skips the allocation and first-touch page faults of fresh buffers, which
+  measured up to a fifth of the parse time on multi-megabyte pages and
+  nothing on pages under a few hundred kilobytes. On an oversized input the
+  document is left unchanged, and should building the tree panic it is
+  empty afterwards. `Document::shrink_to_fit` releases the capacity a reused
+  document keeps after a large page. Underneath: `Arena::clear`,
+  `Arena::shrink_to_fit` and `TreeBuilder::reusing`.
+
 - A contract-checked tokenizer comparison benchmark against html5gum,
   html5ever, lol_html and tl. Ratios are formed only where a competitor's
   canonical token stream matches fhp-tokenizer's; lol_html and tl rows are

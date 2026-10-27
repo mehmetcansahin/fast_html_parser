@@ -151,6 +151,58 @@ impl Arena {
         }
     }
 
+    /// Remove every node, text, attribute and the source, keeping the
+    /// allocations for the next parse.
+    ///
+    /// A tag index stays enabled, with its buckets emptied. Reusing an arena
+    /// this way skips the allocation and first-touch page faults of fresh
+    /// buffers, which cost up to a fifth of a large document's parse time.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.text_slab.clear();
+        self.attr_slab.clear();
+        self.attr_str_slab.clear();
+        self.source.clear();
+        self.pending_source_copies.clear();
+        if let Some(index) = &mut self.tag_index {
+            for bucket in index.iter_mut() {
+                bucket.clear();
+            }
+        }
+        self.stale_depths = None;
+    }
+
+    /// Release the capacity every buffer holds beyond its contents.
+    ///
+    /// The counterpart of [`Arena::clear`] for an arena that will not see
+    /// a document as large as the ones it held.
+    pub fn shrink_to_fit(&mut self) {
+        self.nodes.shrink_to_fit();
+        self.text_slab.shrink_to_fit();
+        self.attr_slab.shrink_to_fit();
+        self.attr_str_slab.shrink_to_fit();
+        self.source.shrink_to_fit();
+        self.pending_source_copies.shrink_to_fit();
+        if let Some(index) = &mut self.tag_index {
+            for bucket in index.iter_mut() {
+                bucket.shrink_to_fit();
+            }
+        }
+    }
+
+    /// Grow the buffers to the capacities [`Arena::with_capacity`] would
+    /// allocate, where they are smaller.
+    pub(crate) fn reserve(&mut self, node_cap: usize, text_cap: usize, attr_cap: usize) {
+        self.nodes
+            .reserve(node_cap.saturating_sub(self.nodes.len()));
+        self.text_slab
+            .reserve(text_cap.saturating_sub(self.text_slab.len()));
+        self.attr_slab
+            .reserve(attr_cap.saturating_sub(self.attr_slab.len()));
+        self.attr_str_slab
+            .reserve((attr_cap * 32).saturating_sub(self.attr_str_slab.len()));
+    }
+
     /// Enable the inline tag index.
     ///
     /// Once enabled, every [`Arena::new_element`] call appends the node id to
@@ -180,6 +232,15 @@ impl Arena {
             idx[tag as u8 as usize].push(id);
         }
         id
+    }
+
+    /// Allocate the synthetic document root and return its id.
+    ///
+    /// Every document starts with this node: an unknown-tag element at
+    /// depth 0 that owns the whole tree. Call it on an empty arena.
+    pub(crate) fn new_root(&mut self) -> NodeId {
+        debug_assert!(self.is_empty(), "the document root is the first node");
+        self.new_element(Tag::Unknown, 0)
     }
 
     /// Store the original tag name for an unknown/custom element.
@@ -221,7 +282,9 @@ impl Arena {
 
     /// Store an owned copy of the input source for source-backed text nodes.
     pub fn set_source(&mut self, input: &str) {
-        self.source = input.to_owned();
+        // Copy into the existing buffer: a reused arena keeps its capacity.
+        self.source.clear();
+        self.source.push_str(input);
         self.resolve_pending_source_copies();
     }
 
