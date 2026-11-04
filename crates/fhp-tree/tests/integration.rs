@@ -766,9 +766,11 @@ fn reparse_owned_builds_the_same_tree_as_a_fresh_parse() {
     let mut doc = parse(&testdata("github.html")).unwrap();
     doc.reparse_owned(input.clone()).unwrap();
     assert_eq!(digest(&doc), digest(&parse(&input).unwrap()));
-    // A second owned reparse releases the first source buffer.
-    doc.reparse_owned(String::from("<p>x &lt; y</p>")).unwrap();
-    assert_eq!(doc.root().text_content(), "x < y");
+    // A second owned reparse releases the first source buffer. The reference
+    // keeps the expected text right with and without `entity-decode`.
+    let second = String::from("<p>x &lt; y</p>");
+    doc.reparse_owned(second.clone()).unwrap();
+    assert_eq!(digest(&doc), digest(&parse(&second).unwrap()));
 }
 
 #[cfg(feature = "encoding")]
