@@ -6,7 +6,7 @@
 //!
 //! [`Node`]: crate::node::Node
 
-use fhp_core::attr::{SeenAttributes, ascii_ci_fingerprint, iter_raw_attrs};
+use fhp_core::attr::{RawAttr, SeenAttributes, ascii_ci_fingerprint, iter_raw_attrs};
 use fhp_core::hash::{class_bloom_bit, selector_hash};
 use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
@@ -447,6 +447,24 @@ impl Arena {
         // Bound the initial reservation so duplicate-heavy or single-value
         // inputs do not reserve in proportion to their full source length.
         let estimated_attrs = (end / 10).clamp(1, 16);
+        self.push_raw_attrs(node, iter_raw_attrs(attr_raw), estimated_attrs);
+    }
+
+    /// [`Arena::set_attrs_from_raw`] for a region the tokenizer has already
+    /// split into `attrs`.
+    pub(crate) fn set_split_attrs(&mut self, node: NodeId, attrs: &[RawAttr<'_>]) {
+        self.push_raw_attrs(node, attrs.iter().copied(), attrs.len());
+    }
+
+    /// Copy raw attributes into the slab, dropping later duplicates.
+    /// `estimated_attrs` sizes the reservation.
+    #[inline]
+    fn push_raw_attrs<'a>(
+        &mut self,
+        node: NodeId,
+        attrs: impl Iterator<Item = RawAttr<'a>>,
+        estimated_attrs: usize,
+    ) {
         if estimated_attrs > 1 {
             self.attr_slab.reserve(estimated_attrs);
             self.attr_str_slab.reserve(estimated_attrs * 16);
@@ -458,7 +476,7 @@ impl Arena {
         let mut class_hash = 0u64;
         let mut id_hash = 0u32;
 
-        for attr in iter_raw_attrs(attr_raw) {
+        for attr in attrs {
             if count == u16::MAX {
                 break;
             }

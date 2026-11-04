@@ -7,7 +7,7 @@
 
 use std::borrow::Cow;
 
-use fhp_core::attr::{SeenAttributes, TagScanState, iter_raw_attrs, tag_name_offset};
+use fhp_core::attr::{AttrSplitter, RawAttr, SeenAttributes, TagScanState, tag_name_offset};
 use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 
@@ -382,14 +382,16 @@ pub(crate) struct Parser<'a> {
     special_open_pos: usize,
     /// Current text-element tag, or `Unknown` after its closing tag completes.
     raw_text_tag: Tag,
-    /// Attribute-grammar state of the current tag, exact at `tag_scan_pos`.
+    /// Attribute grammar of the current tag, exact at `tag_scan_pos`.
     ///
-    /// Only the bytes between quote delimiters are walked (lazily, when the
-    /// next quote or a `>` after `/` needs the exact state), so every tag
-    /// byte is visited at most once.
-    tag_scan: TagScanState,
-    /// Input position `tag_scan` describes.
+    /// The bytes before each quote are scanned when the quote arrives and the
+    /// rest when the tag ends; quoted values are jumped over. Every byte
+    /// outside them is visited once, and the attributes found go to `attrs`.
+    splitter: AttrSplitter,
+    /// Input position `splitter` has scanned up to.
     tag_scan_pos: usize,
+    /// Attributes of the current tag, in source order with duplicates.
+    attrs: Vec<RawAttr<'a>>,
     /// Start of the current bogus comment's data.
     bogus_data_start: usize,
     /// Escape state while inside `<script>` text.
@@ -409,8 +411,9 @@ impl<'a> Parser<'a> {
             tag_open_pos: 0,
             special_open_pos: 0,
             raw_text_tag: Tag::Unknown,
-            tag_scan: TagScanState::START,
+            splitter: AttrSplitter::new(),
             tag_scan_pos: 0,
+            attrs: Vec::new(),
             bogus_data_start: 0,
             script_escape: ScriptEscape::None,
             decode_text: true,
@@ -532,8 +535,9 @@ impl<'a> Parser<'a> {
         self_closing: bool,
         emit: &mut impl FnMut(Token<'a>),
     ) {
+        let name_end = self.finish_tag_scan(close);
         if self.input[open + 1] == b'/' {
-            let (tag, name) = self.close_tag_name(open, close);
+            let (tag, name) = self.tag_name(open + 2, name_end);
             self.leave_text_element();
             emit(Token::CloseTag {
                 tag,
@@ -542,34 +546,24 @@ impl<'a> Parser<'a> {
             return;
         }
 
-        let (name_end, tag, name) = self.open_tag_name(open, close);
-        let attr_end = if self_closing { close - 1 } else { close };
-        let attributes = self.parse_attributes(name_end, attr_end);
+        let (tag, name) = self.tag_name(open + 1, name_end);
         emit(Token::OpenTag {
             tag,
             name: Cow::Borrowed(name),
-            attributes,
+            attributes: self.parse_attributes(),
             self_closing,
         });
         self.enter_text_element(tag);
     }
 
-    /// Parse attributes from the region between tag name and `>` (or `/>`).
-    fn parse_attributes(&self, start: usize, end: usize) -> Vec<Attribute<'a>> {
-        let estimated = if end > start {
-            // Attribute-heavy scraping input is commonly denser than the old
-            // 15-byte estimate (for example, ` data-x=1`). Reserving from a
-            // 10-byte estimate avoids the 2 -> 4 growth for three attributes
-            // and the late reallocation around sixteen without letting a
-            // single tag reserve an unbounded amount.
-            ((end - start) / 10).clamp(2, 16)
-        } else {
-            2
-        };
-        let mut attrs: Vec<Attribute<'a>> = Vec::with_capacity(estimated);
+    /// Decode the current tag's attributes, dropping later duplicates.
+    fn parse_attributes(&self) -> Vec<Attribute<'a>> {
+        // Duplicates make this an overestimate, but a tag without attributes
+        // allocates nothing.
+        let mut attrs: Vec<Attribute<'a>> = Vec::with_capacity(self.attrs.len());
         let mut seen = SeenAttributes::new();
 
-        for attr in iter_raw_attrs(self.str_slice(start, end)) {
+        for attr in &self.attrs {
             if seen.duplicate_or_insert(attr.name.as_bytes(), attr.fingerprint) {
                 continue;
             }
@@ -724,8 +718,9 @@ impl<'a> Parser<'a> {
 
     /// Parse a complete tag from `<` at `open` to `>` at `close` (sink mode).
     ///
-    /// Instead of parsing attributes into a Vec, passes the raw attribute
-    /// region to the sink for direct-to-slab parsing.
+    /// Instead of decoding attributes into a Vec, passes the raw attribute
+    /// region and its split attributes to the sink for direct-to-slab
+    /// copying.
     fn parse_tag_sink<S: TreeSink>(
         &mut self,
         open: usize,
@@ -733,17 +728,24 @@ impl<'a> Parser<'a> {
         self_closing: bool,
         sink: &mut S,
     ) {
+        let name_end = self.finish_tag_scan(close);
         if self.input[open + 1] == b'/' {
-            let (tag, name) = self.close_tag_name(open, close);
+            let (tag, name) = self.tag_name(open + 2, name_end);
             self.leave_text_element();
             sink.close_tag(tag, name);
             return;
         }
 
-        let (name_end, tag, name) = self.open_tag_name(open, close);
+        let (tag, name) = self.tag_name(open + 1, name_end);
         // Attribute region: from after tag name to before `>` (or `/>`).
         let attr_end = if self_closing { close - 1 } else { close };
-        sink.open_tag(tag, name, self.str_slice(name_end, attr_end), self_closing);
+        sink.open_tag_with_attrs(
+            tag,
+            name,
+            self.str_slice(name_end, attr_end),
+            &self.attrs,
+            self_closing,
+        );
         self.enter_text_element(tag);
     }
 
@@ -823,48 +825,58 @@ impl<'a> Parser<'a> {
     fn begin_tag(&mut self, pos: usize) {
         self.mode = Mode::InTag;
         self.tag_open_pos = pos;
-        self.tag_scan = TagScanState::START;
+        self.splitter = AttrSplitter::new();
         self.tag_scan_pos = pos + tag_name_offset(&self.input[pos..]);
-    }
-
-    /// Advance `tag_scan` over the bytes up to (excluding) `pos`.
-    #[inline(always)]
-    fn tag_scan_to(&mut self, pos: usize) {
-        self.tag_scan = self.tag_scan.advance(&self.input[self.tag_scan_pos..pos]);
-        self.tag_scan_pos = pos;
+        self.attrs.clear();
     }
 
     /// Feed a tag-mode delimiter into the attribute grammar. Returns
-    /// `Some(self_closing)` when `byte` is the `>` that ends the tag.
+    /// `Some(self_closing)` when `byte` is the `>` that ends the tag, with
+    /// the tag scanned up to it.
     #[inline(always)]
     fn tag_delimiter(&mut self, pos: usize, byte: u8) -> Option<bool> {
         match byte {
             b'"' | b'\'' => {
-                if let TagScanState::Quoted(quote) = self.tag_scan {
+                match self.splitter.state() {
                     // The other quote character is literal inside a value.
-                    if byte == quote {
-                        self.tag_scan = TagScanState::BeforeAttrName;
+                    TagScanState::Quoted(quote) if byte != quote => {}
+                    // The closing quote: the value before it is never scanned.
+                    TagScanState::Quoted(_) => {
+                        self.splitter
+                            .scan(self.input_str, pos, pos + 1, &mut self.attrs);
                     }
-                } else {
-                    self.tag_scan_to(pos);
-                    self.tag_scan = self.tag_scan.step(byte);
+                    _ => {
+                        self.splitter.scan(
+                            self.input_str,
+                            self.tag_scan_pos,
+                            pos + 1,
+                            &mut self.attrs,
+                        );
+                    }
                 }
                 self.tag_scan_pos = pos + 1;
                 None
             }
             // Between quote delimiters the state cannot become `Quoted`, so
-            // the possibly stale state still answers this exactly.
-            b'>' if !self.tag_scan.gt_is_literal() => {
-                // Only a tag ending in `/` needs the exact state: a `/` inside
-                // an unquoted value belongs to the value.
-                let self_closing = self.input[pos - 1] == b'/' && {
-                    self.tag_scan_to(pos);
-                    self.tag_scan != TagScanState::Unquoted
-                };
+            // the state at the last quote still answers this exactly.
+            b'>' if !self.splitter.state().gt_is_literal() => {
+                self.splitter
+                    .scan(self.input_str, self.tag_scan_pos, pos, &mut self.attrs);
+                self.tag_scan_pos = pos;
+                // A `/` inside an unquoted value belongs to the value.
+                let self_closing =
+                    self.input[pos - 1] == b'/' && self.splitter.state() != TagScanState::Unquoted;
                 Some(self_closing)
             }
             _ => None,
         }
+    }
+
+    /// Push the attribute still open at the `>` at `close` and return the
+    /// end of the tag name.
+    #[inline(always)]
+    fn finish_tag_scan(&mut self, close: usize) -> usize {
+        self.splitter.finish(self.input_str, close, &mut self.attrs)
     }
 
     /// Leave tag mode after the tag ending at `close` was emitted.
@@ -985,31 +997,10 @@ impl<'a> Parser<'a> {
         self.script_escape = ScriptEscape::None;
     }
 
-    /// Tag and name of the end tag `</name ...>` spanning `open..=close`.
-    #[inline]
-    fn close_tag_name(&self, open: usize, close: usize) -> (Tag, &'a str) {
-        let start = open + 2;
-        let mut end = start;
-        while end < close && !is_html_whitespace(self.input[end]) && self.input[end] != b'/' {
-            end += 1;
-        }
+    /// Tag and name of the tag name `input[start..end]`.
+    #[inline(always)]
+    fn tag_name(&self, start: usize, end: usize) -> (Tag, &'a str) {
         (
-            Tag::from_bytes(&self.input[start..end]),
-            self.str_slice(start, end),
-        )
-    }
-
-    /// Name end, tag, and name of the start tag `<name ...>` spanning
-    /// `open..=close`.
-    #[inline]
-    fn open_tag_name(&self, open: usize, close: usize) -> (usize, Tag, &'a str) {
-        let start = open + 1;
-        let mut end = start;
-        while end < close && !is_html_whitespace(self.input[end]) && self.input[end] != b'/' {
-            end += 1;
-        }
-        (
-            end,
             Tag::from_bytes(&self.input[start..end]),
             self.str_slice(start, end),
         )

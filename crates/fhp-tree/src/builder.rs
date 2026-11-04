@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use std::collections::hash_map::RandomState;
 use std::hash::{BuildHasher, Hash, Hasher};
 
-use fhp_core::{attr::iter_raw_attrs, error::ParseError, is_html_whitespace, tag::Tag};
+use fhp_core::attr::{RawAttr, iter_raw_attrs};
+use fhp_core::{error::ParseError, is_html_whitespace, tag::Tag};
 use fhp_tokenizer::token::{Attribute as TokenAttribute, Token};
 
 use crate::arena::Arena;
@@ -243,6 +244,7 @@ enum NewlineSkip {
 enum PendingAttrs<'slice, 'input> {
     Parsed(&'slice [TokenAttribute<'input>]),
     Raw(&'slice str),
+    Split(&'slice [RawAttr<'input>]),
     None,
 }
 
@@ -369,17 +371,22 @@ fn attrs_type_hidden(attributes: &PendingAttrs<'_, '_>) -> bool {
             .find(|attribute| attribute.name.eq_ignore_ascii_case("type"))
             .and_then(|attribute| attribute.value.as_deref())
             .is_some_and(|value| value.eq_ignore_ascii_case("hidden")),
-        PendingAttrs::Raw(raw) => iter_raw_attrs(raw)
-            .find(|attribute| attribute.name.eq_ignore_ascii_case("type"))
-            .and_then(|attribute| attribute.value)
-            .is_some_and(|value| {
-                // Match the decoded value the token path compares.
-                #[cfg(feature = "entity-decode")]
-                let value = fhp_tokenizer::entity::decode_attribute_entities(value);
-                value.eq_ignore_ascii_case("hidden")
-            }),
+        PendingAttrs::Raw(raw) => raw_attrs_type_hidden(iter_raw_attrs(raw)),
+        PendingAttrs::Split(attributes) => raw_attrs_type_hidden(attributes.iter().copied()),
         PendingAttrs::None => false,
     }
+}
+
+fn raw_attrs_type_hidden<'a>(mut attributes: impl Iterator<Item = RawAttr<'a>>) -> bool {
+    attributes
+        .find(|attribute| attribute.name.eq_ignore_ascii_case("type"))
+        .and_then(|attribute| attribute.value)
+        .is_some_and(|value| {
+            // Match the decoded value the token path compares.
+            #[cfg(feature = "entity-decode")]
+            let value = fhp_tokenizer::entity::decode_attribute_entities(value);
+            value.eq_ignore_ascii_case("hidden")
+        })
 }
 
 /// Block-level starts that imply the end of an open `<p>` element. Elements
@@ -990,6 +997,9 @@ impl TreeBuilder {
             }
             PendingAttrs::Raw(raw) if !raw.is_empty() => {
                 self.arena.set_attrs_from_raw(node, raw);
+            }
+            PendingAttrs::Split(attributes) if !attributes.is_empty() => {
+                self.arena.set_split_attrs(node, attributes);
             }
             _ => {}
         }
@@ -2043,6 +2053,19 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
         // one-shot path from accumulating them.
         self.created_elements.clear();
         self.handle_open_tag(tag, name, PendingAttrs::Raw(attr_raw), self_closing);
+    }
+
+    fn open_tag_with_attrs(
+        &mut self,
+        tag: Tag,
+        name: &str,
+        _attr_raw: &str,
+        attrs: &[RawAttr<'_>],
+        self_closing: bool,
+    ) {
+        // As in `open_tag`, with the region already split by the tokenizer.
+        self.created_elements.clear();
+        self.handle_open_tag(tag, name, PendingAttrs::Split(attrs), self_closing);
     }
 
     fn close_tag(&mut self, tag: Tag, name: &str) {
