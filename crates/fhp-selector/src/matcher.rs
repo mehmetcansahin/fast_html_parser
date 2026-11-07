@@ -67,7 +67,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             // Bloom matched — verify via real attribute scan.
             let attrs = arena.attrs(node);
             attrs.iter().any(|a| {
-                arena.attr_name(a).eq_ignore_ascii_case("class")
+                arena.attr_name_is(a, "class")
                     && arena
                         .attr_value(a)
                         .is_some_and(|v| contains_html_space_token(v, class_name))
@@ -85,10 +85,9 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             // Hash matched (or target hash is 0) — verify via real attribute
             // scan (collision possible).
             let attrs = arena.attrs(node);
-            attrs.iter().any(|a| {
-                arena.attr_name(a).eq_ignore_ascii_case("id")
-                    && arena.attr_value(a) == Some(id.as_str())
-            })
+            attrs
+                .iter()
+                .any(|a| arena.attr_name_is(a, "id") && arena.attr_value(a) == Some(id.as_str()))
         }
 
         // `match_compound` only passes elements.
@@ -108,10 +107,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
 fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
     let attrs = arena.attrs(node);
     for attr in attrs {
-        if !arena
-            .attr_name(attr)
-            .eq_ignore_ascii_case(sel.name.as_str())
-        {
+        if !arena.attr_name_is(attr, sel.name.as_str()) {
             continue;
         }
         // In HTML, a valueless (boolean) attribute has an empty string value
@@ -928,9 +924,10 @@ fn node_has_id(arena: &Arena, node: NodeId, target_id: &str, target_hash: u32) -
     if id_hash_rejects(arena, node, target_hash) {
         return false;
     }
-    arena.attrs(node).iter().any(|a| {
-        arena.attr_name(a).eq_ignore_ascii_case("id") && arena.attr_value(a) == Some(target_id)
-    })
+    arena
+        .attrs(node)
+        .iter()
+        .any(|a| arena.attr_name_is(a, "id") && arena.attr_value(a) == Some(target_id))
 }
 
 /// Return whether the cached id hash conclusively rejects this node.

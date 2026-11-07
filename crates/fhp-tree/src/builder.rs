@@ -14,7 +14,7 @@ use fhp_core::attr::{RawAttr, iter_raw_attrs};
 use fhp_core::{error::ParseError, is_html_whitespace, tag::Tag};
 use fhp_tokenizer::token::{Attribute as TokenAttribute, Token};
 
-use crate::arena::Arena;
+use crate::arena::{Arena, SourceRange};
 use crate::node::{NodeFlags, NodeId};
 
 /// Maximum number of open elements, excluding the synthetic root. Elements
@@ -476,6 +476,9 @@ pub struct TreeBuilder {
     source_base: usize,
     /// Length of the original input in bytes.
     source_len: usize,
+    /// Whether the arena holds its copy of the source while tokens arrive
+    /// ([`Self::set_source`]), so attributes can reference it.
+    attrs_from_source: bool,
     /// Text node emitted by the current uninterrupted character-token run.
     /// Non-text tokens clear it so coalescing is independent of storage mode.
     last_text_node: NodeId,
@@ -568,6 +571,7 @@ impl TreeBuilder {
             root,
             source_base: 0,
             source_len: 0,
+            attrs_from_source: false,
             last_text_node: NodeId::NULL,
             pending_table_text: String::new(),
             table_text_run_foster: false,
@@ -605,14 +609,15 @@ impl TreeBuilder {
         self.decode_text_tokens = true;
     }
 
-    /// Enable source-backed text nodes.
+    /// Enable source-backed text nodes and attributes.
     ///
-    /// Stores an owned copy of `input` in the arena. Text nodes whose content
-    /// is borrowed from `input` (entity-free) will reference the source
-    /// instead of copying to the text slab.
+    /// Stores an owned copy of `input` in the arena. Text nodes, attribute
+    /// names and attribute values borrowed from `input` that need no decoding
+    /// will reference the source instead of being copied to a slab.
     pub(crate) fn set_source(&mut self, input: &str) {
         self.source_base = input.as_ptr() as usize;
         self.source_len = input.len();
+        self.attrs_from_source = true;
         self.arena.set_source(input);
     }
 
@@ -620,9 +625,21 @@ impl TreeBuilder {
     ///
     /// Use this with [`Arena::set_source_owned`] after tokenization to
     /// avoid a redundant memcpy when the caller owns the input `String`.
+    /// Attributes are still copied: the Noah's Ark clause reads them before
+    /// the source reaches the arena.
     pub(crate) fn set_source_ptr(&mut self, input: &str) {
         self.source_base = input.as_ptr() as usize;
         self.source_len = input.len();
+        self.attrs_from_source = false;
+    }
+
+    /// The input attributes may reference instead of being copied.
+    #[inline]
+    fn attr_source(&self) -> Option<SourceRange> {
+        self.attrs_from_source.then_some(SourceRange {
+            base: self.source_base,
+            len: self.source_len,
+        })
     }
 
     /// Process a single token and insert it into the tree.
@@ -999,7 +1016,8 @@ impl TreeBuilder {
                 self.arena.set_attrs_from_raw(node, raw);
             }
             PendingAttrs::Split(attributes) if !attributes.is_empty() => {
-                self.arena.set_split_attrs(node, attributes);
+                let source = self.attr_source();
+                self.arena.set_split_attrs(node, attributes, source);
             }
             _ => {}
         }
@@ -2140,6 +2158,14 @@ mod tests {
         builder.finish()
     }
 
+    /// [`parse`] with the arena holding the source, as [`crate::parse`] does.
+    fn parse_from_source(html: &str) -> Result<(Arena, NodeId), ParseError> {
+        let mut builder = TreeBuilder::with_capacity_hint(html.len());
+        builder.set_source(html);
+        fhp_tokenizer::tokenize_into(html, &mut builder);
+        builder.finish()
+    }
+
     fn assert_stack_invariants(builder: &TreeBuilder) {
         let mut counts = [0; ElementKind::COUNT];
         let mut mode = InsertionMode::InBody;
@@ -2984,21 +3010,27 @@ mod tests {
 
     #[test]
     fn noahs_ark_keeps_formatting_elements_with_other_attributes() {
-        let (arena, _) = parse("<a><b id=1><b ID=1><b id=1><b id=1><b id=2>x</a>y").unwrap();
-        let count_id = |id: &str| {
-            (0..arena.nodes.len())
-                .map(|index| NodeId(index as u32))
-                .filter(|&node| arena.get(node).tag == Tag::B)
-                .filter(|&node| {
-                    arena
-                        .attrs(node)
-                        .iter()
-                        .any(|attr| arena.attr_value(attr) == Some(id))
-                })
-                .count()
-        };
-        assert_eq!(count_id("1"), 4 + 3);
-        assert_eq!(count_id("2"), 1 + 1);
+        let html = "<a><b id=1><b ID=1><b id=1><b id=1><b id=2>x</a>y";
+        let (copied, _) = parse(html).unwrap();
+        let (referenced, _) = parse_from_source(html).unwrap();
+        // The identities are read back from the source copy here.
+        assert!(referenced.attr_str_slab.is_empty());
+        for arena in [&copied, &referenced] {
+            let count_id = |id: &str| {
+                (0..arena.nodes.len())
+                    .map(|index| NodeId(index as u32))
+                    .filter(|&node| arena.get(node).tag == Tag::B)
+                    .filter(|&node| {
+                        arena
+                            .attrs(node)
+                            .iter()
+                            .any(|attr| arena.attr_value(attr) == Some(id))
+                    })
+                    .count()
+            };
+            assert_eq!(count_id("1"), 4 + 3);
+            assert_eq!(count_id("2"), 1 + 1);
+        }
     }
 
     #[test]

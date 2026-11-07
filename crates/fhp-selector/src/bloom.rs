@@ -249,18 +249,17 @@ fn insert_node_hashes(arena: &Arena, node: NodeId, bloom: &mut AncestorBloom) {
     bloom.insert(hash_tag(n.tag));
 
     for attr in arena.attrs(node) {
-        let name = arena.attr_name(attr);
         // Attribute names are not lowercased during parsing, and the matcher
         // compares them case-insensitively, so the bloom must too (the values
         // stay case-sensitive, matching CSS semantics).
-        if name.eq_ignore_ascii_case("class") {
+        if arena.attr_name_is(attr, "class") {
             if let Some(val) = arena.attr_value(attr) {
                 for class in split_html_space(val) {
                     bloom.insert(hash_str(class));
                 }
             }
         }
-        if name.eq_ignore_ascii_case("id") {
+        if arena.attr_name_is(attr, "id") {
             if let Some(val) = arena.attr_value(attr) {
                 bloom.insert(hash_str(val));
             }

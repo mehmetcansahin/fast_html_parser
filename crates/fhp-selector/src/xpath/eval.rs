@@ -402,7 +402,7 @@ fn find_descendants_by_tag_and_attr(
             is_element(n)
                 && matches_name_test(a, id, n, tag)
                 && a.attrs(id).iter().any(|at| {
-                    a.attr_name(at).eq_ignore_ascii_case(attr)
+                    a.attr_name_is(at, attr)
                         && value.is_some_and(|expected| a.attr_value(at).unwrap_or("") == expected)
                 })
         },
@@ -425,9 +425,7 @@ fn find_descendants_by_tag_and_attr_exists(
         &|a, id, n| {
             is_element(n)
                 && matches_name_test(a, id, n, tag)
-                && a.attrs(id)
-                    .iter()
-                    .any(|at| a.attr_name(at).eq_ignore_ascii_case(attr))
+                && a.attrs(id).iter().any(|at| a.attr_name_is(at, attr))
         },
         &mut results,
     );
@@ -450,8 +448,7 @@ fn find_descendants_by_tag_and_contains(
             is_element(n)
                 && matches_name_test(a, id, n, tag)
                 && a.attrs(id).iter().any(|at| {
-                    a.attr_name(at).eq_ignore_ascii_case(attr)
-                        && a.attr_value(at).unwrap_or("").contains(substr)
+                    a.attr_name_is(at, attr) && a.attr_value(at).unwrap_or("").contains(substr)
                 })
         },
         &mut results,
@@ -475,14 +472,11 @@ fn find_all_elements_by_attr(
                 return false;
             }
             match value {
-                Some(val) => a.attrs(id).iter().any(|at| {
-                    a.attr_name(at).eq_ignore_ascii_case(attr)
-                        && a.attr_value(at).unwrap_or("") == val
-                }),
-                None => a
+                Some(val) => a
                     .attrs(id)
                     .iter()
-                    .any(|at| a.attr_name(at).eq_ignore_ascii_case(attr)),
+                    .any(|at| a.attr_name_is(at, attr) && a.attr_value(at).unwrap_or("") == val),
+                None => a.attrs(id).iter().any(|at| a.attr_name_is(at, attr)),
             }
         },
         &mut results,
@@ -580,13 +574,13 @@ fn collect_element_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) 
 /// Check if a node matches a predicate.
 fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate, position: usize) -> bool {
     match pred {
-        Predicate::AttrEquals { attr, value } => arena.attrs(node).iter().any(|a| {
-            arena.attr_name(a).eq_ignore_ascii_case(attr)
-                && arena.attr_value(a).unwrap_or("") == value
-        }),
+        Predicate::AttrEquals { attr, value } => arena
+            .attrs(node)
+            .iter()
+            .any(|a| arena.attr_name_is(a, attr) && arena.attr_value(a).unwrap_or("") == value),
 
         Predicate::Contains { attr, substr } => arena.attrs(node).iter().any(|a| {
-            arena.attr_name(a).eq_ignore_ascii_case(attr)
+            arena.attr_name_is(a, attr)
                 && arena.attr_value(a).unwrap_or("").contains(substr.as_str())
         }),
 
@@ -595,7 +589,7 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate, position: us
         Predicate::AttrExists { attr } => arena
             .attrs(node)
             .iter()
-            .any(|a| arena.attr_name(a).eq_ignore_ascii_case(attr)),
+            .any(|a| arena.attr_name_is(a, attr)),
     }
 }
 

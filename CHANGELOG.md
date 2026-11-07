@@ -29,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected. `fhp_core::attr::AttrSplitter` is the splitter underneath: the
   attribute grammar in a form that can be fed a tag in pieces.
 
+- `Arena::attr_name_is`, which compares an attribute's name ASCII
+  case-insensitively and rejects a name of another length without reading
+  it. CSS and XPath matching and `NodeRef::attr` use it.
+
 - A contract-checked tokenizer comparison benchmark against html5gum,
   html5ever, lol_html and tl. Ratios are formed only where a competitor's
   canonical token stream matches fhp-tokenizer's; lol_html and tl rows are
@@ -138,6 +142,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because that splitting now happens in the tokenizer. A sink that splits
   `attr_raw` itself breaks even, and one that implements
   `open_tag_with_attrs` gains.
+- `parse`, `parse_bytes` on UTF-8 input and `Document::reparse` no longer
+  copy attribute names and values that need no decoding: like entity-free
+  text, they are read from the document's copy of the input, and only
+  decoded values are copied. Parsing is up to 7% faster on the
+  attribute-heavy GitHub fixture and 0–6% on the others. Attribute
+  selectors that only test a name, such as `[href]`, are up to 8% faster;
+  those that compare values, such as `[class="x"]`, are up to 6% slower.
+  `parse_owned`, `reparse_owned` and the streaming parsers copy attributes
+  as before.
 - `StreamTokenizer::feed_str_with` is 1.9–3.0x faster and within 7% of
   one-shot `tokenize_with` on the repository fixtures in 64 KiB chunks;
   `feed` is 1.5–2.1x faster. Complete markup is now tokenized in a single

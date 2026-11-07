@@ -845,7 +845,7 @@ impl<'a> NodeRef<'a> {
         self.arena
             .attrs(self.id)
             .iter()
-            .find(|a| self.arena.attr_name(a).eq_ignore_ascii_case(name))
+            .find(|a| self.arena.attr_name_is(a, name))
             .and_then(|a| self.arena.attr_value(a))
     }
 
@@ -1522,6 +1522,35 @@ mod tests {
         assert_eq!(doc.arena().unknown_tag_name(widget.id()), Some("my-widget"));
         assert_eq!(doc.arena().text(widget.id()), "");
         assert_eq!(widget.text(), "");
+    }
+
+    #[test]
+    fn parse_reads_attributes_from_its_source_copy() {
+        let html = "<a href=/x title='a&amp;b' hidden>link</a>";
+        let borrowed = parse(html).unwrap();
+        let owned = parse_owned(html.to_string()).unwrap();
+        let title = if cfg!(feature = "entity-decode") {
+            "a&b"
+        } else {
+            "a&amp;b"
+        };
+        for doc in [&borrowed, &owned] {
+            let a = doc.root().first_child().unwrap();
+            assert_eq!(a.attr("href"), Some("/x"));
+            assert_eq!(a.attr("title"), Some(title));
+            assert_eq!(a.attr("hidden"), None);
+            assert_eq!(a.attrs().len(), 3);
+            assert_eq!(doc.to_html(), borrowed.to_html());
+        }
+        // `parse` copies only a decoded value. `parse_owned` hands its source
+        // to the arena only after parsing, so it copies every attribute.
+        let decoded = if cfg!(feature = "entity-decode") {
+            "a&b"
+        } else {
+            ""
+        };
+        assert_eq!(borrowed.arena.attr_str_slab, decoded);
+        assert!(owned.arena.attr_str_slab.starts_with("href/xtitle"));
     }
 }
 

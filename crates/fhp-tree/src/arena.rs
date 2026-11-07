@@ -15,9 +15,10 @@ use crate::node::{Node, NodeFlags, NodeId};
 
 /// A compact attribute stored in the attribute slab.
 ///
-/// Names and values are stored as offsets into `Arena::attr_str_slab` rather
-/// than separate heap allocations. Use [`Arena::attr_name`] and
-/// [`Arena::attr_value`] to access the strings.
+/// Names and values are stored as offsets rather than separate heap
+/// allocations: into the arena's copy of the input source when they appear
+/// there unchanged, otherwise into `Arena::attr_str_slab`. Use
+/// [`Arena::attr_name`] and [`Arena::attr_value`] to access the strings.
 #[derive(Clone, Debug)]
 pub struct Attribute {
     name_offset: u32,
@@ -25,6 +26,29 @@ pub struct Attribute {
     value_offset: u32,
     value_len: u32,
     has_value: bool,
+    name_in_source: bool,
+    value_in_source: bool,
+}
+
+/// Where the input a parse borrows its attributes from lies in memory, while
+/// `Arena::source` holds a copy of it. Attributes inside it are stored as
+/// offsets into that copy instead of being copied again.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct SourceRange {
+    pub(crate) base: usize,
+    pub(crate) len: usize,
+}
+
+impl SourceRange {
+    /// The offset of `part` in the source, if it lies inside it.
+    #[inline]
+    fn offset_of(self, part: &str) -> Option<u32> {
+        let offset = (part.as_ptr() as usize).checked_sub(self.base)?;
+        if offset.checked_add(part.len())? > self.len {
+            return None;
+        }
+        u32::try_from(offset).ok()
+    }
 }
 
 /// Number of tag index buckets (Tag is `repr(u8)`, 256 possible values).
@@ -86,12 +110,14 @@ pub struct Arena {
     pub(crate) text_slab: String,
     /// All attributes in insertion order.
     pub(crate) attr_slab: Vec<Attribute>,
-    /// All attribute names and values concatenated.
+    /// Attribute names and values concatenated, except those stored as
+    /// offsets into `source`.
     pub(crate) attr_str_slab: String,
     /// Owned copy of the original input source.
     ///
     /// Text nodes that reference entity-free (borrowed) regions of the input
-    /// store offsets into this buffer via [`NodeFlags::IS_TEXT_FROM_SOURCE`].
+    /// store offsets into this buffer via [`NodeFlags::IS_TEXT_FROM_SOURCE`],
+    /// and so can attribute names and values that need no decoding.
     /// Empty for streaming parsers.
     pub(crate) source: String,
     /// Source ranges promoted into the text slab before an owned source is
@@ -396,15 +422,12 @@ impl Arena {
             if seen.duplicate_or_insert(name, ascii_ci_fingerprint(name)) {
                 continue;
             }
-            let name_offset = self.attr_str_slab.len() as u32;
-            self.attr_str_slab.push_str(&attr.name);
+            let name_offset = self.push_attr_str(&attr.name);
             let name_len = attr.name.len() as u32;
 
             let (value_offset, value_len, has_value) = if let Some(v) = &attr.value {
                 update_selector_hashes(name, Some(v.as_bytes()), &mut class_hash, &mut id_hash);
-                let vo = self.attr_str_slab.len() as u32;
-                self.attr_str_slab.push_str(v);
-                (vo, v.len() as u32, true)
+                (self.push_attr_str(v), v.len() as u32, true)
             } else {
                 (0, 0, false)
             };
@@ -415,6 +438,8 @@ impl Arena {
                 value_offset,
                 value_len,
                 has_value,
+                name_in_source: false,
+                value_in_source: false,
             });
             count += 1;
         }
@@ -447,16 +472,23 @@ impl Arena {
         // Bound the initial reservation so duplicate-heavy or single-value
         // inputs do not reserve in proportion to their full source length.
         let estimated_attrs = (end / 10).clamp(1, 16);
-        self.push_raw_attrs(node, iter_raw_attrs(attr_raw), estimated_attrs);
+        self.push_raw_attrs(node, iter_raw_attrs(attr_raw), estimated_attrs, None);
     }
 
     /// [`Arena::set_attrs_from_raw`] for a region the tokenizer has already
-    /// split into `attrs`.
-    pub(crate) fn set_split_attrs(&mut self, node: NodeId, attrs: &[RawAttr<'_>]) {
-        self.push_raw_attrs(node, attrs.iter().copied(), attrs.len());
+    /// split into `attrs`. Names and values inside `source` that need no
+    /// decoding are stored as offsets into the arena's copy of it.
+    pub(crate) fn set_split_attrs(
+        &mut self,
+        node: NodeId,
+        attrs: &[RawAttr<'_>],
+        source: Option<SourceRange>,
+    ) {
+        self.push_raw_attrs(node, attrs.iter().copied(), attrs.len(), source);
     }
 
-    /// Copy raw attributes into the slab, dropping later duplicates.
+    /// Store raw attributes, dropping later duplicates. A name or value is
+    /// copied into the slab unless it lies inside `source` unchanged.
     /// `estimated_attrs` sizes the reservation.
     #[inline]
     fn push_raw_attrs<'a>(
@@ -464,10 +496,13 @@ impl Arena {
         node: NodeId,
         attrs: impl Iterator<Item = RawAttr<'a>>,
         estimated_attrs: usize,
+        source: Option<SourceRange>,
     ) {
         if estimated_attrs > 1 {
             self.attr_slab.reserve(estimated_attrs);
-            self.attr_str_slab.reserve(estimated_attrs * 16);
+            if source.is_none() {
+                self.attr_str_slab.reserve(estimated_attrs * 16);
+            }
         }
 
         let slab_offset = self.attr_slab.len() as u32;
@@ -484,25 +519,28 @@ impl Arena {
             if seen.duplicate_or_insert(name, attr.fingerprint) {
                 continue;
             }
-            let name_offset = self.attr_str_slab.len() as u32;
-            self.attr_str_slab.push_str(attr.name);
+            let (name_offset, name_in_source) = self.store_attr_str(attr.name, source);
 
-            let (value_offset, value_len, has_value) = match attr.value {
+            let (value_offset, value_len, has_value, value_in_source) = match attr.value {
                 Some(raw_value) => {
-                    let (value_offset, value_len) = self.push_attr_value(raw_value);
-                    let value_start = value_offset as usize;
-                    update_selector_hashes(
-                        name,
-                        Some(
-                            &self.attr_str_slab.as_bytes()
-                                [value_start..value_start + value_len as usize],
-                        ),
-                        &mut class_hash,
-                        &mut id_hash,
-                    );
-                    (value_offset, value_len, true)
+                    let decoded = self.push_decoded_attr_value(raw_value);
+                    let value = match decoded {
+                        Some((offset, len)) => {
+                            &self.attr_str_slab.as_bytes()[offset as usize..][..len as usize]
+                        }
+                        None => raw_value.as_bytes(),
+                    };
+                    update_selector_hashes(name, Some(value), &mut class_hash, &mut id_hash);
+                    let (offset, len, in_source) = match decoded {
+                        Some((offset, len)) => (offset, len, false),
+                        None => {
+                            let (offset, in_source) = self.store_attr_str(raw_value, source);
+                            (offset, raw_value.len() as u32, in_source)
+                        }
+                    };
+                    (offset, len, true, in_source)
                 }
-                None => (0, 0, false),
+                None => (0, 0, false, false),
             };
 
             self.attr_slab.push(Attribute {
@@ -511,6 +549,8 @@ impl Arena {
                 value_offset,
                 value_len,
                 has_value,
+                name_in_source,
+                value_in_source,
             });
             count += 1;
         }
@@ -525,25 +565,40 @@ impl Arena {
         }
     }
 
-    /// Write an attribute value to the string slab, with optional entity decoding.
-    #[cfg(feature = "entity-decode")]
-    fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
-        let offset = self.attr_str_slab.len();
-        if !fhp_tokenizer::entity::decode_attribute_entities_into(
-            raw_value,
-            &mut self.attr_str_slab,
-        ) {
-            self.attr_str_slab.push_str(raw_value);
+    /// The offset of `s` in the source copy if it lies inside `source`,
+    /// otherwise of a copy appended to the slab, and whether it is the
+    /// former.
+    #[inline]
+    fn store_attr_str(&mut self, s: &str, source: Option<SourceRange>) -> (u32, bool) {
+        match source.and_then(|source| source.offset_of(s)) {
+            Some(offset) => (offset, true),
+            None => (self.push_attr_str(s), false),
         }
-        (offset as u32, (self.attr_str_slab.len() - offset) as u32)
     }
 
-    /// Write an attribute value to the string slab (no entity decoding).
-    #[cfg(not(feature = "entity-decode"))]
-    fn push_attr_value(&mut self, raw_value: &str) -> (u32, u32) {
+    /// Append `s` to the attribute string slab and return its offset.
+    #[inline]
+    fn push_attr_str(&mut self, s: &str) -> u32 {
         let offset = self.attr_str_slab.len() as u32;
-        self.attr_str_slab.push_str(raw_value);
-        (offset, raw_value.len() as u32)
+        self.attr_str_slab.push_str(s);
+        offset
+    }
+
+    /// Append the decoded form of an attribute value to the string slab if a
+    /// character reference in it decodes, and return its offset and length.
+    #[cfg(feature = "entity-decode")]
+    #[inline]
+    fn push_decoded_attr_value(&mut self, raw_value: &str) -> Option<(u32, u32)> {
+        let offset = self.attr_str_slab.len();
+        fhp_tokenizer::entity::decode_attribute_entities_into(raw_value, &mut self.attr_str_slab)
+            .then(|| (offset as u32, (self.attr_str_slab.len() - offset) as u32))
+    }
+
+    /// Without entity decoding, every value is its own decoded form.
+    #[cfg(not(feature = "entity-decode"))]
+    #[inline]
+    fn push_decoded_attr_value(&mut self, _raw_value: &str) -> Option<(u32, u32)> {
+        None
     }
 
     /// The full 1-based element sibling index of a node.
@@ -962,11 +1017,19 @@ impl Arena {
     #[inline]
     pub fn attr_name(&self, attr: &Attribute) -> &str {
         checked_str(
-            &self.attr_str_slab,
+            self.attr_strings(attr.name_in_source),
             attr.name_offset,
             attr.name_len,
             "attribute",
         )
+    }
+
+    /// Whether an attribute's name is `name`, compared ASCII
+    /// case-insensitively. A name of another length is rejected without
+    /// reading it.
+    #[inline]
+    pub fn attr_name_is(&self, attr: &Attribute, name: &str) -> bool {
+        attr.name_len as usize == name.len() && self.attr_name(attr).eq_ignore_ascii_case(name)
     }
 
     /// Get the value of an attribute, or `None` for boolean attributes.
@@ -976,11 +1039,21 @@ impl Arena {
             return None;
         }
         Some(checked_str(
-            &self.attr_str_slab,
+            self.attr_strings(attr.value_in_source),
             attr.value_offset,
             attr.value_len,
             "attribute",
         ))
+    }
+
+    /// The buffer an attribute string's offset points into.
+    #[inline]
+    fn attr_strings(&self, in_source: bool) -> &str {
+        if in_source {
+            &self.source
+        } else {
+            &self.attr_str_slab
+        }
     }
 
     /// Get the parsed attributes for a node, or an empty slice when it has no
@@ -1353,6 +1426,87 @@ mod tests {
         assert_eq!(arena.attr_name(&attrs[0]), "title");
         assert_eq!(arena.attr_value(&attrs[0]), Some("first"));
         assert_eq!(arena.attr_str_slab.len(), "titlefirst".len());
+    }
+
+    /// Split the attribute region of the start tag `tag` and store it on a
+    /// new element of an arena holding a copy of `tag`, with `source`
+    /// covering its first `source_len` bytes.
+    fn split_from_source(tag: &str, source_len: usize) -> (Arena, NodeId) {
+        let mut arena = Arena::new();
+        arena.set_source(tag);
+        let node = arena.new_element(Tag::Unknown, 0);
+        let attrs: Vec<RawAttr<'_>> = iter_raw_attrs(&tag[2..tag.len() - 1]).collect();
+        let source = SourceRange {
+            base: tag.as_ptr() as usize,
+            len: source_len,
+        };
+        arena.set_split_attrs(node, &attrs, Some(source));
+        (arena, node)
+    }
+
+    fn attr_pairs(arena: &Arena, node: NodeId) -> Vec<(&str, Option<&str>)> {
+        let attrs = arena.attrs(node);
+        attrs
+            .iter()
+            .map(|attr| (arena.attr_name(attr), arena.attr_value(attr)))
+            .collect()
+    }
+
+    #[test]
+    fn split_attributes_in_the_source_are_stored_as_offsets() {
+        let tag = "<x href=/a title='a&amp;b' hidden CLASS=\"one two\" id=main Id=dup>";
+        let (arena, node) = split_from_source(tag, tag.len());
+        let title = if cfg!(feature = "entity-decode") {
+            "a&b"
+        } else {
+            "a&amp;b"
+        };
+        assert_eq!(
+            attr_pairs(&arena, node),
+            [
+                ("href", Some("/a")),
+                ("title", Some(title)),
+                ("hidden", None),
+                ("CLASS", Some("one two")),
+                ("id", Some("main")),
+            ]
+        );
+        // Only a decoded value needs the slab.
+        let slab = if cfg!(feature = "entity-decode") {
+            "a&b"
+        } else {
+            ""
+        };
+        assert_eq!(arena.attr_str_slab, slab);
+        assert_eq!(
+            arena.get(node).class_hash,
+            class_bloom_bit(b"one") | class_bloom_bit(b"two")
+        );
+        assert_eq!(arena.get(node).id_hash, selector_hash(b"main"));
+    }
+
+    #[test]
+    fn split_attributes_outside_the_source_are_copied() {
+        let tag = "<x id=main class=c>";
+        // The source ends inside `main`.
+        let (arena, node) = split_from_source(tag, tag.find("main").unwrap() + 2);
+        assert_eq!(
+            attr_pairs(&arena, node),
+            [("id", Some("main")), ("class", Some("c"))]
+        );
+        assert_eq!(arena.attr_str_slab, "mainclassc");
+        assert_eq!(arena.get(node).id_hash, selector_hash(b"main"));
+    }
+
+    #[test]
+    fn attr_name_is_compares_ascii_case_insensitively() {
+        let (arena, node) = split_from_source("<x Data-ID=1 é=2>", usize::MAX);
+        let attrs = arena.attrs(node);
+        assert!(arena.attr_name_is(&attrs[0], "data-id"));
+        assert!(!arena.attr_name_is(&attrs[0], "data-i"));
+        assert!(!arena.attr_name_is(&attrs[0], "data-idx"));
+        assert!(arena.attr_name_is(&attrs[1], "é"));
+        assert!(!arena.attr_name_is(&attrs[1], "É"));
     }
 
     #[test]
