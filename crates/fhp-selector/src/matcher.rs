@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use fhp_core::tag::Tag;
-use fhp_tree::arena::Arena;
+use fhp_tree::arena::{Arena, Attribute};
 use fhp_tree::node::{NodeFlags, NodeId};
 
 use crate::ast::{
@@ -79,15 +79,7 @@ fn match_simple(arena: &Arena, node: NodeId, selector: &SimpleSelector) -> bool 
             // "no id attribute" sentinel, so it cannot represent a real id that
             // hashes to 0; when the target itself hashes to 0 we skip the fast
             // path and verify directly to avoid a false negative.
-            if id_hash_rejects(arena, node, *target_hash) {
-                return false;
-            }
-            // Hash matched (or target hash is 0) — verify via real attribute
-            // scan (collision possible).
-            let attrs = arena.attrs(node);
-            attrs
-                .iter()
-                .any(|a| arena.attr_name_is(a, "id") && arena.attr_value(a) == Some(id.as_str()))
+            node_has_id(arena, node, id.as_str(), *target_hash)
         }
 
         // `match_compound` only passes elements.
@@ -112,31 +104,43 @@ fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
         }
         // In HTML, a valueless (boolean) attribute has an empty string value
         // for selector matching. `Arena::attr_value` uses `None` only to
-        // preserve whether the value was explicitly written.
-        let val = arena.attr_value(attr).unwrap_or("");
+        // preserve whether the value was explicitly written. Each comparison
+        // checks the value's length first, so most values are rejected unread.
+        let len = arena.attr_value_len(attr);
+        let val = || arena.attr_value(attr).unwrap_or("");
         match sel.op {
             AttrOp::Exists => return true,
             AttrOp::Equals => {
-                return Some(val) == sel.value.as_deref();
+                return sel
+                    .value
+                    .as_deref()
+                    .is_some_and(|sel_val| value_is(arena, attr, sel_val));
             }
             AttrOp::Includes => {
                 if let Some(sel_val) = &sel.value {
-                    return contains_html_space_token(val, sel_val.as_str());
+                    return len >= sel_val.len()
+                        && contains_html_space_token(val(), sel_val.as_str());
                 }
             }
             AttrOp::StartsWith => {
                 if let Some(sel_val) = &sel.value {
-                    return !sel_val.is_empty() && val.starts_with(sel_val.as_str());
+                    return !sel_val.is_empty()
+                        && len >= sel_val.len()
+                        && val().starts_with(sel_val.as_str());
                 }
             }
             AttrOp::EndsWith => {
                 if let Some(sel_val) = &sel.value {
-                    return !sel_val.is_empty() && val.ends_with(sel_val.as_str());
+                    return !sel_val.is_empty()
+                        && len >= sel_val.len()
+                        && val().ends_with(sel_val.as_str());
                 }
             }
             AttrOp::Substring => {
                 if let Some(sel_val) = &sel.value {
-                    return !sel_val.is_empty() && val.contains(sel_val.as_str());
+                    return !sel_val.is_empty()
+                        && len >= sel_val.len()
+                        && val().contains(sel_val.as_str());
                 }
             }
         }
@@ -924,10 +928,35 @@ fn node_has_id(arena: &Arena, node: NodeId, target_id: &str, target_hash: u32) -
     if id_hash_rejects(arena, node, target_hash) {
         return false;
     }
+    has_id_attr(arena, node, target_id)
+}
+
+/// The attribute scan behind a matching id hash (collisions are possible).
+/// Few nodes get here, so it stays out of line: inlined, it slows every
+/// level of the recursive tree walks that call [`node_has_id`].
+#[cold]
+fn has_id_attr(arena: &Arena, node: NodeId, target_id: &str) -> bool {
     arena
         .attrs(node)
         .iter()
-        .any(|a| arena.attr_name_is(a, "id") && arena.attr_value(a) == Some(target_id))
+        .any(|a| attr_is(arena, a, "id", target_id))
+}
+
+/// Whether `attr` is `name="value"`, with the value's length checked before
+/// it is read. A boolean attribute has no value, so it matches none.
+#[inline]
+pub(crate) fn attr_is(arena: &Arena, attr: &Attribute, name: &str, value: &str) -> bool {
+    arena.attr_name_is(attr, name)
+        && arena.attr_value_len(attr) == value.len()
+        && arena.attr_value(attr) == Some(value)
+}
+
+/// Whether `attr`'s value is `value`, a boolean attribute having the empty
+/// value as in selector matching, with the length checked before the value
+/// is read.
+#[inline]
+pub(crate) fn value_is(arena: &Arena, attr: &Attribute, value: &str) -> bool {
+    arena.attr_value_len(attr) == value.len() && arena.attr_value(attr).unwrap_or("") == value
 }
 
 /// Return whether the cached id hash conclusively rejects this node.
@@ -1102,6 +1131,32 @@ mod tests {
             "[href*=\"example\"]",
         );
         assert_eq!(ids.len(), 1);
+    }
+
+    #[test]
+    fn attribute_values_of_every_length_match_like_their_strings() {
+        // Values shorter than, as long as, and longer than the selector's,
+        // with a multibyte one, a boolean attribute and an empty value.
+        let html = "<p a=xy></p><p a=xyz></p><p a=xyzw></p><p a=wxyz></p>\
+                    <p a=\"x yz\"></p><p a=xé></p><p a></p><p a=\"\"></p>";
+        let paragraphs = parse_and_match(html, "p");
+        let indices = |selector: &str| -> Vec<usize> {
+            let matched = parse_and_match(html, selector);
+            paragraphs
+                .iter()
+                .enumerate()
+                .filter(|(_, id)| matched.contains(id))
+                .map(|(index, _)| index)
+                .collect()
+        };
+        assert_eq!(indices("[a=xyz]"), [1]);
+        assert_eq!(indices("[a=xé]"), [5]);
+        assert_eq!(indices("[a='']"), [6, 7]);
+        assert_eq!(indices("[a~=yz]"), [4]);
+        assert_eq!(indices("[a^=xyz]"), [1, 2]);
+        assert_eq!(indices("[a$=xyz]"), [1, 3]);
+        assert_eq!(indices("[a*=xyz]"), [1, 2, 3]);
+        assert_eq!(indices("[a*=é]"), [5]);
     }
 
     #[test]

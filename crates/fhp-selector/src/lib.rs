@@ -544,7 +544,7 @@ impl Selectable for Document {
             }
             let attrs = arena.attrs(node_id);
             for attr in attrs {
-                if arena.attr_name_is(attr, "id") && arena.attr_value(attr) == Some(id) {
+                if matcher::attr_is(arena, attr, "id", id) {
                     return Some(self.get(node_id));
                 }
             }
@@ -583,7 +583,7 @@ impl Selectable for Document {
             }
             let attrs = arena.attrs(id);
             for attr in attrs {
-                if arena.attr_name_is(attr, name) && arena.attr_value(attr).unwrap_or("") == value {
+                if arena.attr_name_is(attr, name) && matcher::value_is(arena, attr, value) {
                     nodes.push(id);
                     break;
                 }

@@ -132,7 +132,7 @@ pub fn parse(input: &str) -> Result<Document, HtmlError> {
 pub fn parse_with_limit(input: &str, max_input_size: usize) -> Result<Document, HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
-    let builder = TreeBuilder::with_capacity_hint(input.len());
+    let builder = TreeBuilder::for_source(Arena::new(), input.len());
     let (arena, root) = build_copying_source(builder, input)?;
 
     Ok(Document { arena, root })
@@ -197,7 +197,7 @@ pub fn parse_owned(input: String) -> Result<Document, HtmlError> {
 pub fn parse_owned_with_limit(input: String, max_input_size: usize) -> Result<Document, HtmlError> {
     ensure_input_size(input.len(), max_input_size)?;
 
-    let builder = TreeBuilder::with_capacity_hint(input.len());
+    let builder = TreeBuilder::for_source(Arena::new(), input.len());
     let (arena, root) = build_taking_source(builder, input)?;
 
     Ok(Document { arena, root })
@@ -491,7 +491,7 @@ impl Document {
         ensure_input_size(input.len(), max_input_size)?;
 
         let mut reparse = Reparse::begin(self);
-        let builder = TreeBuilder::reusing(reparse.take_arena(), input.len());
+        let builder = TreeBuilder::for_source(reparse.take_arena(), input.len());
         let built = build_copying_source(builder, input)?;
         reparse.finish(built);
         Ok(())
@@ -528,7 +528,7 @@ impl Document {
         ensure_input_size(input.len(), max_input_size)?;
 
         let mut reparse = Reparse::begin(self);
-        let builder = TreeBuilder::reusing(reparse.take_arena(), input.len());
+        let builder = TreeBuilder::for_source(reparse.take_arena(), input.len());
         let built = build_taking_source(builder, input)?;
         reparse.finish(built);
         Ok(())
@@ -1526,7 +1526,7 @@ mod tests {
 
     #[test]
     fn parse_reads_attributes_from_its_source_copy() {
-        let html = "<a href=/x title='a&amp;b' hidden>link</a>";
+        let html = "<div id=d><a href=/x title='a&amp;b' hidden>link</a></div>";
         let borrowed = parse(html).unwrap();
         let owned = parse_owned(html.to_string()).unwrap();
         let title = if cfg!(feature = "entity-decode") {
@@ -1535,7 +1535,9 @@ mod tests {
             "a&amp;b"
         };
         for doc in [&borrowed, &owned] {
-            let a = doc.root().first_child().unwrap();
+            let div = doc.root().first_child().unwrap();
+            assert_eq!(div.attr("id"), Some("d"));
+            let a = div.first_child().unwrap();
             assert_eq!(a.attr("href"), Some("/x"));
             assert_eq!(a.attr("title"), Some(title));
             assert_eq!(a.attr("hidden"), None);
@@ -1543,14 +1545,27 @@ mod tests {
             assert_eq!(doc.to_html(), borrowed.to_html());
         }
         // `parse` copies only a decoded value. `parse_owned` hands its source
-        // to the arena only after parsing, so it copies every attribute.
+        // to the arena only after parsing, so it also copies the attributes
+        // of formatting elements such as `a`, which the parse reads.
         let decoded = if cfg!(feature = "entity-decode") {
             "a&b"
         } else {
             ""
         };
         assert_eq!(borrowed.arena.attr_str_slab, decoded);
-        assert!(owned.arena.attr_str_slab.starts_with("href/xtitle"));
+        assert_eq!(
+            owned.arena.attr_str_slab,
+            format!("href/xtitle{title}hidden")
+        );
+    }
+
+    #[test]
+    fn only_a_copying_builder_reserves_room_for_attribute_strings() {
+        let big: String = "<div class=\"c\" id=\"i\">text</div>".repeat(2000);
+        let doc = parse(&big).unwrap();
+        assert_eq!(doc.arena.attr_str_slab.capacity(), 0);
+        let (arena, _) = TreeBuilder::with_capacity_hint(big.len()).finish().unwrap();
+        assert!(arena.attr_str_slab.capacity() >= big.len() / 8);
     }
 }
 

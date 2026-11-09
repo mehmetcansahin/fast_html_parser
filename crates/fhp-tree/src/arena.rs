@@ -30,19 +30,28 @@ pub struct Attribute {
     value_in_source: bool,
 }
 
-/// Where the input a parse borrows its attributes from lies in memory, while
-/// `Arena::source` holds a copy of it. Attributes inside it are stored as
-/// offsets into that copy instead of being copied again.
+/// Where the input a parse borrows its text and attributes from lies in
+/// memory, while `Arena::source` holds (or will hold) a copy of it. Strings
+/// inside it are stored as offsets into that copy instead of being copied
+/// again.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct SourceRange {
-    pub(crate) base: usize,
-    pub(crate) len: usize,
+    base: usize,
+    len: usize,
 }
 
 impl SourceRange {
+    /// The range `input` occupies.
+    pub(crate) fn of(input: &str) -> Self {
+        Self {
+            base: input.as_ptr() as usize,
+            len: input.len(),
+        }
+    }
+
     /// The offset of `part` in the source, if it lies inside it.
     #[inline]
-    fn offset_of(self, part: &str) -> Option<u32> {
+    pub(crate) fn offset_of(self, part: &str) -> Option<u32> {
         let offset = (part.as_ptr() as usize).checked_sub(self.base)?;
         if offset.checked_add(part.len())? > self.len {
             return None;
@@ -216,9 +225,16 @@ impl Arena {
         }
     }
 
-    /// Grow the buffers to the capacities [`Arena::with_capacity`] would
-    /// allocate, where they are smaller.
-    pub(crate) fn reserve(&mut self, node_cap: usize, text_cap: usize, attr_cap: usize) {
+    /// Grow the buffers to the given capacities, where they are smaller:
+    /// those of [`Arena::with_capacity`] with `attr_str_cap` bytes for
+    /// copied attribute strings.
+    pub(crate) fn reserve(
+        &mut self,
+        node_cap: usize,
+        text_cap: usize,
+        attr_cap: usize,
+        attr_str_cap: usize,
+    ) {
         self.nodes
             .reserve(node_cap.saturating_sub(self.nodes.len()));
         self.text_slab
@@ -226,7 +242,7 @@ impl Arena {
         self.attr_slab
             .reserve(attr_cap.saturating_sub(self.attr_slab.len()));
         self.attr_str_slab
-            .reserve((attr_cap * 32).saturating_sub(self.attr_str_slab.len()));
+            .reserve(attr_str_cap.saturating_sub(self.attr_str_slab.len()));
     }
 
     /// Enable the inline tag index.
@@ -1032,6 +1048,15 @@ impl Arena {
         attr.name_len as usize == name.len() && self.attr_name(attr).eq_ignore_ascii_case(name)
     }
 
+    /// The length in bytes of an attribute's value, without reading it: 0 for
+    /// a boolean attribute, as for an empty value.
+    ///
+    /// Checking it first lets a comparison reject most values unread.
+    #[inline]
+    pub fn attr_value_len(&self, attr: &Attribute) -> usize {
+        attr.value_len as usize
+    }
+
     /// Get the value of an attribute, or `None` for boolean attributes.
     #[inline]
     pub fn attr_value(&self, attr: &Attribute) -> Option<&str> {
@@ -1507,6 +1532,17 @@ mod tests {
         assert!(!arena.attr_name_is(&attrs[0], "data-idx"));
         assert!(arena.attr_name_is(&attrs[1], "é"));
         assert!(!arena.attr_name_is(&attrs[1], "É"));
+    }
+
+    #[test]
+    fn attr_value_len_counts_bytes_and_zero_for_a_boolean_attribute() {
+        let (arena, node) = split_from_source("<x a=é b c=''>", usize::MAX);
+        let lens: Vec<usize> = arena
+            .attrs(node)
+            .iter()
+            .map(|attr| arena.attr_value_len(attr))
+            .collect();
+        assert_eq!(lens, [2, 0, 0]);
     }
 
     #[test]

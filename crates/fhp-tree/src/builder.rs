@@ -472,13 +472,13 @@ pub struct TreeBuilder {
     identity_state: RandomState,
     /// The synthetic root node (document root).
     root: NodeId,
-    /// Base address of the original input (for source-backed text).
-    source_base: usize,
-    /// Length of the original input in bytes.
-    source_len: usize,
-    /// Whether the arena holds its copy of the source while tokens arrive
-    /// ([`Self::set_source`]), so attributes can reference it.
-    attrs_from_source: bool,
+    /// The input tokens borrow from, which source-backed text and attributes
+    /// reference by offset.
+    source: Option<SourceRange>,
+    /// Whether the arena holds `source` while tokens arrive
+    /// ([`Self::set_source`]) rather than receiving it after the parse
+    /// ([`Self::set_source_ptr`]).
+    source_in_arena: bool,
     /// Text node emitted by the current uninterrupted character-token run.
     /// Non-text tokens clear it so coalescing is independent of storage mode.
     last_text_node: NodeId,
@@ -516,8 +516,7 @@ impl TreeBuilder {
     /// Uses heuristics to estimate node, text, and attribute counts from the
     /// input byte length, reducing reallocations for large documents.
     pub fn with_capacity_hint(input_len: usize) -> Self {
-        let (node_cap, text_cap, attr_cap) = Self::capacities_for(input_len);
-        Self::from_arena(Arena::with_capacity(node_cap, text_cap, attr_cap))
+        Self::sized(Arena::new(), input_len, true)
     }
 
     /// Create a tree builder that parses into an arena from an earlier parse.
@@ -526,21 +525,31 @@ impl TreeBuilder {
     /// their allocations and grow to the capacity hint for `input_len` where
     /// they are smaller. The builder starts exactly like
     /// [`TreeBuilder::with_capacity_hint`] otherwise.
-    pub fn reusing(mut arena: Arena, input_len: usize) -> Self {
-        arena.clear();
-        let (node_cap, text_cap, attr_cap) = Self::capacities_for(input_len);
-        arena.reserve(node_cap, text_cap, attr_cap);
-        Self::from_arena(arena)
+    pub fn reusing(arena: Arena, input_len: usize) -> Self {
+        Self::sized(arena, input_len, true)
     }
 
-    /// Node, text and attribute capacities estimated from the input length.
-    fn capacities_for(input_len: usize) -> (usize, usize, usize) {
+    /// [`TreeBuilder::reusing`] for a parse whose arena will hold the source
+    /// ([`Self::set_source`] or [`Self::set_source_ptr`]). Its attribute
+    /// strings mostly become offsets into the source, so no room is reserved
+    /// for copying them.
+    pub(crate) fn for_source(arena: Arena, input_len: usize) -> Self {
+        Self::sized(arena, input_len, false)
+    }
+
+    /// Empty `arena` and grow its buffers to the capacities estimated from
+    /// the input length, with room for copied attribute strings if
+    /// `attr_strings`.
+    fn sized(mut arena: Arena, input_len: usize, attr_strings: bool) -> Self {
         let capacity_hint_len = input_len.min(MAX_CAPACITY_HINT_INPUT);
         let node_cap = (capacity_hint_len / 32).max(256);
         // Source-backed text uses offsets, not slab — smaller alloc suffices.
         let text_cap = (capacity_hint_len / 16).max(4096);
         let attr_cap = (capacity_hint_len / 128).max(64);
-        (node_cap, text_cap, attr_cap)
+        let attr_str_cap = if attr_strings { attr_cap * 32 } else { 0 };
+        arena.clear();
+        arena.reserve(node_cap, text_cap, attr_cap, attr_str_cap);
+        Self::from_arena(arena)
     }
 
     /// Start a builder over an empty arena.
@@ -569,9 +578,8 @@ impl TreeBuilder {
             created_elements: Vec::new(),
             identity_state: RandomState::new(),
             root,
-            source_base: 0,
-            source_len: 0,
-            attrs_from_source: false,
+            source: None,
+            source_in_arena: false,
             last_text_node: NodeId::NULL,
             pending_table_text: String::new(),
             table_text_run_foster: false,
@@ -615,9 +623,8 @@ impl TreeBuilder {
     /// names and attribute values borrowed from `input` that need no decoding
     /// will reference the source instead of being copied to a slab.
     pub(crate) fn set_source(&mut self, input: &str) {
-        self.source_base = input.as_ptr() as usize;
-        self.source_len = input.len();
-        self.attrs_from_source = true;
+        self.source = Some(SourceRange::of(input));
+        self.source_in_arena = true;
         self.arena.set_source(input);
     }
 
@@ -625,21 +632,21 @@ impl TreeBuilder {
     ///
     /// Use this with [`Arena::set_source_owned`] after tokenization to
     /// avoid a redundant memcpy when the caller owns the input `String`.
-    /// Attributes are still copied: the Noah's Ark clause reads them before
-    /// the source reaches the arena.
+    /// Formatting elements' attributes are still copied: the Noah's Ark
+    /// clause reads them before the source reaches the arena.
     pub(crate) fn set_source_ptr(&mut self, input: &str) {
-        self.source_base = input.as_ptr() as usize;
-        self.source_len = input.len();
-        self.attrs_from_source = false;
+        self.source = Some(SourceRange::of(input));
+        self.source_in_arena = false;
     }
 
-    /// The input attributes may reference instead of being copied.
+    /// The input the attributes of an element of `kind` may reference
+    /// instead of being copied.
     #[inline]
-    fn attr_source(&self) -> Option<SourceRange> {
-        self.attrs_from_source.then_some(SourceRange {
-            base: self.source_base,
-            len: self.source_len,
-        })
+    fn attr_source(&self, kind: ElementKind) -> Option<SourceRange> {
+        if kind == ElementKind::Formatting && !self.source_in_arena {
+            return None;
+        }
+        self.source
     }
 
     /// Process a single token and insert it into the tree.
@@ -1016,7 +1023,7 @@ impl TreeBuilder {
                 self.arena.set_attrs_from_raw(node, raw);
             }
             PendingAttrs::Split(attributes) if !attributes.is_empty() => {
-                let source = self.attr_source();
+                let source = self.attr_source(kind);
                 self.arena.set_split_attrs(node, attributes, source);
             }
             _ => {}
@@ -1945,12 +1952,10 @@ impl TreeBuilder {
         let new_len = u32::try_from(new_len).ok()?;
 
         if previous_node.flags.has(NodeFlags::IS_TEXT_FROM_SOURCE) {
-            let ptr = content.as_ptr() as usize;
-            let source_end = self.source_base.checked_add(self.source_len)?;
-            let contiguous = self.source_len != 0
-                && ptr >= self.source_base
-                && ptr.checked_add(content.len())? <= source_end
-                && old_end == ptr - self.source_base;
+            let contiguous = self
+                .source
+                .and_then(|source| source.offset_of(content))
+                .is_some_and(|offset| offset as usize == old_end);
             if contiguous {
                 self.arena.get_mut(previous).text_len = new_len;
                 return Some(previous);
@@ -1994,17 +1999,10 @@ impl TreeBuilder {
     /// the original source range.
     #[inline]
     fn try_source_ref(&mut self, depth: u16, content: &str) -> NodeId {
-        if self.source_len > 0 {
-            let ptr = content.as_ptr() as usize;
-            if ptr >= self.source_base && ptr + content.len() <= self.source_base + self.source_len
-            {
-                let offset = ptr - self.source_base;
-                return self
-                    .arena
-                    .new_text_ref(depth, offset as u32, content.len() as u32);
-            }
+        match self.source.and_then(|source| source.offset_of(content)) {
+            Some(offset) => self.arena.new_text_ref(depth, offset, content.len() as u32),
+            None => self.arena.new_text(depth, content),
         }
-        self.arena.new_text(depth, content)
     }
 
     /// Handle a comment.
@@ -2160,10 +2158,22 @@ mod tests {
 
     /// [`parse`] with the arena holding the source, as [`crate::parse`] does.
     fn parse_from_source(html: &str) -> Result<(Arena, NodeId), ParseError> {
-        let mut builder = TreeBuilder::with_capacity_hint(html.len());
+        let mut builder = TreeBuilder::for_source(Arena::new(), html.len());
         builder.set_source(html);
         fhp_tokenizer::tokenize_into(html, &mut builder);
         builder.finish()
+    }
+
+    /// [`parse`] with the source handed to the arena after the parse, as
+    /// [`crate::parse_owned`] does.
+    fn parse_from_pending_source(html: &str) -> Result<(Arena, NodeId), ParseError> {
+        let source = html.to_owned();
+        let mut builder = TreeBuilder::for_source(Arena::new(), source.len());
+        builder.set_source_ptr(&source);
+        fhp_tokenizer::tokenize_into(&source, &mut builder);
+        let (mut arena, root) = builder.finish()?;
+        arena.set_source_owned(source);
+        Ok((arena, root))
     }
 
     fn assert_stack_invariants(builder: &TreeBuilder) {
@@ -3030,6 +3040,50 @@ mod tests {
             };
             assert_eq!(count_id("1"), 4 + 3);
             assert_eq!(count_id("2"), 1 + 1);
+        }
+    }
+
+    #[test]
+    fn noahs_ark_reads_decoded_and_source_backed_attributes_alike() {
+        let html = format!(
+            "<a>{}<b title=\"x&amp;y\" id=2><span data-k=v>x</a>y",
+            "<b title=\"x&amp;y\" id=1>".repeat(4)
+        );
+        let title = if cfg!(feature = "entity-decode") {
+            "x&y"
+        } else {
+            "x&amp;y"
+        };
+        let (copied, _) = parse(&html).unwrap();
+        let (referenced, _) = parse_from_source(&html).unwrap();
+        let (pending, _) = parse_from_pending_source(&html).unwrap();
+        // With the source in the arena only decoded titles are copied.
+        let decoded = if cfg!(feature = "entity-decode") {
+            "x&y"
+        } else {
+            ""
+        };
+        assert_eq!(referenced.attr_str_slab, decoded.repeat(5));
+        // Before the source arrives, the formatting elements' attributes are
+        // copied for the Noah's Ark clause; the span's are not.
+        assert_eq!(
+            pending.attr_str_slab,
+            format!("title{title}id1").repeat(4) + &format!("title{title}id2")
+        );
+        for arena in [&copied, &referenced, &pending] {
+            let b_with_id = |id: &str| {
+                (0..arena.nodes.len())
+                    .map(|index| NodeId(index as u32))
+                    .filter(|&node| arena.get(node).tag == Tag::B)
+                    .filter(|&node| {
+                        let attrs = arena.attrs(node);
+                        assert_eq!(arena.attr_value(&attrs[0]), Some(title));
+                        arena.attr_value(&attrs[1]) == Some(id)
+                    })
+                    .count()
+            };
+            assert_eq!(b_with_id("1"), 4 + 3);
+            assert_eq!(b_with_id("2"), 1 + 1);
         }
     }
 
