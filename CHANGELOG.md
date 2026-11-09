@@ -63,6 +63,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   element, and the content after it goes to the innermost open element, so
   the tree stays at most 513 levels deep. `TreeBuilder::process` and
   `TreeBuilder::finish` no longer return errors.
+- fhp-core no longer depends on `phf`, which brought `phf_macros`,
+  `phf_generator`, `rand` and `siphasher` into every build; its only
+  dependencies are now `memchr` and `thiserror`.
 
 ### Deprecated
 
@@ -133,6 +136,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Named character references other than the common few (`&amp;`, `&lt;`,
+  `&gt;`, `&quot;`, `&apos;`, `&nbsp;`) are matched by one walk of a
+  generated DAFSA over all 2125 names, instead of a SipHash perfect-hash
+  lookup plus a separate trie for the names allowed without a semicolon:
+  17–19 ns per reference instead of 28–30. Parsing the repository fixtures
+  that use such names, medium_100kb and large_5mb, is 3–6% faster;
+  Wikipedia, with many numeric references, measured 3% faster and the
+  others 0–2%.
 - Parsing is 6–14% faster, `tokenize` 2–14% and
   `StreamTokenizer::feed_str_with` up to 14% on the repository fixtures
   (Ryzen 7800X3D, fat LTO, mimalloc), most on attribute-heavy pages such as

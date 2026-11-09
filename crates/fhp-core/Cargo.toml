@@ -14,7 +14,6 @@ exclude = ["benches/", "tests/"]
 
 [dependencies]
 thiserror = { workspace = true }
-phf = { workspace = true }
 memchr = "2"
 
 [package.metadata.docs.rs]
