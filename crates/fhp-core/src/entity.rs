@@ -382,6 +382,53 @@ mod tests {
     }
 
     #[test]
+    fn the_automaton_accepts_exactly_the_generated_names() {
+        // Try every byte from every reachable prefix, so that a table entry
+        // for a byte no name continues with would surface as an extra name.
+        fn visit(
+            walk: EntityWalk,
+            prefix: &mut String,
+            exact: &mut Vec<(String, &'static str)>,
+            legacy: &mut Vec<String>,
+        ) {
+            if walk.has(generated::ENTITY_EXACT) {
+                exact.push((prefix.clone(), walk.value()));
+            }
+            if walk.has(generated::ENTITY_LEGACY) {
+                legacy.push(prefix.clone());
+            }
+            for byte in 0..=u8::MAX {
+                if let Some(next) = walk.step(byte) {
+                    prefix.push(char::from(byte));
+                    visit(next, prefix, exact, legacy);
+                    prefix.pop();
+                }
+            }
+        }
+
+        let (mut exact, mut legacy) = (Vec::new(), Vec::new());
+        visit(
+            EntityWalk::START,
+            &mut String::new(),
+            &mut exact,
+            &mut legacy,
+        );
+        // Bytes are tried in ascending order, so names arrive sorted.
+        assert!(
+            exact
+                .iter()
+                .map(|(name, value)| (name.as_str(), *value))
+                .eq(generated::EXACT_ENTITIES)
+        );
+        assert!(
+            legacy
+                .iter()
+                .map(String::as_str)
+                .eq(generated::LEGACY_ENTITY_NAMES)
+        );
+    }
+
+    #[test]
     fn longest_prefix_stops_where_no_name_continues() {
         // `notinv` only begins names such as `notinva`.
         assert_eq!(decode_named("notinv"), None);

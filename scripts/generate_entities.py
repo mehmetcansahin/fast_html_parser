@@ -54,7 +54,7 @@ class State:
     names: int
 
 
-def parse_source(raw: bytes) -> tuple[dict[str, str], dict[str, str], int, int, int]:
+def parse_source(raw: bytes) -> tuple[dict[str, str], dict[str, str], int, int]:
     data = json.loads(raw)
     if not isinstance(data, dict):
         raise ValueError("WHATWG entity source must be a JSON object")
@@ -62,7 +62,6 @@ def parse_source(raw: bytes) -> tuple[dict[str, str], dict[str, str], int, int, 
     exact: dict[str, str] = {}
     legacy: dict[str, str] = {}
     max_name_len = 0
-    max_legacy_name_len = 0
     for source_name, record in sorted(data.items()):
         if not source_name.startswith("&") or not isinstance(record, dict):
             raise ValueError(f"invalid entity record: {source_name!r}")
@@ -80,8 +79,6 @@ def parse_source(raw: bytes) -> tuple[dict[str, str], dict[str, str], int, int, 
         previous = destination.setdefault(name, replacement)
         if previous != replacement:
             raise ValueError(f"conflicting replacements for {source_name!r}")
-        if not has_semicolon:
-            max_legacy_name_len = max(max_legacy_name_len, len(name))
 
     # WHATWG provides a semicolon-terminated counterpart for every legacy
     # spelling. Keep that invariant explicit so the two lookup paths cannot
@@ -90,7 +87,7 @@ def parse_source(raw: bytes) -> tuple[dict[str, str], dict[str, str], int, int, 
         if exact.get(name) != replacement:
             raise ValueError(f"legacy entity has no matching exact record: {name!r}")
 
-    return exact, legacy, max_name_len, max_legacy_name_len, len(data)
+    return exact, legacy, max_name_len, len(data)
 
 
 def build_trie(exact: dict[str, str], legacy: dict[str, str]) -> TrieNode:
@@ -245,7 +242,7 @@ def number_rows(values: list[int], per_line: int = 16) -> list[str]:
 
 
 def generate(raw: bytes) -> str:
-    exact, legacy, max_name_len, _, source_record_count = parse_source(raw)
+    exact, legacy, max_name_len, source_record_count = parse_source(raw)
     states = minimize(build_trie(exact, legacy))
     names = sorted(exact)
     if len(names) > 0xFFFF:
