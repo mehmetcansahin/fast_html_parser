@@ -144,10 +144,10 @@ fn decode_any_reference(
         return decode_numeric_reference(input, start);
     }
 
-    // Scan the name once. The core matcher records the longest legacy terminal
-    // while locating the complete name, then prefers an exact PHF hit when a
-    // semicolon terminates it. Exact misses and semicolon-less references reuse
-    // the recorded legacy candidate instead of rescanning the same bytes.
+    // Scan the name once. The core matcher's single walk records the longest
+    // legacy terminal while locating the complete name, then prefers the
+    // exact name when a semicolon terminates it. Exact misses and
+    // semicolon-less references reuse the recorded legacy candidate.
     let matched = longest_named_prefix(&bytes[start..])?;
     let name_end = start + matched.name_len;
     let has_semicolon = bytes.get(name_end) == Some(&b';');

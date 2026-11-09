@@ -210,7 +210,7 @@ The parser is organized as a workspace of focused crates:
 
 | Crate | Purpose |
 |---|---|
-| `fhp-core` | Interned HTML tags, generated WHATWG entity PHF/legacy trie, error types |
+| `fhp-core` | Interned HTML tags, generated WHATWG named-entity DAFSA, error types |
 | `fhp-simd` | SIMD abstraction layer with runtime dispatch |
 | `fhp-tokenizer` | Two-phase tokenizer (structural indexing + token extraction) |
 | `fhp-tree` | Arena-based DOM tree with 64-byte aligned nodes |

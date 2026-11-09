@@ -22,31 +22,59 @@ pub struct NamedEntityMatch {
     pub allows_legacy_omission: bool,
 }
 
-#[inline]
-fn legacy_trie_transition(node_index: usize, byte: u8) -> Option<usize> {
-    if node_index == 0 {
-        let next = generated::LEGACY_ENTITY_TRIE_ROOT[byte as usize];
-        return (next != generated::NO_ENTITY_NODE).then_some(next as usize);
+/// A position in the named-reference DAFSA: the state reached and the rank
+/// of the names it leads to (see `scripts/generate_entities.py`).
+#[derive(Clone, Copy)]
+struct EntityWalk {
+    state: usize,
+    rank: usize,
+}
+
+impl EntityWalk {
+    const START: Self = Self { state: 0, rank: 0 };
+
+    /// Follow the edge for `byte`, if the names reached so far continue
+    /// with it. No name contains a byte other than an ASCII alphanumeric.
+    #[inline]
+    fn step(self, byte: u8) -> Option<Self> {
+        let packed = generated::ENTITY_STATES[self.state];
+        let location = (packed >> 16) as usize;
+        let edge = if packed as u8 & generated::ENTITY_DENSE != 0 {
+            // A state with many edges indexes them by byte.
+            let column = usize::from(byte.wrapping_sub(generated::ENTITY_DENSE_FIRST_BYTE));
+            if column >= generated::ENTITY_DENSE_ROW_LEN {
+                return None;
+            }
+            let edge =
+                generated::ENTITY_DENSE_EDGES[location * generated::ENTITY_DENSE_ROW_LEN + column];
+            if edge == generated::NO_ENTITY_EDGE {
+                return None;
+            }
+            usize::from(edge)
+        } else {
+            let count = ((packed >> 8) & 0xFF) as usize;
+            location
+                + generated::ENTITY_EDGE_BYTES[location..location + count]
+                    .iter()
+                    .position(|&edge_byte| edge_byte == byte)?
+        };
+        Some(Self {
+            state: usize::from(generated::ENTITY_EDGE_TARGETS[edge]),
+            rank: self.rank + usize::from(generated::ENTITY_EDGE_SKIPS[edge]),
+        })
     }
 
-    let node = generated::LEGACY_ENTITY_TRIE_NODES.get(node_index)?;
-    let start = node.first_edge as usize;
-    let end = start + node.edge_count as usize;
-    let edges = &generated::LEGACY_ENTITY_TRIE_EDGES[start..end];
-    match edges {
-        [] => None,
-        [edge] => (edge.byte == byte).then_some(edge.next as usize),
-        [first, second] => {
-            if first.byte == byte {
-                Some(first.next as usize)
-            } else {
-                (second.byte == byte).then_some(second.next as usize)
-            }
-        }
-        _ => edges
-            .iter()
-            .find(|edge| edge.byte == byte)
-            .map(|edge| edge.next as usize),
+    /// Whether a name ends here with the given `ENTITY_EXACT` or
+    /// `ENTITY_LEGACY` flag.
+    #[inline]
+    fn has(self, flag: u8) -> bool {
+        generated::ENTITY_STATES[self.state] as u8 & flag != 0
+    }
+
+    /// The replacement of the name ending here.
+    #[inline]
+    fn value(self) -> &'static str {
+        generated::ENTITY_VALUES[usize::from(generated::ENTITY_VALUE_INDEXES[self.rank])]
     }
 }
 
@@ -56,57 +84,37 @@ fn legacy_trie_transition(node_index: usize, byte: u8) -> Option<usize> {
 /// semicolon or ordinary text. The returned length excludes the semicolon.
 #[inline]
 pub fn longest_named_prefix(input: &[u8]) -> Option<NamedEntityMatch> {
-    let mut candidate_len = 0usize;
-    let mut legacy_node_index = Some(0usize);
-    let mut legacy_match = None;
-
-    for (offset, &byte) in input
-        .iter()
-        .take(generated::MAX_ENTITY_NAME_LEN)
-        .enumerate()
-    {
-        if !byte.is_ascii_alphanumeric() {
+    // One walk finds both candidates: the longest name WHATWG permits
+    // without a semicolon, kept for the semicolon-less and exact-miss
+    // fallbacks, and the complete name. The walk stops at the first byte no
+    // name continues with, so a complete name followed by `;` is exact.
+    let mut walk = EntityWalk::START;
+    let mut name_len = 0usize;
+    let mut legacy: Option<(EntityWalk, usize)> = None;
+    for &byte in input {
+        let Some(next) = walk.step(byte) else {
             break;
-        }
-        candidate_len = offset + 1;
-
-        // Exact references are looked up once after the name terminator is
-        // known. While scanning that same name, retain the longest legacy
-        // terminal for the semicolon-less and exact-miss fallback paths.
-        if offset < generated::MAX_LEGACY_ENTITY_NAME_LEN {
-            legacy_node_index =
-                legacy_node_index.and_then(|node_index| legacy_trie_transition(node_index, byte));
-            if let Some(node_index) = legacy_node_index {
-                let node = generated::LEGACY_ENTITY_TRIE_NODES[node_index];
-                if node.value_index != generated::NO_ENTITY_VALUE {
-                    legacy_match = Some(NamedEntityMatch {
-                        value: generated::LEGACY_ENTITY_VALUES[node.value_index as usize],
-                        name_len: candidate_len,
-                        allows_legacy_omission: true,
-                    });
-                }
-            }
-        } else {
-            legacy_node_index = None;
+        };
+        walk = next;
+        name_len += 1;
+        if walk.has(generated::ENTITY_LEGACY) {
+            legacy = Some((walk, name_len));
         }
     }
 
-    if candidate_len != 0 && input.get(candidate_len) == Some(&b';') {
-        // The scan above only admits ASCII alphanumerics, so this conversion
-        // cannot fail. Keep it checked to avoid introducing unsafe code into
-        // the core crate.
-        let name = std::str::from_utf8(&input[..candidate_len]).ok()?;
-        if let Some(value) = decode_named(name) {
-            return Some(NamedEntityMatch {
-                value,
-                name_len: candidate_len,
-                allows_legacy_omission: legacy_match
-                    .is_some_and(|matched| matched.name_len == candidate_len),
-            });
-        }
+    if walk.has(generated::ENTITY_EXACT) && input.get(name_len) == Some(&b';') {
+        return Some(NamedEntityMatch {
+            value: walk.value(),
+            name_len,
+            allows_legacy_omission: legacy.is_some_and(|(_, len)| len == name_len),
+        });
     }
 
-    legacy_match
+    legacy.map(|(walk, name_len)| NamedEntityMatch {
+        value: walk.value(),
+        name_len,
+        allows_legacy_omission: true,
+    })
 }
 
 /// Decode a named HTML entity to its character(s).
@@ -125,22 +133,14 @@ pub fn longest_named_prefix(input: &[u8]) -> Option<NamedEntityMatch> {
 /// ```
 #[inline]
 pub fn decode_named(name: &str) -> Option<&'static str> {
-    if name.is_empty() || name.len() > generated::MAX_ENTITY_NAME_LEN {
+    if name.len() > generated::MAX_ENTITY_NAME_LEN {
         return None;
     }
-
-    // These six references dominate real-world HTML and tokenizer hot paths.
-    // Keep the complete PHF as the canonical exact table, but avoid SipHash
-    // setup for the smallest, most frequent spellings.
-    match name {
-        "amp" => Some("&"),
-        "lt" => Some("<"),
-        "gt" => Some(">"),
-        "quot" => Some("\""),
-        "apos" => Some("'"),
-        "nbsp" => Some("\u{00A0}"),
-        _ => generated::EXACT_ENTITIES.get(name).copied(),
+    let mut walk = EntityWalk::START;
+    for &byte in name.as_bytes() {
+        walk = walk.step(byte)?;
     }
+    walk.has(generated::ENTITY_EXACT).then(|| walk.value())
 }
 
 /// Decode a numeric character reference (`&#123;` or `&#x1F600;`).
@@ -327,16 +327,16 @@ mod tests {
             NAMED_ENTITY_SOURCE_RECORD_COUNT
         );
 
-        for (name, expected) in generated::EXACT_ENTITIES.entries() {
-            assert_eq!(decode_named(name), Some(*expected), "exact entity {name}");
+        for (name, expected) in generated::EXACT_ENTITIES {
+            assert_eq!(decode_named(name), Some(expected), "exact entity {name}");
 
             let input = format!("{name};");
             let matched = longest_named_prefix(input.as_bytes()).unwrap();
-            assert_eq!(matched.value, *expected, "exact entity {name}");
+            assert_eq!(matched.value, expected, "exact entity {name}");
             assert_eq!(matched.name_len, name.len(), "exact entity {name}");
             assert_eq!(
                 matched.allows_legacy_omission,
-                generated::LEGACY_ENTITY_NAMES.binary_search(name).is_ok(),
+                generated::LEGACY_ENTITY_NAMES.binary_search(&name).is_ok(),
                 "exact entity {name}"
             );
         }
@@ -379,6 +379,77 @@ mod tests {
         let matched = longest_named_prefix(b"NotEqualTilde;").unwrap();
         assert_eq!(matched.value, "≂̸");
         assert!(!matched.allows_legacy_omission);
+    }
+
+    #[test]
+    fn the_automaton_accepts_exactly_the_generated_names() {
+        // Try every byte from every reachable prefix, so that a table entry
+        // for a byte no name continues with would surface as an extra name.
+        fn visit(
+            walk: EntityWalk,
+            prefix: &mut String,
+            exact: &mut Vec<(String, &'static str)>,
+            legacy: &mut Vec<String>,
+        ) {
+            if walk.has(generated::ENTITY_EXACT) {
+                exact.push((prefix.clone(), walk.value()));
+            }
+            if walk.has(generated::ENTITY_LEGACY) {
+                legacy.push(prefix.clone());
+            }
+            for byte in 0..=u8::MAX {
+                if let Some(next) = walk.step(byte) {
+                    prefix.push(char::from(byte));
+                    visit(next, prefix, exact, legacy);
+                    prefix.pop();
+                }
+            }
+        }
+
+        let (mut exact, mut legacy) = (Vec::new(), Vec::new());
+        visit(
+            EntityWalk::START,
+            &mut String::new(),
+            &mut exact,
+            &mut legacy,
+        );
+        // Bytes are tried in ascending order, so names arrive sorted.
+        assert!(
+            exact
+                .iter()
+                .map(|(name, value)| (name.as_str(), *value))
+                .eq(generated::EXACT_ENTITIES)
+        );
+        assert!(
+            legacy
+                .iter()
+                .map(String::as_str)
+                .eq(generated::LEGACY_ENTITY_NAMES)
+        );
+    }
+
+    #[test]
+    fn longest_prefix_stops_where_no_name_continues() {
+        // `notinv` only begins names such as `notinva`.
+        assert_eq!(decode_named("notinv"), None);
+        let matched = longest_named_prefix(b"notinvx;").unwrap();
+        assert_eq!((matched.value, matched.name_len), ("¬", 3));
+        let matched = longest_named_prefix(b"notinva;").unwrap();
+        assert_eq!((matched.value, matched.name_len), ("∉", 7));
+
+        // A byte outside every name ends the walk, ASCII or not.
+        let matched = longest_named_prefix("ampé;".as_bytes()).unwrap();
+        assert_eq!((matched.value, matched.name_len), ("&", 3));
+        assert!(matched.allows_legacy_omission);
+        assert_eq!(longest_named_prefix("é;".as_bytes()), None);
+        assert_eq!(longest_named_prefix(b"zz;"), None);
+        assert_eq!(longest_named_prefix(b";"), None);
+        assert_eq!(longest_named_prefix(b""), None);
+
+        // Digits occur inside names.
+        assert_eq!(decode_named("frac12"), Some("\u{bd}"));
+        let matched = longest_named_prefix(b"frac12x").unwrap();
+        assert_eq!((matched.value, matched.name_len), ("\u{bd}", 6));
     }
 
     #[test]
