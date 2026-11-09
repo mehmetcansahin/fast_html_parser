@@ -544,9 +544,7 @@ impl Selectable for Document {
             }
             let attrs = arena.attrs(node_id);
             for attr in attrs {
-                if arena.attr_name(attr).eq_ignore_ascii_case("id")
-                    && arena.attr_value(attr) == Some(id)
-                {
+                if matcher::attr_is(arena, attr, "id", id) {
                     return Some(self.get(node_id));
                 }
             }
@@ -563,7 +561,7 @@ impl Selectable for Document {
             }
             let attrs = arena.attrs(id);
             for attr in attrs {
-                if arena.attr_name(attr).eq_ignore_ascii_case("class") {
+                if arena.attr_name_is(attr, "class") {
                     if let Some(val) = arena.attr_value(attr) {
                         if contains_html_space_token(val, class) {
                             nodes.push(id);
@@ -585,9 +583,7 @@ impl Selectable for Document {
             }
             let attrs = arena.attrs(id);
             for attr in attrs {
-                if arena.attr_name(attr).eq_ignore_ascii_case(name)
-                    && arena.attr_value(attr).unwrap_or("") == value
-                {
+                if arena.attr_name_is(attr, name) && matcher::value_is(arena, attr, value) {
                     nodes.push(id);
                     break;
                 }
@@ -634,13 +630,12 @@ impl<'a> DocumentIndex<'a> {
 
             let attrs = arena.attrs(node_id);
             for attr in attrs {
-                let attr_name = arena.attr_name(attr);
-                if attr_name.eq_ignore_ascii_case("id") {
+                if arena.attr_name_is(attr, "id") {
                     if let Some(val) = arena.attr_value(attr) {
                         id_map.entry(val.to_owned()).or_insert(node_id);
                     }
                 }
-                if attr_name.eq_ignore_ascii_case("class") {
+                if arena.attr_name_is(attr, "class") {
                     if let Some(val) = arena.attr_value(attr) {
                         for class in split_html_space(val) {
                             if let Some(ids) = class_map.get_mut(class) {

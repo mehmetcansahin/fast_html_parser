@@ -29,6 +29,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   unaffected. `fhp_core::attr::AttrSplitter` is the splitter underneath: the
   attribute grammar in a form that can be fed a tag in pieces.
 
+- `Arena::attr_name_is`, which compares an attribute's name ASCII
+  case-insensitively and rejects a name of another length without reading
+  it, and `Arena::attr_value_len`, a value's length without reading it. CSS
+  and XPath matching and `NodeRef::attr` check lengths with them before
+  comparing strings.
+
 - A contract-checked tokenizer comparison benchmark against html5gum,
   html5ever, lol_html and tl. Ratios are formed only where a competitor's
   canonical token stream matches fhp-tokenizer's; lol_html and tl rows are
@@ -138,6 +144,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   because that splitting now happens in the tokenizer. A sink that splits
   `attr_raw` itself breaks even, and one that implements
   `open_tag_with_attrs` gains.
+- The one-shot parsers no longer copy attribute names and values that need
+  no decoding: like entity-free text, they are read from the document's
+  copy of the input, and only decoded values are copied. `parse_owned`,
+  `reparse_owned` and `parse_bytes` on non-UTF-8 input still copy the
+  attributes of formatting elements such as `a` and `b`, which the parse
+  reads before it receives the source; the streaming parsers copy all
+  attributes as before. These parsers also no longer reserve room for
+  attribute strings up front. Parsing is up to 8% faster on the
+  attribute-heavy GitHub fixture and 1–4% on the others, `parse_owned` up to
+  6% and 0–3% respectively; `parse_stream` is unchanged within noise (−1% to
+  +2%). Attribute selectors that test a
+  name, an id or a value's exact length, such as `[href]`, `#main` and
+  `[class="x"]`, are up to 6% faster; prefix, suffix and substring matches
+  such as `[href^="https"]` are up to 8% slower, and class selectors up to
+  5%.
 - `StreamTokenizer::feed_str_with` is 1.9–3.0x faster and within 7% of
   one-shot `tokenize_with` on the repository fixtures in 64 KiB chunks;
   `feed` is 1.5–2.1x faster. Complete markup is now tokenized in a single
