@@ -21,6 +21,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   document keeps after a large page. Underneath: `Arena::clear`,
   `Arena::shrink_to_fit` and `TreeBuilder::reusing`.
 
+- `TreeSink::open_tag_with_attrs`, which `tokenize_into` now calls instead
+  of `open_tag`. Along with the raw attribute region it passes the
+  attributes the tokenizer split while looking for the end of the tag,
+  exactly as `iter_raw_attrs` yields them, so a sink need not scan the
+  region again. The default forwards to `open_tag`, so existing sinks are
+  unaffected. `fhp_core::attr::AttrSplitter` is the splitter underneath: the
+  attribute grammar in a form that can be fed a tag in pieces.
+
 - A contract-checked tokenizer comparison benchmark against html5gum,
   html5ever, lol_html and tl. Ratios are formed only where a competitor's
   canonical token stream matches fhp-tokenizer's; lol_html and tl rows are
@@ -119,6 +127,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+- Parsing is 6–14% faster, `tokenize` 2–14% and
+  `StreamTokenizer::feed_str_with` up to 14% on the repository fixtures
+  (Ryzen 7800X3D, fat LTO, mimalloc), most on attribute-heavy pages such as
+  the GitHub and Stack Overflow fixtures. The tokenizer records each
+  attribute's name and value while it scans a tag for its end, where the
+  tree builder and the `Token` path used to scan the attribute region a
+  second time; a start tag without attributes no longer allocates for them.
+  `tokenize_into` into a sink that ignores attributes is 19–28% slower,
+  because that splitting now happens in the tokenizer. A sink that splits
+  `attr_raw` itself breaks even, and one that implements
+  `open_tag_with_attrs` gains.
 - `StreamTokenizer::feed_str_with` is 1.9–3.0x faster and within 7% of
   one-shot `tokenize_with` on the repository fixtures in 64 KiB chunks;
   `feed` is 1.5–2.1x faster. Complete markup is now tokenized in a single

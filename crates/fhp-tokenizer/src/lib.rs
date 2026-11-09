@@ -31,6 +31,7 @@ use extract::extract_tokens;
 use structural::StructuralIndexer;
 use token::Token;
 
+use fhp_core::attr::RawAttr;
 use fhp_core::tag::Tag;
 use fhp_simd::AllMasks;
 use fhp_simd::dispatch::ops;
@@ -59,6 +60,29 @@ pub trait TreeSink {
     /// trailing slash. It does not make a non-void HTML element void; sinks
     /// must use [`Tag::is_void`] for tree-construction semantics.
     fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool);
+
+    /// An opening tag was encountered, with its attributes already split.
+    ///
+    /// `attrs` lists the attributes of `attr_raw` exactly as
+    /// [`iter_raw_attrs`](fhp_core::attr::iter_raw_attrs) yields them:
+    /// in source order, undecoded, and including later duplicates. The
+    /// tokenizer finds them while looking for the end of the tag, so a sink
+    /// that reads them here does not scan the region again.
+    ///
+    /// This is the method the tokenizer calls. The default forwards to
+    /// [`TreeSink::open_tag`].
+    #[inline]
+    fn open_tag_with_attrs(
+        &mut self,
+        tag: Tag,
+        name: &str,
+        attr_raw: &str,
+        attrs: &[RawAttr<'_>],
+        self_closing: bool,
+    ) {
+        let _ = attrs;
+        self.open_tag(tag, name, attr_raw, self_closing);
+    }
 
     /// A closing tag was encountered.
     fn close_tag(&mut self, tag: Tag, name: &str);

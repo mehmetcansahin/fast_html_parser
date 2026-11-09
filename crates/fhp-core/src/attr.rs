@@ -5,8 +5,9 @@
 //! decide whether a `>` ends the tag (it does not inside a quoted value) and
 //! whether a trailing `/` is a self-closing flag (it is not inside an unquoted
 //! value). [`iter_raw_attrs`] splits a tag's attribute region into raw
-//! name/value pairs, and [`SeenAttributes`] implements first-wins duplicate
-//! detection with ASCII case-insensitive names.
+//! name/value pairs, [`AttrSplitter`] does the same for a tag that arrives in
+//! pieces, and [`SeenAttributes`] implements first-wins duplicate detection
+//! with ASCII case-insensitive names.
 
 use std::collections::HashSet;
 use std::collections::hash_map::RandomState;
@@ -243,6 +244,264 @@ impl<'a> Iterator for RawAttrs<'a> {
     }
 }
 
+/// Splits a tag into raw attributes while the tag is scanned in pieces.
+///
+/// The resumable form of [`iter_raw_attrs`], for a tokenizer that already
+/// finds quotes and `>` with an index: it scans up to each quote whose
+/// meaning it needs, and jumps from an opening quote straight to the closing
+/// one. Attributes come out exactly as [`iter_raw_attrs`] yields them for the
+/// tag's attribute region, duplicates included, so the region is never
+/// scanned a second time. [`AttrSplitter::state`] follows [`TagScanState`]
+/// from [`TagScanState::START`].
+///
+/// # Example
+///
+/// ```
+/// use fhp_core::attr::{AttrSplitter, iter_raw_attrs};
+///
+/// let tag = r#"<a href="/x" hidden>"#;
+/// let close = tag.len() - 1;
+/// let mut splitter = AttrSplitter::new();
+/// let mut attrs = Vec::new();
+/// splitter.scan(tag, 1, close, &mut attrs);
+/// let name_end = splitter.finish(tag, close, &mut attrs);
+/// assert_eq!(&tag[1..name_end], "a");
+/// assert!(attrs.into_iter().eq(iter_raw_attrs(&tag[name_end..close])));
+/// ```
+#[derive(Clone, Copy, Debug)]
+pub struct AttrSplitter {
+    state: TagScanState,
+    /// End of the tag name, once the name state is left.
+    tag_name_end: usize,
+    /// The attribute being scanned: its name range, the name's
+    /// [`ascii_ci_fingerprint`], and where its value starts.
+    name_start: usize,
+    name_end: usize,
+    fingerprint: u64,
+    value_start: usize,
+}
+
+impl Default for AttrSplitter {
+    #[inline]
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AttrSplitter {
+    /// A splitter at the first tag-name byte, [`tag_name_offset`] bytes after
+    /// the `<`.
+    #[inline]
+    pub const fn new() -> Self {
+        Self {
+            state: TagScanState::START,
+            tag_name_end: 0,
+            name_start: 0,
+            name_end: 0,
+            fingerprint: ASCII_CI_FINGERPRINT_OFFSET,
+            value_start: 0,
+        }
+    }
+
+    /// Grammar state after the bytes scanned so far.
+    #[inline]
+    pub fn state(&self) -> TagScanState {
+        self.state
+    }
+
+    /// Scan `input[pos..end]`, pushing every attribute that ends inside it.
+    ///
+    /// Calls must cover the tag in order and stop before the `>` that ends
+    /// it. The one gap allowed is inside a quoted value: while
+    /// [`AttrSplitter::state`] is [`TagScanState::Quoted`], the next call may
+    /// start at the closing quote.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `pos < end` and `end > input.len()`, or if an attribute
+    /// boundary is not a character boundary of `input`. Boundaries sit next
+    /// to ASCII delimiters, so that only happens when `pos` or `end` splits a
+    /// character or the calls for one tag pass different inputs.
+    #[inline(always)]
+    pub fn scan<'a>(&mut self, input: &'a str, pos: usize, end: usize, out: &mut Vec<RawAttr<'a>>) {
+        // The commonest calls end a quoted value at a closing quote the
+        // caller found, or are empty because a `>` directly follows one. Both
+        // stay inline; a call costs as much as scanning a short name.
+        if pos >= end {
+            return;
+        }
+        if let TagScanState::Quoted(quote) = self.state {
+            if pos + 1 == end && input.as_bytes()[pos] == quote {
+                self.push(input, Some(pos), out);
+                self.state = TagScanState::BeforeAttrName;
+                return;
+            }
+        }
+        self.scan_bytes(input, pos, end, out);
+    }
+
+    fn scan_bytes<'a>(
+        &mut self,
+        input: &'a str,
+        mut pos: usize,
+        end: usize,
+        out: &mut Vec<RawAttr<'a>>,
+    ) {
+        let bytes = &input.as_bytes()[..end];
+        while pos < bytes.len() {
+            match self.state {
+                TagScanState::Name => {
+                    match bytes[pos..]
+                        .iter()
+                        .position(|&byte| is_html_whitespace(byte) || byte == b'/')
+                    {
+                        Some(offset) => {
+                            self.tag_name_end = pos + offset;
+                            self.state = TagScanState::BeforeAttrName;
+                            pos += offset + 1;
+                        }
+                        None => break,
+                    }
+                }
+                TagScanState::BeforeAttrName => {
+                    while pos < bytes.len()
+                        && (is_html_whitespace(bytes[pos]) || bytes[pos] == b'/')
+                    {
+                        pos += 1;
+                    }
+                    let Some(&byte) = bytes.get(pos) else { break };
+                    // Any other byte starts a name, a leading `=` included.
+                    self.name_start = pos;
+                    self.fingerprint = ascii_ci_fingerprint_step(ASCII_CI_FINGERPRINT_OFFSET, byte);
+                    self.state = TagScanState::AttrName;
+                    pos += 1;
+                }
+                TagScanState::AttrName => {
+                    let mut fingerprint = self.fingerprint;
+                    while pos < bytes.len() && !is_attr_name_end(bytes[pos]) {
+                        fingerprint = ascii_ci_fingerprint_step(fingerprint, bytes[pos]);
+                        pos += 1;
+                    }
+                    self.fingerprint = fingerprint;
+                    let Some(&byte) = bytes.get(pos) else { break };
+                    self.name_end = pos;
+                    pos += 1;
+                    self.state = match byte {
+                        b'=' => TagScanState::BeforeAttrValue,
+                        b'/' => {
+                            self.push(input, None, out);
+                            TagScanState::BeforeAttrName
+                        }
+                        _ => TagScanState::AfterAttrName,
+                    };
+                }
+                TagScanState::AfterAttrName => {
+                    while pos < bytes.len() && is_html_whitespace(bytes[pos]) {
+                        pos += 1;
+                    }
+                    let Some(&byte) = bytes.get(pos) else { break };
+                    if byte == b'=' {
+                        self.state = TagScanState::BeforeAttrValue;
+                        pos += 1;
+                    } else {
+                        // The before-name state skips a `/` and starts the
+                        // next name at any other byte.
+                        self.push(input, None, out);
+                        self.state = TagScanState::BeforeAttrName;
+                    }
+                }
+                TagScanState::BeforeAttrValue => {
+                    while pos < bytes.len() && is_html_whitespace(bytes[pos]) {
+                        pos += 1;
+                    }
+                    let Some(&byte) = bytes.get(pos) else { break };
+                    if byte == b'"' || byte == b'\'' {
+                        self.state = TagScanState::Quoted(byte);
+                        pos += 1;
+                    } else {
+                        self.state = TagScanState::Unquoted;
+                    }
+                    self.value_start = pos;
+                }
+                TagScanState::Unquoted => {
+                    while pos < bytes.len() && !is_html_whitespace(bytes[pos]) {
+                        pos += 1;
+                    }
+                    if pos == bytes.len() {
+                        break;
+                    }
+                    self.push(input, Some(pos), out);
+                    self.state = TagScanState::BeforeAttrName;
+                    pos += 1;
+                }
+                TagScanState::Quoted(quote) => match memchr::memchr(quote, &bytes[pos..]) {
+                    Some(offset) => {
+                        self.push(input, Some(pos + offset), out);
+                        self.state = TagScanState::BeforeAttrName;
+                        pos += offset + 1;
+                    }
+                    None => break,
+                },
+            }
+        }
+    }
+
+    /// End the tag at `end`, the position of its closing `>`, after scanning
+    /// up to it. Pushes the attribute still open there and returns the end
+    /// of the tag name.
+    ///
+    /// The attribute region is `input[tag_name_end..end]`, less the `/` of a
+    /// self-closing tag. The splitter is spent afterwards.
+    ///
+    /// # Panics
+    ///
+    /// As [`AttrSplitter::scan`], if `end` is not a character boundary.
+    #[inline]
+    pub fn finish<'a>(&self, input: &'a str, end: usize, out: &mut Vec<RawAttr<'a>>) -> usize {
+        let mut open = *self;
+        match self.state {
+            TagScanState::Name => return end,
+            TagScanState::BeforeAttrName => {}
+            TagScanState::AttrName => {
+                open.name_end = end;
+                open.push(input, None, out);
+            }
+            TagScanState::AfterAttrName => open.push(input, None, out),
+            // `a=` has an empty value.
+            TagScanState::BeforeAttrValue => {
+                open.value_start = end;
+                open.push(input, Some(end), out);
+            }
+            // A quoted value is only open here when its quote is unterminated.
+            TagScanState::Unquoted | TagScanState::Quoted(_) => open.push(input, Some(end), out),
+        }
+        self.tag_name_end
+    }
+
+    #[inline]
+    fn push<'a>(&self, input: &'a str, value_end: Option<usize>, out: &mut Vec<RawAttr<'a>>) {
+        out.push(RawAttr {
+            name: split_slice(input, self.name_start, self.name_end),
+            fingerprint: self.fingerprint,
+            value: value_end.map(|end| split_slice(input, self.value_start, end)),
+        });
+    }
+}
+
+#[inline]
+fn split_slice(input: &str, start: usize, end: usize) -> &str {
+    match input.get(start..end) {
+        Some(slice) => slice,
+        None => split_range_panic(start, end),
+    }
+}
+
+#[cold]
+#[inline(never)]
+fn split_range_panic(start: usize, end: usize) -> ! {
+    panic!("attribute range {start}..{end} is not on character boundaries of the input")
+}
+
 #[inline(always)]
 fn is_attr_name_end(byte: u8) -> bool {
     is_html_whitespace(byte) || matches!(byte, b'=' | b'/' | b'>')
@@ -468,6 +727,138 @@ mod tests {
         assert_eq!(attrs(" a="), [("a", Some(""))]);
         assert_eq!(attrs(" é=ü"), [("é", Some("ü"))]);
         assert!(attrs("  \t\n").is_empty());
+    }
+
+    /// Split the start tag at the start of `input` the way the tokenizer
+    /// does: scan up to each quote, jump over quoted values, and finish at
+    /// the first `>` outside one. Checks the state and the result against
+    /// [`TagScanState`] and [`iter_raw_attrs`]; returns `false` when the tag
+    /// does not end.
+    fn check_split_like_tokenizer(input: &str) -> bool {
+        let bytes = input.as_bytes();
+        let start = tag_name_offset(bytes);
+        let mut splitter = AttrSplitter::new();
+        let mut attrs = Vec::new();
+        let mut scan_pos = start;
+        for pos in start..bytes.len() {
+            match bytes[pos] {
+                quote @ (b'"' | b'\'') => {
+                    match splitter.state() {
+                        TagScanState::Quoted(open) if open != quote => {}
+                        TagScanState::Quoted(_) => splitter.scan(input, pos, pos + 1, &mut attrs),
+                        _ => splitter.scan(input, scan_pos, pos + 1, &mut attrs),
+                    }
+                    scan_pos = pos + 1;
+                    let state = TagScanState::START.advance(&bytes[start..=pos]);
+                    assert_eq!(splitter.state(), state, "{input:?} at {pos}");
+                }
+                b'>' if !splitter.state().gt_is_literal() => {
+                    splitter.scan(input, scan_pos, pos, &mut attrs);
+                    let state = TagScanState::START.advance(&bytes[start..pos]);
+                    assert_eq!(splitter.state(), state, "{input:?} at {pos}");
+                    let name_end = splitter.finish(input, pos, &mut attrs);
+                    let expected_name_end = bytes[start..pos]
+                        .iter()
+                        .position(|&byte| is_html_whitespace(byte) || byte == b'/')
+                        .map_or(pos, |offset| start + offset);
+                    assert_eq!(name_end, expected_name_end, "{input:?}");
+
+                    let self_closing = bytes[pos - 1] == b'/' && state != TagScanState::Unquoted;
+                    let region_end = if self_closing { pos - 1 } else { pos };
+                    let region = &input[name_end..region_end.max(name_end)];
+                    let expected: Vec<_> = iter_raw_attrs(region).collect();
+                    assert_eq!(attrs, expected, "{input:?}");
+
+                    // One call over the whole tag gives the same attributes.
+                    let mut whole = AttrSplitter::new();
+                    let mut whole_attrs = Vec::new();
+                    whole.scan(input, start, pos, &mut whole_attrs);
+                    assert_eq!(whole.finish(input, pos, &mut whole_attrs), name_end);
+                    assert_eq!(whole_attrs, expected, "{input:?} in one call");
+                    return true;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    #[test]
+    fn splitter_matches_raw_attrs() {
+        for region in [
+            "",
+            " alt=it's",
+            " a\"b",
+            " b=x'y c='z>w'",
+            " href=http://example.com/",
+            " b = \"x y\"c d",
+            " b/c",
+            " =x",
+            " ==x",
+            " a=",
+            " a= ",
+            " a=\"\"",
+            " é=ü",
+            " Data-X=1 data-x='2' DATA-X",
+            "/b=/",
+            " b=\"x\"/",
+            " b /",
+            " b= /",
+            "  \t\n",
+        ] {
+            assert!(check_split_like_tokenizer(&format!("<t{region}>")));
+            assert!(check_split_like_tokenizer(&format!("</t{region}>")));
+        }
+        assert!(check_split_like_tokenizer("<a\"b c='d'>"));
+        assert!(check_split_like_tokenizer("<br/>"));
+        assert!(!check_split_like_tokenizer("<t a=\"x>"));
+    }
+
+    #[test]
+    fn splitter_matches_raw_attrs_exhaustively() {
+        // Every tag body up to five bytes over the bytes that change the
+        // grammar state, plus a letter in both cases and a multibyte one.
+        const ALPHABET: [&str; 9] = ["a", "B", " ", "=", "\"", "'", "/", ">", "é"];
+        let mut body = Vec::new();
+        let mut ended = 0;
+        loop {
+            let tag: String = std::iter::once("<t")
+                .chain(body.iter().map(|&index| ALPHABET[index]))
+                .chain(std::iter::once(">"))
+                .collect();
+            ended += usize::from(check_split_like_tokenizer(&tag));
+
+            // Next body in counting order.
+            let mut digit = 0;
+            loop {
+                if digit == body.len() {
+                    if body.len() == 5 {
+                        assert!(ended > 10_000, "only {ended} tags ended");
+                        return;
+                    }
+                    body.push(0);
+                    break;
+                }
+                body[digit] += 1;
+                if body[digit] < ALPHABET.len() {
+                    break;
+                }
+                body[digit] = 0;
+                digit += 1;
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "character boundaries")]
+    fn splitter_rejects_a_split_character() {
+        let input = "<t é=x>";
+        let mut splitter = AttrSplitter::new();
+        let mut attrs = Vec::new();
+        splitter.scan(input, 1, 3, &mut attrs);
+        // Resume inside `é`: the name would start mid-character.
+        splitter.scan(input, 4, 7, &mut attrs);
+        splitter.finish(input, 7, &mut attrs);
     }
 
     #[test]

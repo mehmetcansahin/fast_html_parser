@@ -14,6 +14,8 @@
 //!   without it, and decoding each data or RCDATA token must give its tokens;
 //! - the `tokenize_into` spans must borrow from the input in order, never lose
 //!   text bytes, and never contain bytes that start markup in their context;
+//! - the attributes `tokenize_into` splits must be those `iter_raw_attrs`
+//!   finds in the attribute region, borrowed from it;
 //! - tags, attributes, comments, doctypes, and CDATA sections must be
 //!   well-formed;
 //! - shifting the input across 64-byte SIMD blocks must not change any token;
@@ -24,7 +26,7 @@
 use std::collections::HashSet;
 use std::fmt::Write as _;
 
-use fhp_core::attr::iter_raw_attrs;
+use fhp_core::attr::{RawAttr, iter_raw_attrs};
 use fhp_core::is_html_whitespace;
 use fhp_core::tag::Tag;
 use fhp_tokenizer::entity::{decode_attribute_entities, decode_entities};
@@ -286,6 +288,37 @@ impl<'i> SpanSink<'i> {
 }
 
 impl TreeSink for SpanSink<'_> {
+    fn open_tag_with_attrs(
+        &mut self,
+        tag: Tag,
+        name: &str,
+        attr_raw: &str,
+        attrs: &[RawAttr<'_>],
+        self_closing: bool,
+    ) {
+        // The tokenizer's split must be the region's, borrowed from it.
+        if !attrs.iter().copied().eq(iter_raw_attrs(attr_raw)) {
+            self.errors.push(format!(
+                "split attributes {attrs:?} differ from those of {attr_raw:?}"
+            ));
+        }
+        let region = attr_raw.as_bytes().as_ptr_range();
+        let borrowed = |part: &str| {
+            part.is_empty()
+                || (region.contains(&part.as_ptr())
+                    && part.as_bytes().as_ptr_range().end <= region.end)
+        };
+        if let Some(attr) = attrs
+            .iter()
+            .find(|attr| !borrowed(attr.name) || !attr.value.is_none_or(borrowed))
+        {
+            self.errors.push(format!(
+                "split attribute {attr:?} does not borrow from its region {attr_raw:?}"
+            ));
+        }
+        self.open_tag(tag, name, attr_raw, self_closing);
+    }
+
     fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool) {
         self.expect_markup_allowed("start tag");
         self.span(name, None, "start tag name");
