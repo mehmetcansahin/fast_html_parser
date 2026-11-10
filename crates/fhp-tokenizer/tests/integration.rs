@@ -4,12 +4,12 @@ mod common;
 
 use std::borrow::Cow;
 
-use common::{sink, token_events};
+use common::{EventSink, sink, sink_events, token_events};
 use fhp_core::tag::Tag;
 use fhp_tokenizer::entity::decode_entities;
-use fhp_tokenizer::streaming::StreamTokenizer;
+use fhp_tokenizer::streaming::{StreamTokenizer, TokenSink};
 use fhp_tokenizer::token::{Attribute, Token};
-use fhp_tokenizer::{tokenize, tokenize_with};
+use fhp_tokenizer::{TreeSink, tokenize, tokenize_into, tokenize_with};
 
 fn text_content(tokens: &[Token<'_>]) -> String {
     tokens
@@ -1155,4 +1155,155 @@ fn script_end_tag_inside_escaped_script_block_does_not_close() {
             open("p", &[], false),
         ],
     );
+}
+
+// ---------------------------------------------------------------
+// Sinks that do not open text elements
+// ---------------------------------------------------------------
+
+/// Text elements whose start tags a rejecting sink leaves unopened.
+const REJECTED_TEXT_ELEMENTS: &str = "<style>a<b>c</style><plaintext>d<i>";
+
+/// The events for [`REJECTED_TEXT_ELEMENTS`] when no text element opens:
+/// their content is tokenized as markup.
+const REJECTED_TEXT_ELEMENT_EVENTS: [&str; 8] = [
+    "open:style",
+    "text:a",
+    "open:b",
+    "text:c",
+    "close:style",
+    "open:plaintext",
+    "text:d",
+    "open:i",
+];
+
+/// Forwards every event to an [`EventSink`] and opens no text element.
+struct RejectingTextElements(EventSink);
+
+impl TreeSink for RejectingTextElements {
+    fn text_element_opened(&self, _tag: Tag) -> bool {
+        false
+    }
+    fn open_tag(&mut self, tag: Tag, name: &str, attr_raw: &str, self_closing: bool) {
+        self.0.open_tag(tag, name, attr_raw, self_closing);
+    }
+    fn close_tag(&mut self, tag: Tag, name: &str) {
+        self.0.close_tag(tag, name);
+    }
+    fn text(&mut self, content: &str) {
+        self.0.text(content);
+    }
+    fn comment(&mut self, content: &str) {
+        self.0.comment(content);
+    }
+    fn doctype(&mut self, content: &str) {
+        self.0.doctype(content);
+    }
+    fn cdata(&mut self, content: &str) {
+        self.0.cdata(content);
+    }
+}
+
+/// Records owned copies of the streamed tokens and opens no text element.
+#[derive(Default)]
+struct RejectingTokenSink(Vec<Token<'static>>);
+
+impl TokenSink for RejectingTokenSink {
+    fn token(&mut self, token: Token<'_>) {
+        self.0.extend(merge_text(std::slice::from_ref(&token)));
+    }
+    fn text_element_opened(&self, _tag: Tag) -> bool {
+        false
+    }
+}
+
+#[test]
+fn tree_sink_that_does_not_open_text_elements_gets_markup() {
+    let mut rejecting = RejectingTextElements(EventSink::default());
+    tokenize_into(REJECTED_TEXT_ELEMENTS, &mut rejecting);
+    assert_eq!(rejecting.0.events, REJECTED_TEXT_ELEMENT_EVENTS);
+}
+
+#[test]
+fn token_sink_that_does_not_open_text_elements_gets_markup() {
+    let input = REJECTED_TEXT_ELEMENTS;
+    for chunk_size in [1, 3, 7, input.len()] {
+        let mut tokenizer = StreamTokenizer::new();
+        let mut rejecting = RejectingTokenSink::default();
+        for chunk in input.as_bytes().chunks(chunk_size) {
+            tokenizer.feed_str_into(std::str::from_utf8(chunk).unwrap(), &mut rejecting);
+        }
+        tokenizer.finish_into(&mut rejecting);
+        let (events, _) = token_events(&merge_text(&rejecting.0));
+        assert_eq!(
+            events, REJECTED_TEXT_ELEMENT_EVENTS,
+            "chunk_size={chunk_size}"
+        );
+    }
+}
+
+#[test]
+fn text_elements_open_by_default() {
+    let input = REJECTED_TEXT_ELEMENTS;
+    let expected = [
+        "open:style",
+        "text:a<b>c",
+        "close:style",
+        "open:plaintext",
+        "text:d<i>",
+    ];
+    assert_eq!(sink_events(input), expected);
+    for chunk_size in [1, 3, 7, input.len()] {
+        let mut tokenizer = StreamTokenizer::new();
+        let mut tokens = Vec::new();
+        for chunk in input.as_bytes().chunks(chunk_size) {
+            tokenizer.feed_str_with(std::str::from_utf8(chunk).unwrap(), |token| {
+                tokens.extend(merge_text(std::slice::from_ref(token)));
+            });
+        }
+        tokenizer.finish_with(|token| tokens.extend(merge_text(std::slice::from_ref(token))));
+        let (events, _) = token_events(&merge_text(&tokens));
+        assert_eq!(events, expected, "chunk_size={chunk_size}");
+    }
+}
+
+#[test]
+fn streaming_can_alternate_opened_and_ignored_text_elements() {
+    struct StyleVetoSink(RejectingTokenSink);
+
+    impl TokenSink for StyleVetoSink {
+        fn token(&mut self, token: Token<'_>) {
+            self.0.token(token);
+        }
+
+        fn text_element_opened(&self, tag: Tag) -> bool {
+            tag != Tag::Style
+        }
+    }
+
+    let input = "<script>a<b></script><style>c<i></style><textarea>d<b></textarea><plaintext>e<u>";
+    let expected = [
+        "open:script",
+        "text:a<b>",
+        "close:script",
+        "open:style",
+        "text:c",
+        "open:i",
+        "close:style",
+        "open:textarea",
+        "text:d<b>",
+        "close:textarea",
+        "open:plaintext",
+        "text:e<u>",
+    ];
+    for chunk_size in (1..=9).chain([input.len()]) {
+        let mut tokenizer = StreamTokenizer::new();
+        let mut sink = StyleVetoSink(RejectingTokenSink::default());
+        for chunk in input.as_bytes().chunks(chunk_size) {
+            tokenizer.feed_str_into(std::str::from_utf8(chunk).unwrap(), &mut sink);
+        }
+        tokenizer.finish_into(&mut sink);
+        let (events, _) = token_events(&merge_text(&sink.0.0));
+        assert_eq!(events, expected, "chunk_size={chunk_size}");
+    }
 }

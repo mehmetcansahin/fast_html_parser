@@ -40,3 +40,20 @@ fn xpath_literal_names_work_in_absolute_paths_and_positions() {
     assert_eq!(positioned.len(), 1);
     assert_eq!(doc.get(positioned[0]).text_content(), "two");
 }
+
+#[test]
+fn xpath_accepts_unicode_custom_names() {
+    let doc = parse("<x-ürün>ok</x-ürün><p>no</p>").unwrap();
+
+    let XPathResult::Nodes(nodes) = doc.xpath("//x-ürün").unwrap() else {
+        panic!("expected nodes");
+    };
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(doc.get(nodes[0]).text_content(), "ok");
+    assert_eq!(nodes.len(), doc.select("x-ürün").unwrap().len());
+
+    assert_eq!(
+        doc.xpath("//x-ürün/text()").unwrap(),
+        XPathResult::Strings(vec!["ok".to_string()])
+    );
+}

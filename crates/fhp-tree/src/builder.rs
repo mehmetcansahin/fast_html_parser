@@ -503,6 +503,8 @@ pub struct TreeBuilder {
     /// element's content undecoded, while no raw-text parent exists; the token
     /// path then decodes it exactly as the sink path does.
     ignored_raw_text: Option<Tag>,
+    /// Whether the most recent start tag inserted an element.
+    last_start_tag_opened: bool,
 }
 
 impl TreeBuilder {
@@ -588,6 +590,7 @@ impl TreeBuilder {
             decode_text_tokens: false,
             flushed_text_node: None,
             ignored_raw_text: None,
+            last_start_tag_opened: false,
         }
     }
 
@@ -658,6 +661,12 @@ impl TreeBuilder {
     pub fn process(&mut self, token: &Token<'_>) -> Result<Option<NodeId>, ParseError> {
         self.flushed_text_node = None;
         self.created_elements.clear();
+        // Inside a text element the tokenizer emits only text until the
+        // matching end tag, so any other token means it has left the element
+        // or, when the start tag was vetoed, never entered it.
+        if !matches!(token, Token::Text { .. }) {
+            self.ignored_raw_text = None;
+        }
         let created = match token {
             Token::OpenTag {
                 tag,
@@ -671,6 +680,7 @@ impl TreeBuilder {
                     PendingAttrs::Parsed(attributes),
                     *self_closing,
                 );
+                self.last_start_tag_opened = created.is_some();
                 // Ignored, or inserted empty at the nesting limit: either way
                 // the tokenizer's raw text has no raw-text parent.
                 if opens_raw_text(*tag) && !created.is_some_and(|node| self.is_current(node)) {
@@ -678,13 +688,7 @@ impl TreeBuilder {
                 }
                 created
             }
-            Token::CloseTag { tag, name } => {
-                // The tokenizer leaves raw-text mode at the matching end tag.
-                if self.ignored_raw_text == Some(*tag) {
-                    self.ignored_raw_text = None;
-                }
-                self.handle_close_tag(*tag, name.as_ref())
-            }
+            Token::CloseTag { tag, name } => self.handle_close_tag(*tag, name.as_ref()),
             Token::Text { content }
                 if self.decode_text_tokens || self.ignored_raw_text.is_some() =>
             {
@@ -696,6 +700,16 @@ impl TreeBuilder {
             Token::CData { content } => self.handle_text(content.as_ref()),
         };
         Ok(created)
+    }
+
+    /// Whether the most recent start tag inserted an element.
+    ///
+    /// Returns `false` for a start tag the insertion mode ignored. An element
+    /// inserted empty at the depth limit still counts as opened. This answers
+    /// `TokenSink::text_element_opened` when building from `StreamTokenizer`
+    /// tokens.
+    pub fn last_start_tag_opened(&self) -> bool {
+        self.last_start_tag_opened
     }
 
     /// Finish building and return the root node id and arena.
@@ -1155,8 +1169,14 @@ impl TreeBuilder {
             match kind {
                 ElementKind::Option => self.close_last_kind(ElementKind::Option),
                 ElementKind::OptGroup => {
-                    self.close_last_kind(ElementKind::Option);
-                    self.close_last_kind(ElementKind::OptGroup);
+                    let len = self.open_elements.len();
+                    if len > 2
+                        && self.open_elements[len - 1].kind == ElementKind::Option
+                        && self.open_elements[len - 2].kind == ElementKind::OptGroup
+                    {
+                        self.pop_open_element();
+                    }
+                    self.pop_if_current(ElementKind::OptGroup);
                 }
                 ElementKind::Select => self.close_last_kind(ElementKind::Select),
                 _ => {}
@@ -1182,7 +1202,14 @@ impl TreeBuilder {
             | ElementKind::TableBody
             | ElementKind::Table
             | ElementKind::Caption => {
-                self.close_in_scope(kind, Scope::Table);
+                // "In cell"/"in row"/"in table body": the end tag closes an
+                // element with its own name in table scope; `</th>` does not
+                // close a `td` and `</thead>` does not close a `tbody`.
+                if self.kind_is_open(kind) {
+                    if let Some(index) = self.find_named_in_scope(tag, name, Scope::Table) {
+                        self.truncate_stack(index);
+                    }
+                }
             }
             ElementKind::ColGroup => {
                 self.pop_if_current(ElementKind::ColGroup);
@@ -2068,7 +2095,8 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
         // Only incremental observers read the created elements; keep the
         // one-shot path from accumulating them.
         self.created_elements.clear();
-        self.handle_open_tag(tag, name, PendingAttrs::Raw(attr_raw), self_closing);
+        let created = self.handle_open_tag(tag, name, PendingAttrs::Raw(attr_raw), self_closing);
+        self.last_start_tag_opened = created.is_some();
     }
 
     fn open_tag_with_attrs(
@@ -2081,7 +2109,12 @@ impl fhp_tokenizer::TreeSink for TreeBuilder {
     ) {
         // As in `open_tag`, with the region already split by the tokenizer.
         self.created_elements.clear();
-        self.handle_open_tag(tag, name, PendingAttrs::Split(attrs), self_closing);
+        let created = self.handle_open_tag(tag, name, PendingAttrs::Split(attrs), self_closing);
+        self.last_start_tag_opened = created.is_some();
+    }
+
+    fn text_element_opened(&self, _tag: Tag) -> bool {
+        self.last_start_tag_opened
     }
 
     fn close_tag(&mut self, tag: Tag, name: &str) {

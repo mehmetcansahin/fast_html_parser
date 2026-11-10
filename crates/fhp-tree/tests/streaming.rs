@@ -1033,6 +1033,14 @@ fn stream_equiv_review_fixtures() {
         "<xmp><b>x</b></xmp>",
         "<noembed><b>x</b></noembed>",
         "<script><!--<script>x</script>y--></script><p>z</p>",
+        "<table><tr><td>A</th>B</table>",
+        "<table><tbody><tr><td>A</thead><tr><td>B</table>",
+        "<select><option>A</optgroup>B</select>",
+        "<select><style></select><p>x</p>",
+        "<select><title></select><p>x</p>",
+        "<select><xmp></select><p>x</p>",
+        "<select><plaintext></select><p>x</p>",
+        "<select><option>a<style>&amp;</style>b</select>",
     ];
 
     for html in FIXTURES {

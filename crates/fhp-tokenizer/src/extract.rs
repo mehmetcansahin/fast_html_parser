@@ -207,6 +207,12 @@ pub(crate) fn tokenize_prefix<'a>(
     }
 }
 
+/// Whether a start tag for `tag` changes the tokenizer state: it opens a
+/// raw-text, RCDATA, or `plaintext` element whose content is text.
+pub(crate) fn enters_text_element(tag: Tag) -> bool {
+    tag == Tag::Plaintext || (!tag.is_void() && (tag.is_raw_text() || tag.is_rcdata()))
+}
+
 /// Parsing mode — tracks what the parser is currently inside.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -746,7 +752,9 @@ impl<'a> Parser<'a> {
             &self.attrs,
             self_closing,
         );
-        self.enter_text_element(tag);
+        if enters_text_element(tag) && sink.text_element_opened(tag) {
+            self.enter_text_element(tag);
+        }
     }
 
     /// Flush text from cursor to pos (sink mode — raw, no entity decode).
@@ -978,13 +986,16 @@ impl<'a> Parser<'a> {
     /// Enter the text mode a start tag implies, if any.
     #[inline]
     fn enter_text_element(&mut self, tag: Tag) {
+        if !enters_text_element(tag) {
+            return;
+        }
         if tag == Tag::Plaintext {
             self.mode = Mode::InPlainText;
-        } else if !tag.is_void() && tag.is_raw_text() {
+        } else if tag.is_raw_text() {
             self.mode = Mode::InRawText;
             self.raw_text_tag = tag;
             self.script_escape = ScriptEscape::None;
-        } else if !tag.is_void() && tag.is_rcdata() {
+        } else {
             self.mode = Mode::InRcData;
             self.raw_text_tag = tag;
         }

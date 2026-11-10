@@ -9,9 +9,9 @@
 //! [`EarlyStopParser`]: crate::streaming::EarlyStopParser
 
 use encoding_rs::Encoding;
-use fhp_core::error::ParseError;
+use fhp_core::{error::ParseError, tag::Tag};
 use fhp_encoding::PRESCAN_LIMIT;
-use fhp_tokenizer::streaming::StreamTokenizer;
+use fhp_tokenizer::streaming::{StreamTokenizer, TokenSink};
 use fhp_tokenizer::token::Token;
 
 use crate::builder::{TreeBuilder, recycle_buffer};
@@ -126,7 +126,19 @@ impl DecoderState {
 
     /// Decode `bytes` and commit the output to the decoded-size accounting.
     fn decode(&mut self, bytes: &[u8], last: bool) -> Result<String, HtmlError> {
-        let output = self.decode_lossy(bytes, last);
+        let mut output = String::new();
+        self.decode_into(bytes, last, &mut output)?;
+        Ok(output)
+    }
+
+    /// Decode into reusable storage and commit decoded-size accounting.
+    fn decode_into(
+        &mut self,
+        bytes: &[u8],
+        last: bool,
+        output: &mut String,
+    ) -> Result<(), HtmlError> {
+        self.decode_lossy_into(bytes, last, output);
         let decoded_size = self.decoded_size.saturating_add(output.len());
         if decoded_size > self.max_input_size {
             return Err(HtmlError::InputTooLarge {
@@ -135,7 +147,7 @@ impl DecoderState {
             });
         }
         self.decoded_size = decoded_size;
-        Ok(output)
+        Ok(())
     }
 
     /// Decode `bytes`, replacing malformed sequences with U+FFFD. Unlike
@@ -176,6 +188,25 @@ impl DecoderState {
     }
 }
 
+struct BuilderSink<'a> {
+    builder: &'a mut TreeBuilder,
+    error: Option<ParseError>,
+}
+
+impl TokenSink for BuilderSink<'_> {
+    fn token(&mut self, token: Token<'_>) {
+        if self.error.is_none() {
+            if let Err(error) = self.builder.process(&token) {
+                self.error = Some(error);
+            }
+        }
+    }
+
+    fn text_element_opened(&self, _tag: Tag) -> bool {
+        self.error.is_some() || self.builder.last_start_tag_opened()
+    }
+}
+
 /// A streaming HTML parser that incrementally builds a DOM.
 pub struct StreamParser {
     tokenizer: StreamTokenizer,
@@ -185,6 +216,8 @@ pub struct StreamParser {
     seen_input_size: usize,
     max_input_size: usize,
     terminal: bool,
+    /// Reused decoded chunk storage, bounded like the early-stop buffer.
+    decode_buffer: String,
 }
 
 impl StreamParser {
@@ -207,6 +240,7 @@ impl StreamParser {
             seen_input_size: 0,
             max_input_size,
             terminal: false,
+            decode_buffer: String::new(),
         }
     }
 
@@ -281,43 +315,36 @@ impl StreamParser {
     }
 
     fn decode_and_process(&mut self, bytes: &[u8], last: bool) -> Result<(), HtmlError> {
-        let text = self
+        let mut text = core::mem::take(&mut self.decode_buffer);
+        let result = self
             .decoder
             .as_mut()
             .expect("decoder initialized before processing")
-            .decode(bytes, last)?;
-        self.process_text(&text)
+            .decode_into(bytes, last, &mut text)
+            .and_then(|()| self.process_text(&text));
+        self.decode_buffer = recycle_buffer(text);
+        result
     }
 
     fn process_text(&mut self, text: &str) -> Result<(), HtmlError> {
-        let tokenizer = &mut self.tokenizer;
-        let builder = &mut self.builder;
-        let mut parse_error = None;
-        tokenizer.feed_str_with(text, |token| {
-            if parse_error.is_none() {
-                if let Err(error) = builder.process(token) {
-                    parse_error = Some(error);
-                }
-            }
-        });
-        match parse_error {
+        let mut sink = BuilderSink {
+            builder: &mut self.builder,
+            error: None,
+        };
+        self.tokenizer.feed_str_into(text, &mut sink);
+        match sink.error {
             Some(error) => Err(HtmlError::Parse(error)),
             None => Ok(()),
         }
     }
 
     fn finish_tokenizer(&mut self) -> Result<(), HtmlError> {
-        let tokenizer = &mut self.tokenizer;
-        let builder = &mut self.builder;
-        let mut parse_error = None;
-        tokenizer.finish_with(|token| {
-            if parse_error.is_none() {
-                if let Err(error) = builder.process(token) {
-                    parse_error = Some(error);
-                }
-            }
-        });
-        match parse_error {
+        let mut sink = BuilderSink {
+            builder: &mut self.builder,
+            error: None,
+        };
+        self.tokenizer.finish_into(&mut sink);
+        match sink.error {
             Some(error) => Err(HtmlError::Parse(error)),
             None => Ok(()),
         }
@@ -337,6 +364,37 @@ enum EarlyStopMode {
 }
 
 type NodePredicate = dyn for<'a> Fn(NodeRef<'a>) -> bool;
+
+struct EarlyStopSink<'a> {
+    builder: &'a mut TreeBuilder,
+    predicate: &'a NodePredicate,
+    mode: EarlyStopMode,
+    pending_match: &'a mut Option<NodeId>,
+    found: &'a mut Option<(NodeId, MatchCompleteness)>,
+    error: Option<ParseError>,
+}
+
+impl TokenSink for EarlyStopSink<'_> {
+    fn token(&mut self, token: Token<'_>) {
+        if self.found.is_some() || self.error.is_some() {
+            return;
+        }
+        if let Err(error) = process_early_token(
+            self.builder,
+            &token,
+            self.predicate,
+            self.mode,
+            self.pending_match,
+            self.found,
+        ) {
+            self.error = Some(error);
+        }
+    }
+
+    fn text_element_opened(&self, _tag: Tag) -> bool {
+        self.found.is_some() || self.error.is_some() || self.builder.last_start_tag_opened()
+    }
+}
 
 /// A parser that stops at the first node matching a predicate.
 pub struct EarlyStopParser {
@@ -673,62 +731,32 @@ impl EarlyStopParser {
     }
 
     fn process_and_check(&mut self, text: &str) -> Result<(), HtmlError> {
-        let tokenizer = &mut self.tokenizer;
-        let builder = &mut self.builder;
-        let predicate = &self.predicate;
-        let mode = self.mode;
-        let pending_match = &mut self.pending_match;
-        let found = &mut self.found;
-        let mut parse_error = None;
-
-        tokenizer.feed_str_with(text, |token| {
-            if found.is_some() || parse_error.is_some() {
-                return;
-            }
-            if let Err(error) = process_early_token(
-                builder,
-                token,
-                predicate.as_ref(),
-                mode,
-                pending_match,
-                found,
-            ) {
-                parse_error = Some(error);
-            }
-        });
-
-        match parse_error {
+        let mut sink = EarlyStopSink {
+            builder: &mut self.builder,
+            predicate: self.predicate.as_ref(),
+            mode: self.mode,
+            pending_match: &mut self.pending_match,
+            found: &mut self.found,
+            error: None,
+        };
+        self.tokenizer.feed_str_into(text, &mut sink);
+        match sink.error {
             Some(error) => Err(HtmlError::Parse(error)),
             None => Ok(()),
         }
     }
 
     fn finish_tokenizer_and_check(&mut self) -> Result<(), HtmlError> {
-        let tokenizer = &mut self.tokenizer;
-        let builder = &mut self.builder;
-        let predicate = &self.predicate;
-        let mode = self.mode;
-        let pending_match = &mut self.pending_match;
-        let found = &mut self.found;
-        let mut parse_error = None;
-
-        tokenizer.finish_with(|token| {
-            if found.is_some() || parse_error.is_some() {
-                return;
-            }
-            if let Err(error) = process_early_token(
-                builder,
-                token,
-                predicate.as_ref(),
-                mode,
-                pending_match,
-                found,
-            ) {
-                parse_error = Some(error);
-            }
-        });
-
-        match parse_error {
+        let mut sink = EarlyStopSink {
+            builder: &mut self.builder,
+            predicate: self.predicate.as_ref(),
+            mode: self.mode,
+            pending_match: &mut self.pending_match,
+            found: &mut self.found,
+            error: None,
+        };
+        self.tokenizer.finish_into(&mut sink);
+        match sink.error {
             Some(error) => Err(HtmlError::Parse(error)),
             None => Ok(()),
         }

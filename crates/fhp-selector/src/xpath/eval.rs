@@ -16,30 +16,17 @@ use crate::matcher::value_is;
 /// Evaluate an XPath expression against an arena starting from `root`.
 pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
     match expr {
-        XPathExpr::DescendantByTag(tag) => {
-            let nodes = find_descendants_by_tag(arena, root, tag);
-            XPathResult::Nodes(nodes)
-        }
-
-        XPathExpr::DescendantByAttr { tag, attr, value } => {
-            let nodes = find_descendants_by_tag_and_attr(arena, root, tag, attr, Some(value));
-            XPathResult::Nodes(nodes)
-        }
-
-        XPathExpr::DescendantByAttrExists { tag, attr } => {
-            let nodes = find_descendants_by_tag_and_attr_exists(arena, root, tag, attr);
-            XPathResult::Nodes(nodes)
-        }
-
-        XPathExpr::ContainsPredicate { tag, attr, substr } => {
-            let nodes = find_descendants_by_tag_and_contains(arena, root, tag, attr, substr);
-            XPathResult::Nodes(nodes)
-        }
-
-        XPathExpr::PositionPredicate { tag, pos } => {
-            let nodes = find_descendants_by_tag_at_position(arena, root, tag, *pos);
-            XPathResult::Nodes(nodes)
-        }
+        XPathExpr::DescendantByTag(_)
+        | XPathExpr::DescendantByAttr { .. }
+        | XPathExpr::DescendantByAttrExists { .. }
+        | XPathExpr::ContainsPredicate { .. }
+        | XPathExpr::PositionPredicate { .. }
+        | XPathExpr::DescendantWildcard
+        | XPathExpr::DescendantWildcardByAttr { .. }
+        | XPathExpr::DescendantWildcardByAttrExists { .. } => XPathResult::Nodes(
+            collect_descendants(expr, arena, root, Collect::Elements)
+                .expect("descendant-axis expression"),
+        ),
 
         XPathExpr::AbsolutePath(steps) => {
             let nodes = evaluate_absolute_path(arena, root, steps);
@@ -54,21 +41,6 @@ pub fn evaluate(expr: &XPathExpr, arena: &Arena, root: NodeId) -> XPathResult {
                     .map(|id| arena.text(id).to_owned())
                     .collect(),
             )
-        }
-
-        XPathExpr::DescendantWildcard => {
-            let nodes = find_all_elements(arena, root);
-            XPathResult::Nodes(nodes)
-        }
-
-        XPathExpr::DescendantWildcardByAttr { attr, value } => {
-            let nodes = find_all_elements_by_attr(arena, root, attr, Some(value));
-            XPathResult::Nodes(nodes)
-        }
-
-        XPathExpr::DescendantWildcardByAttrExists { attr } => {
-            let nodes = find_all_elements_by_attr(arena, root, attr, None);
-            XPathResult::Nodes(nodes)
         }
 
         XPathExpr::Parent => {
@@ -96,6 +68,12 @@ pub(crate) fn evaluate_text_nodes(
     let XPathExpr::TextExtract(inner) = expr else {
         return None;
     };
+    if let Some(text_nodes) = collect_descendants(inner, arena, root, Collect::TextChildren) {
+        return Some(text_nodes);
+    }
+
+    // An absolute path yields nodes of one depth and `..` one node, so their
+    // direct text children cannot interleave.
     let XPathResult::Nodes(nodes) = evaluate(inner, arena, root) else {
         return Some(Vec::new());
     };
@@ -137,46 +115,229 @@ fn matches_name_test(
     }
 }
 
-/// Generic DFS: collect descendant nodes that satisfy `predicate`.
-fn dfs_collect(
+/// What a descendant traversal collects for the elements it matches.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Collect {
+    /// The matching elements themselves.
+    Elements,
+    /// The direct text children of the matching elements, as selected by a
+    /// trailing `/text()`.
+    TextChildren,
+}
+
+/// Generic DFS: collect the descendant-or-self nodes that satisfy `predicate`,
+/// or their direct text children, in document order.
+///
+/// Text children are collected by the same traversal that finds their parent,
+/// so the text of a match nested inside another match lands between the
+/// outer match's own text nodes.
+fn dfs_collect<const TEXT: bool>(
     arena: &Arena,
     node: NodeId,
-    predicate: &dyn Fn(&Arena, NodeId, &fhp_tree::node::Node) -> bool,
+    predicate: &impl Fn(&Arena, NodeId, &fhp_tree::node::Node) -> bool,
     results: &mut Vec<NodeId>,
 ) {
     if node.is_null() {
         return;
     }
     let n = arena.get(node);
-    if predicate(arena, node, n) {
+    let matched = predicate(arena, node, n);
+    if matched && !TEXT {
         results.push(node);
     }
+    let collect_text = matched && TEXT;
     let mut child = n.first_child;
     while !child.is_null() {
-        dfs_collect(arena, child, predicate, results);
-        child = arena.get(child).next_sibling;
+        let child_node = arena.get(child);
+        if collect_text && child_node.flags.has(NodeFlags::IS_TEXT) {
+            results.push(child);
+        } else {
+            dfs_collect::<TEXT>(arena, child, predicate, results);
+        }
+        child = child_node.next_sibling;
     }
 }
 
-/// DFS: find all descendant elements with a specific tag.
-fn find_descendants_by_tag(arena: &Arena, root: NodeId, tag: &NameTest) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    dfs_collect(
-        arena,
-        root,
-        &|a, id, n| is_element(n) && matches_name_test(a, id, n, tag),
-        &mut results,
-    );
-    results
+/// Evaluate a descendant-axis expression (descendant-or-self of `root`) in a
+/// single traversal, collecting the matching elements or their direct text
+/// children in document order.
+///
+/// Returns `None` for the expressions that are not descendant axes: absolute
+/// paths, `..`, and `text()` itself.
+fn collect_descendants(
+    expr: &XPathExpr,
+    arena: &Arena,
+    root: NodeId,
+    collect: Collect,
+) -> Option<Vec<NodeId>> {
+    match collect {
+        Collect::Elements => collect_descendants_mode::<false>(expr, arena, root),
+        Collect::TextChildren => collect_descendants_mode::<true>(expr, arena, root),
+    }
 }
 
-/// Find the `pos`th matching element child under every parent in one DFS.
+/// Select the collection mode once, outside the recursive hot loops.
+fn collect_descendants_mode<const TEXT: bool>(
+    expr: &XPathExpr,
+    arena: &Arena,
+    root: NodeId,
+) -> Option<Vec<NodeId>> {
+    let mut results = Vec::new();
+    match expr {
+        XPathExpr::DescendantByTag(tag) => dfs_collect::<TEXT>(
+            arena,
+            root,
+            &|a, id, n| is_element(n) && matches_name_test(a, id, n, tag),
+            &mut results,
+        ),
+        XPathExpr::DescendantByAttr { tag, attr, value } => dfs_collect::<TEXT>(
+            arena,
+            root,
+            &|a, id, n| {
+                is_element(n)
+                    && matches_name_test(a, id, n, tag)
+                    && a.attrs(id)
+                        .iter()
+                        .any(|at| a.attr_name_is(at, attr) && value_is(a, at, value))
+            },
+            &mut results,
+        ),
+        XPathExpr::DescendantByAttrExists { tag, attr } => dfs_collect::<TEXT>(
+            arena,
+            root,
+            &|a, id, n| {
+                is_element(n)
+                    && matches_name_test(a, id, n, tag)
+                    && a.attrs(id).iter().any(|at| a.attr_name_is(at, attr))
+            },
+            &mut results,
+        ),
+        XPathExpr::ContainsPredicate { tag, attr, substr } => dfs_collect::<TEXT>(
+            arena,
+            root,
+            &|a, id, n| {
+                is_element(n)
+                    && matches_name_test(a, id, n, tag)
+                    && a.attrs(id).iter().any(|at| {
+                        a.attr_name_is(at, attr)
+                            && a.attr_value_len(at) >= substr.len()
+                            && a.attr_value(at).unwrap_or("").contains(substr.as_str())
+                    })
+            },
+            &mut results,
+        ),
+        XPathExpr::DescendantWildcard => dfs_collect::<TEXT>(
+            arena,
+            root,
+            &|_, _, n| is_element(n) && n.depth > 0,
+            &mut results,
+        ),
+        XPathExpr::DescendantWildcardByAttr { attr, value } => dfs_collect::<TEXT>(
+            arena,
+            root,
+            &|a, id, n| {
+                is_element(n)
+                    && n.depth > 0
+                    && a.attrs(id)
+                        .iter()
+                        .any(|at| a.attr_name_is(at, attr) && value_is(a, at, value))
+            },
+            &mut results,
+        ),
+        XPathExpr::DescendantWildcardByAttrExists { attr } => dfs_collect::<TEXT>(
+            arena,
+            root,
+            &|a, id, n| {
+                is_element(n)
+                    && n.depth > 0
+                    && a.attrs(id).iter().any(|at| a.attr_name_is(at, attr))
+            },
+            &mut results,
+        ),
+        XPathExpr::PositionPredicate { tag, pos } => {
+            return Some(find_descendants_by_tag_at_position::<TEXT>(
+                arena, root, tag, *pos,
+            ));
+        }
+        XPathExpr::AbsolutePath(_) | XPathExpr::TextExtract(_) | XPathExpr::Parent => {
+            return None;
+        }
+    }
+    Some(results)
+}
+
+/// Reorder `ids`, nodes of the tree under `root`, into document order.
+///
+/// Node ids are not allocated in document order (foster parenting and
+/// adoption-agency clones reorder them). Already ordered results need only
+/// adjacent tree-link comparisons; otherwise one DFS from `root` orders them.
+/// Duplicate ids collapse into one.
+pub(crate) fn sort_in_document_order(arena: &Arena, root: NodeId, ids: &mut Vec<NodeId>) {
+    if ids.len() < 2 {
+        return;
+    }
+    if ids
+        .windows(2)
+        .all(|pair| precedes_in_document(arena, pair[0], pair[1]))
+    {
+        ids.dedup();
+        return;
+    }
+    let wanted: HashSet<NodeId> = ids.iter().copied().collect();
+    let mut ordered = Vec::with_capacity(wanted.len());
+    dfs_collect::<false>(arena, root, &|_, id, _| wanted.contains(&id), &mut ordered);
+    *ids = ordered;
+}
+
+/// Compare reachable nodes of one finalized tree without allocating paths.
+/// Ancestors precede descendants; otherwise the first divergent siblings
+/// decide. Ordered adjacent result pairs walk disjoint sibling gaps.
+fn precedes_in_document(arena: &Arena, left: NodeId, right: NodeId) -> bool {
+    if left == right {
+        return true;
+    }
+    let mut left_id = left;
+    let mut right_id = right;
+    let mut left_node = arena.get(left_id);
+    let mut right_node = arena.get(right_id);
+    while left_node.depth > right_node.depth {
+        left_id = left_node.parent;
+        left_node = arena.get(left_id);
+    }
+    while right_node.depth > left_node.depth {
+        right_id = right_node.parent;
+        right_node = arena.get(right_id);
+    }
+    if left_id == right_id {
+        return left_id == left;
+    }
+    while left_node.parent != right_node.parent {
+        left_id = left_node.parent;
+        right_id = right_node.parent;
+        left_node = arena.get(left_id);
+        right_node = arena.get(right_id);
+    }
+    if right_node.next_sibling == left_id {
+        return false;
+    }
+    let mut sibling = left_node.next_sibling;
+    while !sibling.is_null() {
+        if sibling == right_id {
+            return true;
+        }
+        sibling = arena.get(sibling).next_sibling;
+    }
+    false
+}
+
+/// Find the `pos`th matching element child under every parent in one DFS,
+/// collecting those elements or their direct text children.
 ///
 /// The context root is included for descendant-or-self semantics. Its position
 /// may depend on siblings outside the traversed subtree, so that one node is
 /// checked separately; every descendant position is then computed while its
 /// parent's children are visited once.
-fn find_descendants_by_tag_at_position(
+fn find_descendants_by_tag_at_position<const TEXT: bool>(
     arena: &Arena,
     root: NodeId,
     tag: &NameTest,
@@ -188,18 +349,19 @@ fn find_descendants_by_tag_at_position(
 
     let mut results = Vec::new();
     let root_node = arena.get(root);
-    if is_element(root_node)
+    let root_matched = is_element(root_node)
         && matches_name_test(arena, root, root_node, tag)
-        && has_position_within_parent(arena, root, tag, pos)
-    {
+        && has_position_within_parent(arena, root, tag, pos);
+    if root_matched && !TEXT {
         results.push(root);
     }
 
-    collect_positioned_descendants(arena, root, tag, pos, &mut results);
+    collect_positioned_descendants::<TEXT>(arena, root, tag, pos, root_matched, &mut results);
     results
 }
 
-/// Find positioned descendants across document-ordered context roots.
+/// Find positioned descendants, or their direct text children, across
+/// document-ordered context roots.
 ///
 /// A selection can contain many siblings, so checking every context root by
 /// rescanning its preceding siblings would be quadratic. Cache the positioned
@@ -209,18 +371,28 @@ pub(crate) fn find_descendants_by_tag_at_position_for_roots(
     roots: &[NodeId],
     tag: &NameTest,
     pos: usize,
+    collect: Collect,
 ) -> Vec<NodeId> {
     let mut position_cache = RootPositionCache::with_capacity(roots.len());
-    find_descendants_by_tag_at_position_for_roots_cached(
-        arena,
-        roots,
-        tag,
-        pos,
-        &mut position_cache,
-    )
+    match collect {
+        Collect::Elements => find_descendants_by_tag_at_position_for_roots_cached::<false>(
+            arena,
+            roots,
+            tag,
+            pos,
+            &mut position_cache,
+        ),
+        Collect::TextChildren => find_descendants_by_tag_at_position_for_roots_cached::<true>(
+            arena,
+            roots,
+            tag,
+            pos,
+            &mut position_cache,
+        ),
+    }
 }
 
-fn find_descendants_by_tag_at_position_for_roots_cached(
+fn find_descendants_by_tag_at_position_for_roots_cached<const TEXT: bool>(
     arena: &Arena,
     roots: &[NodeId],
     tag: &NameTest,
@@ -240,46 +412,67 @@ fn find_descendants_by_tag_at_position_for_roots_cached(
         }
 
         let root_node = arena.get(root);
-        if is_element(root_node)
+        let root_matched = is_element(root_node)
             && matches_name_test(arena, root, root_node, tag)
-            && has_position_within_parent_cached(arena, root, tag, pos, position_cache)
-        {
+            && has_position_within_parent_cached(arena, root, tag, pos, position_cache);
+        if root_matched && !TEXT {
             results.push(root);
         }
 
-        collect_positioned_descendants_once(arena, root, tag, pos, &mut results, &mut visited);
+        collect_positioned_descendants_once::<TEXT>(
+            arena,
+            root,
+            tag,
+            pos,
+            root_matched,
+            &mut results,
+            &mut visited,
+        );
     }
 
     results
 }
 
-fn collect_positioned_descendants(
+/// Visit the children of `parent`, a node that matched as positioned when
+/// `parent_matched`, and collect positioned elements or text children.
+fn collect_positioned_descendants<const TEXT: bool>(
     arena: &Arena,
     parent: NodeId,
     tag: &NameTest,
     pos: usize,
+    parent_matched: bool,
     results: &mut Vec<NodeId>,
 ) {
     let mut matching_position = 0usize;
     let mut child = arena.get(parent).first_child;
     while !child.is_null() {
         let child_node = arena.get(child);
+        let mut child_matched = false;
         if is_element(child_node) && matches_name_test(arena, child, child_node, tag) {
             matching_position += 1;
-            if matching_position == pos {
-                results.push(child);
-            }
+            child_matched = matching_position == pos;
         }
-        collect_positioned_descendants(arena, child, tag, pos, results);
+        let collected = if TEXT {
+            parent_matched && child_node.flags.has(NodeFlags::IS_TEXT)
+        } else {
+            child_matched
+        };
+        if collected {
+            results.push(child);
+        }
+        collect_positioned_descendants::<TEXT>(arena, child, tag, pos, child_matched, results);
         child = child_node.next_sibling;
     }
 }
 
-fn collect_positioned_descendants_once(
+/// [`collect_positioned_descendants`] that skips subtrees already traversed
+/// from an earlier context root while still counting their positions.
+fn collect_positioned_descendants_once<const TEXT: bool>(
     arena: &Arena,
     parent: NodeId,
     tag: &NameTest,
     pos: usize,
+    parent_matched: bool,
     results: &mut Vec<NodeId>,
     visited: &mut HashSet<NodeId>,
 ) {
@@ -288,14 +481,29 @@ fn collect_positioned_descendants_once(
     while !child.is_null() {
         let child_node = arena.get(child);
         let first_visit = visited.insert(child);
+        let mut child_matched = false;
         if is_element(child_node) && matches_name_test(arena, child, child_node, tag) {
             matching_position += 1;
-            if first_visit && matching_position == pos {
-                results.push(child);
-            }
+            child_matched = matching_position == pos;
         }
         if first_visit {
-            collect_positioned_descendants_once(arena, child, tag, pos, results, visited);
+            let collected = if TEXT {
+                parent_matched && child_node.flags.has(NodeFlags::IS_TEXT)
+            } else {
+                child_matched
+            };
+            if collected {
+                results.push(child);
+            }
+            collect_positioned_descendants_once::<TEXT>(
+                arena,
+                child,
+                tag,
+                pos,
+                child_matched,
+                results,
+                visited,
+            );
         }
         child = child_node.next_sibling;
     }
@@ -385,118 +593,6 @@ fn nth_matching_child(
         sibling = sibling_node.next_sibling;
     }
     None
-}
-
-/// DFS: find descendants by tag with exact attribute match (single pass).
-fn find_descendants_by_tag_and_attr(
-    arena: &Arena,
-    root: NodeId,
-    tag: &NameTest,
-    attr: &str,
-    value: Option<&str>,
-) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    dfs_collect(
-        arena,
-        root,
-        &|a, id, n| {
-            is_element(n)
-                && matches_name_test(a, id, n, tag)
-                && a.attrs(id).iter().any(|at| {
-                    a.attr_name_is(at, attr)
-                        && value.is_some_and(|expected| value_is(a, at, expected))
-                })
-        },
-        &mut results,
-    );
-    results
-}
-
-/// DFS: find descendants by tag with attribute existence (single pass).
-fn find_descendants_by_tag_and_attr_exists(
-    arena: &Arena,
-    root: NodeId,
-    tag: &NameTest,
-    attr: &str,
-) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    dfs_collect(
-        arena,
-        root,
-        &|a, id, n| {
-            is_element(n)
-                && matches_name_test(a, id, n, tag)
-                && a.attrs(id).iter().any(|at| a.attr_name_is(at, attr))
-        },
-        &mut results,
-    );
-    results
-}
-
-/// DFS: find descendants by tag with contains predicate (single pass).
-fn find_descendants_by_tag_and_contains(
-    arena: &Arena,
-    root: NodeId,
-    tag: &NameTest,
-    attr: &str,
-    substr: &str,
-) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    dfs_collect(
-        arena,
-        root,
-        &|a, id, n| {
-            is_element(n)
-                && matches_name_test(a, id, n, tag)
-                && a.attrs(id).iter().any(|at| {
-                    a.attr_name_is(at, attr)
-                        && a.attr_value_len(at) >= substr.len()
-                        && a.attr_value(at).unwrap_or("").contains(substr)
-                })
-        },
-        &mut results,
-    );
-    results
-}
-
-/// DFS: find all descendant elements with optional attribute filter (single pass).
-fn find_all_elements_by_attr(
-    arena: &Arena,
-    root: NodeId,
-    attr: &str,
-    value: Option<&str>,
-) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    dfs_collect(
-        arena,
-        root,
-        &|a, id, n| {
-            if !is_element(n) || n.depth == 0 {
-                return false;
-            }
-            match value {
-                Some(val) => a
-                    .attrs(id)
-                    .iter()
-                    .any(|at| a.attr_name_is(at, attr) && value_is(a, at, val)),
-                None => a.attrs(id).iter().any(|at| a.attr_name_is(at, attr)),
-            }
-        },
-        &mut results,
-    );
-    results
-}
-
-/// DFS: find all descendant elements.
-fn find_all_elements(arena: &Arena, root: NodeId) -> Vec<NodeId> {
-    let mut results = Vec::new();
-    dfs_collect(
-        arena,
-        root,
-        &|_, _, n| is_element(n) && n.depth > 0,
-        &mut results,
-    );
-    results
 }
 
 /// Evaluate an absolute path from the root.
@@ -598,7 +694,7 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate, position: us
 }
 
 /// Collect the direct child text nodes selected by XPath's `text()` node test.
-pub(crate) fn collect_direct_text_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) {
+fn collect_direct_text_children(arena: &Arena, node: NodeId, out: &mut Vec<NodeId>) {
     let n = arena.get(node);
     let mut child = n.first_child;
     while !child.is_null() {
@@ -693,9 +789,15 @@ mod tests {
 
         let doc = fhp_tree::parse(&html).unwrap();
         let tag = NameTest::Interned(Tag::Li);
-        let roots = find_descendants_by_tag(doc.arena(), doc.root_id(), &tag);
+        let roots = collect_descendants(
+            &XPathExpr::DescendantByTag(tag.clone()),
+            doc.arena(),
+            doc.root_id(),
+            Collect::Elements,
+        )
+        .unwrap();
         let mut position_cache = RootPositionCache::with_capacity(roots.len());
-        let nodes = find_descendants_by_tag_at_position_for_roots_cached(
+        let nodes = find_descendants_by_tag_at_position_for_roots_cached::<false>(
             doc.arena(),
             &roots,
             &tag,

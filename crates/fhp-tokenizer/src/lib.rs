@@ -52,6 +52,23 @@ pub trait TreeSink {
         true
     }
 
+    /// Whether the start tag of the text element `tag` (a
+    /// [`Tag::is_raw_text`], [`Tag::is_rcdata`], or `plaintext` element) that
+    /// was just delivered to [`TreeSink::open_tag_with_attrs`] opened an
+    /// element.
+    ///
+    /// The tokenizer asks immediately after such a start tag and enters the
+    /// element's text mode only when the answer is `true`. A tree builder
+    /// that ignores the start tag (for example `<style>` inside `<select>`)
+    /// returns `false`, and the following input is tokenized as markup, as
+    /// the HTML tree-construction stage leaves the tokenizer in the data
+    /// state for a start tag it ignores. The default opens every text
+    /// element.
+    fn text_element_opened(&self, tag: Tag) -> bool {
+        let _ = tag;
+        true
+    }
+
     /// An opening tag was encountered.
     ///
     /// `attr_raw` is the raw attribute region between the tag name and `>`.

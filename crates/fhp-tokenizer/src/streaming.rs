@@ -7,8 +7,8 @@
 //! [`StreamTokenizer`]: crate::streaming::StreamTokenizer
 
 use crate::extract::{
-    LtKind, PrefixEnd, ScriptEscape, classify_lt, is_end_tag_at, script_gt_event, script_lt_event,
-    tokenize_prefix,
+    LtKind, PrefixEnd, ScriptEscape, classify_lt, enters_text_element, is_end_tag_at,
+    script_gt_event, script_lt_event, tokenize_prefix,
 };
 use crate::token::Token;
 use crate::tokenize_with_text_decoding;
@@ -38,6 +38,55 @@ const TEXT_TAIL: usize = 80;
 /// their prefix, retaining only the tag identity and a bounded text tail.
 /// If EOF arrives before the terminator, discarded bytes are not recovered.
 pub const MAX_RAW_TEXT_RESIDUAL: usize = 2 * 1024 * 1024;
+
+/// Receives the tokens [`StreamTokenizer::feed_str_into`] and
+/// [`StreamTokenizer::finish_into`] produce.
+///
+/// The streaming counterpart of [`TreeSink`](crate::TreeSink): besides
+/// receiving the tokens, it decides whether the input after a text element's
+/// start tag is that element's text.
+pub trait TokenSink {
+    /// Receive the next token.
+    ///
+    /// The token is passed by value and may borrow the tokenizer's buffer, so
+    /// it is valid for the duration of the call; the tokenizer borrows
+    /// nothing from the sink after the call returns.
+    fn token(&mut self, token: Token<'_>);
+
+    /// Whether the start tag of the text element `tag` (a
+    /// [`Tag::is_raw_text`], [`Tag::is_rcdata`], or `plaintext` element) that
+    /// was just delivered to [`TokenSink::token`] opened an element.
+    ///
+    /// The tokenizer asks immediately after such a start tag and enters the
+    /// element's text mode only when the answer is `true`. A tree builder
+    /// that ignores the start tag (for example `<style>` inside `<select>`)
+    /// returns `false`, and the following input is tokenized as markup, as
+    /// the HTML tree-construction stage leaves the tokenizer in the data
+    /// state for a start tag it ignores. The default opens every text
+    /// element.
+    fn text_element_opened(&self, tag: Tag) -> bool {
+        let _ = tag;
+        true
+    }
+}
+
+/// [`TokenSink`] over a token callback; it opens every text element.
+struct FnSink<F>(F);
+
+impl<F: FnMut(&Token<'_>)> TokenSink for FnSink<F> {
+    fn token(&mut self, token: Token<'_>) {
+        (self.0)(&token);
+    }
+}
+
+/// [`TokenSink`] collecting owned tokens; it opens every text element.
+struct OwnedTokens<'v>(&'v mut Vec<Token<'static>>);
+
+impl TokenSink for OwnedTokens<'_> {
+    fn token(&mut self, token: Token<'_>) {
+        self.0.push(to_owned_token(token));
+    }
+}
 
 /// A streaming tokenizer that processes input chunk by chunk.
 ///
@@ -211,6 +260,8 @@ struct SplitScan {
     /// Start of a matching raw-text/RCDATA close tag within `split`, together
     /// with the element whose preceding bytes are text.
     text_close: Option<(usize, Tag)>,
+    /// A completed start tag that made this scan enter a text context.
+    text_open: Option<Tag>,
 }
 
 /// Text-tokenization context retained across chunk boundaries.
@@ -238,6 +289,24 @@ impl TextContext {
     #[inline]
     fn decodes_entities(self) -> bool {
         matches!(self, Self::Element { tag, .. } if tag.is_rcdata())
+    }
+
+    /// The context a start tag of `tag` enters, for a `tag` that
+    /// [`enters_text_element`].
+    fn opened_by(tag: Tag) -> Self {
+        if tag == Tag::Plaintext {
+            Self::Plaintext
+        } else {
+            Self::element(tag)
+        }
+    }
+
+    /// The element whose content is tokenized in this context.
+    fn tag(self) -> Tag {
+        match self {
+            Self::Element { tag, .. } => tag,
+            Self::Plaintext => Tag::Plaintext,
+        }
     }
 }
 
@@ -304,9 +373,12 @@ impl StreamTokenizer {
         let mut consumed = 0;
         let mut fast = FastPath::default();
         loop {
-            consumed += self.run_fast_path(&mut fast, &buffered, consumed, &mut |token| {
-                tokens.push(to_owned_token(token));
-            });
+            consumed += self.run_fast_path(
+                &mut fast,
+                &buffered,
+                consumed,
+                &mut OwnedTokens(&mut tokens),
+            );
             let stop = self.scan_stop(&fast);
             let scan = self.scanner.scan(&buffered[consumed..], stop);
             if scan.split == 0 {
@@ -352,13 +424,24 @@ impl StreamTokenizer {
     /// Feed a UTF-8 chunk and process complete tokens via callback without cloning.
     ///
     /// This path is intended for internal high-throughput consumers (e.g. tree
-    /// building) that can consume tokens immediately.
-    pub fn feed_str_with(&mut self, chunk: &str, mut on_token: impl FnMut(&Token<'_>)) {
+    /// building) that can consume tokens immediately. Every text element's
+    /// start tag opens it; [`Self::feed_str_into`] lets the consumer decide.
+    pub fn feed_str_with(&mut self, chunk: &str, on_token: impl FnMut(&Token<'_>)) {
+        self.feed_str_into(chunk, &mut FnSink(on_token));
+    }
+
+    /// Feed a UTF-8 chunk and deliver complete tokens to `sink` without
+    /// cloning.
+    ///
+    /// After each start tag of a text element, `sink` decides through
+    /// [`TokenSink::text_element_opened`] whether the input that follows is
+    /// that element's text or markup.
+    pub fn feed_str_into(&mut self, chunk: &str, sink: &mut impl TokenSink) {
         if chunk.is_empty() {
             return;
         }
 
-        let chunk = self.resume_numeric_entity_with(chunk.as_bytes(), &mut on_token);
+        let chunk = self.resume_numeric_entity_with(chunk.as_bytes(), sink);
         if chunk.is_empty() {
             return;
         }
@@ -370,9 +453,7 @@ impl StreamTokenizer {
         let mut consumed = 0;
         let mut fast = FastPath::default();
         loop {
-            consumed += self.run_fast_path(&mut fast, &buffered, consumed, &mut |token| {
-                on_token(&token);
-            });
+            consumed += self.run_fast_path(&mut fast, &buffered, consumed, sink);
             let stop = self.scan_stop(&fast);
             let scan = self.scanner.scan(&buffered[consumed..], stop);
             if scan.split == 0 {
@@ -386,9 +467,9 @@ impl StreamTokenizer {
                     scan.text_close.map(|(_, close_tag)| close_tag),
                     Some(overflow.tag)
                 );
-                emit_close_tag_with(overflow.tag, overflow.source_name(), &mut on_token);
+                emit_close_tag_with(overflow.tag, overflow.source_name(), sink);
             } else if self.syntax_overflow {
-                emit_text_token_with(pending, None, self.decode_text, &mut on_token);
+                emit_text_token_with(pending, None, self.decode_text, sink);
                 self.syntax_overflow = false;
             } else if let Some((close_start, tag)) = scan.text_close {
                 if close_start > 0 {
@@ -396,12 +477,21 @@ impl StreamTokenizer {
                         &pending[..close_start],
                         Some(TextContext::element(tag)),
                         self.decode_text,
-                        &mut on_token,
+                        sink,
                     );
                 }
-                process_chunk_with(&pending[close_start..], self.decode_text, &mut on_token);
+                process_chunk_with(&pending[close_start..], self.decode_text, sink);
             } else {
-                process_chunk_with(pending, self.decode_text, &mut on_token);
+                process_chunk_with(pending, self.decode_text, sink);
+            }
+
+            // The scanner stops immediately after a text start tag; its
+            // OpenTag was the last token delivered. No context probes are
+            // needed for the much more common non-text segments.
+            if let Some(tag) = scan.text_open {
+                if !sink.text_element_opened(tag) {
+                    self.scanner.cancel_text_context();
+                }
             }
 
             self.scanner.discard_prefix(split);
@@ -410,8 +500,8 @@ impl StreamTokenizer {
         buffered.drain(..consumed);
         self.residual = buffered;
 
-        self.flush_bounded_text_with(&mut on_token);
-        self.flush_overlong_syntax_with(&mut on_token);
+        self.flush_bounded_text_with(sink);
+        self.flush_overlong_syntax_with(sink);
     }
 
     /// Signal end of input and flush any remaining buffered data.
@@ -454,9 +544,15 @@ impl StreamTokenizer {
     }
 
     /// Signal end of input and flush buffered tokens via callback without cloning.
-    pub fn finish_with(&mut self, mut on_token: impl FnMut(&Token<'_>)) {
+    pub fn finish_with(&mut self, on_token: impl FnMut(&Token<'_>)) {
+        self.finish_into(&mut FnSink(on_token));
+    }
+
+    /// Signal end of input and flush buffered tokens to `sink` without
+    /// cloning.
+    pub fn finish_into(&mut self, sink: &mut impl TokenSink) {
         if let Some(state) = self.numeric_entity.take() {
-            emit_numeric_entity_with(state, self.decode_text, &mut on_token);
+            emit_numeric_entity_with(state, self.decode_text, sink);
         }
         let remaining = std::mem::take(&mut self.residual);
         if self.raw_close_overflow.take().is_some() {
@@ -464,7 +560,7 @@ impl StreamTokenizer {
             // a tag drops it.
         } else if self.syntax_overflow {
             if !remaining.is_empty() {
-                emit_text_token_with(&remaining, None, self.decode_text, &mut on_token);
+                emit_text_token_with(&remaining, None, self.decode_text, sink);
             }
         } else if let Some((open, tag)) = self.scanner.text_close_candidate() {
             // Only the text before the unterminated end tag survives EOF.
@@ -473,15 +569,15 @@ impl StreamTokenizer {
                     &remaining[..open],
                     Some(TextContext::element(tag)),
                     self.decode_text,
-                    &mut on_token,
+                    sink,
                 );
             }
         } else if let Some(context) = self.scanner.text_context() {
             if !remaining.is_empty() {
-                emit_text_token_with(&remaining, Some(context), self.decode_text, &mut on_token);
+                emit_text_token_with(&remaining, Some(context), self.decode_text, sink);
             }
         } else if !remaining.is_empty() {
-            process_chunk_with(&remaining, self.decode_text, &mut on_token);
+            process_chunk_with(&remaining, self.decode_text, sink);
         }
         self.scanner.reset();
         self.syntax_overflow = false;
@@ -515,7 +611,7 @@ impl StreamTokenizer {
     fn resume_numeric_entity_with<'a>(
         &mut self,
         chunk: &'a [u8],
-        on_token: &mut impl FnMut(&Token<'_>),
+        sink: &mut impl TokenSink,
     ) -> &'a [u8] {
         let Some(mut state) = self.numeric_entity.take() else {
             return chunk;
@@ -530,7 +626,7 @@ impl StreamTokenizer {
             return &chunk[chunk.len()..];
         }
 
-        emit_numeric_entity_with(state, self.decode_text, on_token);
+        emit_numeric_entity_with(state, self.decode_text, sink);
         if chunk[consumed] == b';' {
             consumed += 1;
         }
@@ -541,16 +637,16 @@ impl StreamTokenizer {
     /// return how many bytes of `buffered[consumed..]` were consumed.
     ///
     /// The split scanner then resumes from the stop: inside the text element
-    /// the prefix entered, at a `<` that needs more input, or over the
-    /// unfinished markup or text at the end. Splitting there instead of
-    /// scanning first and tokenizing the segments afterwards visits each
-    /// byte once.
+    /// the prefix entered (in plain data when `sink` did not open it), at a
+    /// `<` that needs more input, or over the unfinished markup or text at
+    /// the end. Splitting there instead of scanning first and tokenizing the
+    /// segments afterwards visits each byte once.
     fn run_fast_path<'b>(
         &mut self,
         fast: &mut FastPath<'b>,
         buffered: &'b [u8],
         consumed: usize,
-        emit: &mut impl FnMut(Token<'b>),
+        sink: &mut impl TokenSink,
     ) -> usize {
         if !fast.enabled
             || !self.scanner.is_fresh()
@@ -575,10 +671,15 @@ impl StreamTokenizer {
             }
         };
 
-        let stop = tokenize_prefix(input, self.decode_text, emit);
+        let stop = tokenize_prefix(input, self.decode_text, &mut |token| sink.token(token));
         let (scanned, text_context) = match stop.end {
-            PrefixEnd::TextElement(Tag::Plaintext) => (0, Some(TextContext::Plaintext)),
-            PrefixEnd::TextElement(tag) => (0, Some(TextContext::element(tag))),
+            // A start tag the sink did not open leaves the input after it to
+            // be tokenized as markup from the stop.
+            PrefixEnd::TextElement(tag) => (
+                0,
+                sink.text_element_opened(tag)
+                    .then(|| TextContext::opened_by(tag)),
+            ),
             PrefixEnd::Undecided(lt) => {
                 fast.enabled = false;
                 (lt - stop.consumed, None)
@@ -680,7 +781,7 @@ impl StreamTokenizer {
 
     /// Callback counterpart of [`Self::flush_bounded_text`] that keeps valid
     /// UTF-8 content borrowed instead of allocating owned token strings.
-    fn flush_bounded_text_with(&mut self, on_token: &mut impl FnMut(&Token<'_>)) {
+    fn flush_bounded_text_with(&mut self, sink: &mut impl TokenSink) {
         let context = self.scanner.text_context();
         let limit = if context.is_some() {
             MAX_RAW_TEXT_RESIDUAL
@@ -700,7 +801,7 @@ impl StreamTokenizer {
                     &self.residual[..open],
                     Some(TextContext::element(close_tag)),
                     self.decode_text,
-                    on_token,
+                    sink,
                 );
                 discard_prefix(&mut self.residual, open);
                 self.scanner.discard_prefix(open);
@@ -721,12 +822,7 @@ impl StreamTokenizer {
             TextFlushPlan::Prefix(prefix_len) => prefix_len,
             TextFlushPlan::NumericOverflow { amp, state } => {
                 if amp > 0 {
-                    emit_text_token_with(
-                        &self.residual[..amp],
-                        context,
-                        self.decode_text,
-                        on_token,
-                    );
+                    emit_text_token_with(&self.residual[..amp], context, self.decode_text, sink);
                 }
                 let consumed = self.residual.len();
                 self.residual.clear();
@@ -743,7 +839,7 @@ impl StreamTokenizer {
             &self.residual[..prefix_len],
             context,
             self.decode_text,
-            on_token,
+            sink,
         );
         discard_prefix(&mut self.residual, prefix_len);
         self.scanner.discard_prefix(prefix_len);
@@ -792,7 +888,7 @@ impl StreamTokenizer {
         self.scanner.discard_prefix(prefix_len);
     }
 
-    fn flush_overlong_syntax_with(&mut self, on_token: &mut impl FnMut(&Token<'_>)) {
+    fn flush_overlong_syntax_with(&mut self, sink: &mut impl TokenSink) {
         if !self.syntax_overflow {
             if self.residual.len() <= MAX_RAW_TEXT_RESIDUAL
                 || self.scanner.in_text_context()
@@ -810,12 +906,7 @@ impl StreamTokenizer {
         if prefix_len == 0 {
             return;
         }
-        emit_text_token_with(
-            &self.residual[..prefix_len],
-            None,
-            self.decode_text,
-            on_token,
-        );
+        emit_text_token_with(&self.residual[..prefix_len], None, self.decode_text, sink);
         discard_prefix(&mut self.residual, prefix_len);
         self.scanner.discard_prefix(prefix_len);
     }
@@ -871,6 +962,7 @@ impl SplitScanner {
     fn scan(&mut self, data: &[u8], stop: ScanStop) -> SplitScan {
         let mut i = self.scanned.min(data.len());
         self.text_close = None;
+        let mut text_open = None;
 
         // Each arm jumps over bytes that cannot change its state.
         while i < data.len() {
@@ -1026,6 +1118,7 @@ impl SplitScanner {
                     }
                     if let Some(context) = text_open_context(&data[open + 1..i - 1]) {
                         self.text_context = Some(context);
+                        text_open = Some(context.tag());
                         // Process the opening tag before buffering its
                         // potentially very large text body.
                         break;
@@ -1101,6 +1194,7 @@ impl SplitScanner {
         SplitScan {
             split: self.last_safe,
             text_close: self.text_close,
+            text_open,
         }
     }
 
@@ -1118,6 +1212,13 @@ impl SplitScanner {
         debug_assert!(scanned == 0 || text_context.is_none());
         self.scanned = scanned;
         self.text_context = text_context;
+    }
+
+    /// Leave the text element the last scan entered because its start tag
+    /// did not open an element: the input after it is markup.
+    fn cancel_text_context(&mut self) {
+        debug_assert!(matches!(self.mode, ScanMode::Data));
+        self.text_context = None;
     }
 
     fn discard_prefix(&mut self, len: usize) {
@@ -1302,15 +1403,15 @@ fn process_chunk(data: &[u8], decode_text: bool, tokens: &mut Vec<Token<'static>
     }
 }
 
-/// Tokenize a complete segment and expose borrowed tokens for the duration of
-/// the callback. Valid UTF-8 takes the zero-clone path; mixed use with the
-/// byte-oriented API still degrades safely through lossy decoding.
-fn process_chunk_with(data: &[u8], decode_text: bool, on_token: &mut impl FnMut(&Token<'_>)) {
+/// Tokenize a complete segment and deliver borrowed tokens to `sink`. Valid
+/// UTF-8 takes the zero-clone path; mixed use with the byte-oriented API
+/// still degrades safely through lossy decoding.
+fn process_chunk_with(data: &[u8], decode_text: bool, sink: &mut impl TokenSink) {
     match std::str::from_utf8(data) {
-        Ok(text) => tokenize_with_text_decoding(text, decode_text, |token| on_token(&token)),
+        Ok(text) => tokenize_with_text_decoding(text, decode_text, |token| sink.token(token)),
         Err(_) => {
             let text = String::from_utf8_lossy(data);
-            tokenize_with_text_decoding(&text, decode_text, |token| on_token(&token));
+            tokenize_with_text_decoding(&text, decode_text, |token| sink.token(token));
         }
     }
 }
@@ -1344,8 +1445,8 @@ fn owned_numeric_entity_token(state: NumericEntityState, decode_text: bool) -> T
     }
 }
 
-fn emit_close_tag_with(tag: Tag, name: &str, on_token: &mut impl FnMut(&Token<'_>)) {
-    on_token(&Token::CloseTag {
+fn emit_close_tag_with(tag: Tag, name: &str, sink: &mut impl TokenSink) {
+    sink.token(Token::CloseTag {
         tag,
         name: std::borrow::Cow::Borrowed(name),
     });
@@ -1354,9 +1455,9 @@ fn emit_close_tag_with(tag: Tag, name: &str, on_token: &mut impl FnMut(&Token<'_
 fn emit_numeric_entity_with(
     state: NumericEntityState,
     decode_text: bool,
-    on_token: &mut impl FnMut(&Token<'_>),
+    sink: &mut impl TokenSink,
 ) {
-    on_token(&Token::Text {
+    sink.token(Token::Text {
         content: std::borrow::Cow::Owned(state.text(decode_text)),
     });
 }
@@ -1365,7 +1466,7 @@ fn emit_text_token_with(
     data: &[u8],
     context: Option<TextContext>,
     decode_text: bool,
-    on_token: &mut impl FnMut(&Token<'_>),
+    sink: &mut impl TokenSink,
 ) {
     let decode = decode_text && context.is_none_or(TextContext::decodes_entities);
     match std::str::from_utf8(data) {
@@ -1375,7 +1476,7 @@ fn emit_text_token_with(
             } else {
                 std::borrow::Cow::Borrowed(text)
             };
-            on_token(&Token::Text { content });
+            sink.token(Token::Text { content });
         }
         Err(_) => {
             let text = String::from_utf8_lossy(data).into_owned();
@@ -1384,7 +1485,7 @@ fn emit_text_token_with(
             } else {
                 std::borrow::Cow::Borrowed(text.as_str())
             };
-            on_token(&Token::Text { content });
+            sink.token(Token::Text { content });
         }
     }
 }
@@ -1448,13 +1549,7 @@ fn text_open_context(tag_body: &[u8]) -> Option<TextContext> {
         .position(|&byte| is_html_whitespace(byte) || byte == b'/')
         .unwrap_or(tag_body.len());
     let tag = Tag::from_bytes(&tag_body[..name_end]);
-    if tag == Tag::Plaintext {
-        Some(TextContext::Plaintext)
-    } else if !tag.is_void() && (tag.is_raw_text() || tag.is_rcdata()) {
-        Some(TextContext::element(tag))
-    } else {
-        None
-    }
+    enters_text_element(tag).then(|| TextContext::opened_by(tag))
 }
 
 /// Convert a borrowed token to an owned ('static) token.

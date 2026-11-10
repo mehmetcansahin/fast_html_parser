@@ -127,6 +127,26 @@ fn xpath_text_selects_only_direct_child_text_nodes() {
     );
 }
 
+#[cfg(feature = "xpath")]
+#[test]
+fn xpath_text_of_nested_matches_is_in_document_order() {
+    let expected = XPathResult::Strings(vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+
+    let doc = parse("<div>a<div>b</div>c</div>").unwrap();
+    assert_eq!(doc.xpath("//div/text()").unwrap(), expected);
+    assert_eq!(
+        doc.select("div").unwrap().xpath("//div/text()").unwrap(),
+        expected
+    );
+
+    let doc = parse("<ul><li>a<ul><li>b</li></ul>c</li></ul>").unwrap();
+    assert_eq!(doc.xpath("//li[1]/text()").unwrap(), expected);
+    assert_eq!(
+        doc.select("li").unwrap().xpath("//li[1]/text()").unwrap(),
+        expected
+    );
+}
+
 #[test]
 fn empty_css_substring_operands_never_match() {
     let doc = parse("<div data-x=''></div><div data-x='abc'></div><div data-x></div>").unwrap();
@@ -391,6 +411,35 @@ fn selection_xpath_positions_preserve_overlapping_root_semantics() {
     assert_eq!(ids, ["outer", "first", "nested"]);
 }
 
+#[cfg(feature = "xpath")]
+#[test]
+fn selection_xpath_merges_parent_and_absolute_results_in_document_order() {
+    let doc = parse("<section id='outer'><div id='inner'><p></p></div><p></p></section>").unwrap();
+    let XPathResult::Nodes(nodes) = doc.select("p").unwrap().xpath("..").unwrap() else {
+        panic!("expected node result");
+    };
+    let ids: Vec<_> = nodes
+        .into_iter()
+        .map(|node| doc.get(node).attr("id").unwrap())
+        .collect();
+    assert_eq!(ids, ["outer", "inner"]);
+
+    let doc = parse(
+        "<div id='outer'>\
+           <div id='inner'><div id='leaf'><p id='p1'></p></div><p id='p2'></p></div>\
+         </div>",
+    )
+    .unwrap();
+    let XPathResult::Nodes(nodes) = doc.select("div").unwrap().xpath("/div/p").unwrap() else {
+        panic!("expected node result");
+    };
+    let ids: Vec<_> = nodes
+        .into_iter()
+        .map(|node| doc.get(node).attr("id").unwrap())
+        .collect();
+    assert_eq!(ids, ["p1", "p2"]);
+}
+
 #[test]
 fn sub_selections_match_ancestors_above_each_root() {
     let doc = parse("<div class=\"outer\"><section><p>x</p></section></div>").unwrap();
@@ -640,4 +689,54 @@ fn xpath_errors_report_the_character_at_its_input_offset() {
 
     let err = doc.xpath("  //[").unwrap_err().to_string();
     assert!(err.contains("expected identifier at position 4"), "{err}");
+}
+
+#[cfg(feature = "xpath")]
+#[test]
+fn selection_xpath_parent_text_interleaves_ancestor_matches() {
+    for html in [
+        "<section id='outer'>a<div id='inner'>b<p></p>c</div>d<p></p>e</section><aside id='last'><p></p>f</aside>",
+        "<section id='outer'>a<p></p>b<div id='inner'>c<p></p>d</div>e</section><aside id='last'><p></p>f</aside>",
+    ] {
+        let doc = parse(html).unwrap();
+        let roots = doc.select("p").unwrap();
+        let XPathResult::Nodes(nodes) = roots.xpath("..").unwrap() else {
+            panic!("expected parent nodes");
+        };
+        let ids: Vec<_> = nodes
+            .iter()
+            .map(|&id| doc.get(id).attr("id").unwrap())
+            .collect();
+        assert_eq!(ids, ["outer", "inner", "last"], "{html}");
+        assert_eq!(
+            roots.xpath("../text()").unwrap(),
+            XPathResult::Strings(["a", "b", "c", "d", "e", "f"].map(str::to_owned).to_vec()),
+            "{html}"
+        );
+    }
+}
+
+#[cfg(feature = "xpath")]
+#[test]
+fn selection_xpath_parent_order_handles_sibling_gaps_and_foster_parenting() {
+    for html in [
+        "<section id='first'>a<!--gap--><p></p>b</section><aside>ignored</aside><div id='second'>c<p></p>d</div><hr><article id='last'>e<p></p>f</article>",
+        "<table><tr><td id='second'>c<p></p>d</td></tr><div id='first'>a<p></p>b</div></table><article id='last'>e<p></p>f</article>",
+    ] {
+        let doc = parse(html).unwrap();
+        let roots = doc.select("p").unwrap();
+        let XPathResult::Nodes(nodes) = roots.xpath("..").unwrap() else {
+            panic!("expected parent nodes");
+        };
+        let ids: Vec<_> = nodes
+            .iter()
+            .map(|&id| doc.get(id).attr("id").unwrap())
+            .collect();
+        assert_eq!(ids, ["first", "second", "last"], "{html}");
+        assert_eq!(
+            roots.xpath("../text()").unwrap(),
+            XPathResult::Strings(["a", "b", "c", "d", "e", "f"].map(str::to_owned).to_vec()),
+            "{html}"
+        );
+    }
 }

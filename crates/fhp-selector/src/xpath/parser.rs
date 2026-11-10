@@ -196,10 +196,7 @@ impl<'a> XPathParser<'a> {
         let mut steps = Vec::new();
         loop {
             self.skip_whitespace();
-            if self.is_eof() || self.remaining().starts_with("/text()") {
-                break;
-            }
-
+            // A `/` must be followed by a step: `/div/` and `/div//text()` are invalid.
             let tag = self.read_tag_name()?;
             let predicate = if self.peek() == Some(b'[') {
                 Some(self.parse_predicate()?)
@@ -209,22 +206,13 @@ impl<'a> XPathParser<'a> {
 
             steps.push(PathStep { tag, predicate });
 
-            // Expect `/` separator or end
-            if self.peek() == Some(b'/') {
-                // Check for /text() which is handled by caller
-                if self.remaining().starts_with("/text()") {
-                    break;
-                }
-                self.advance(1);
-            } else {
+            // Continue after a `/` separator, which may follow ASCII whitespace;
+            // `/text()` is handled by the caller.
+            self.skip_whitespace();
+            if self.peek() != Some(b'/') || self.remaining().starts_with("/text()") {
                 break;
             }
-        }
-
-        if steps.is_empty() {
-            return Err(XPathError::Invalid {
-                reason: "empty absolute path".to_string(),
-            });
+            self.advance(1);
         }
 
         Ok(XPathExpr::AbsolutePath(steps))
@@ -303,13 +291,14 @@ impl<'a> XPathParser<'a> {
         Ok(NameTest::from_html_name(&name))
     }
 
-    /// Read an identifier (letters, digits, hyphens).
+    /// Read an identifier: ASCII letters, digits, `-`, `_`, and any non-ASCII
+    /// character, as CSS identifiers allow, so custom element names such as
+    /// `x-ürün` are accepted.
     fn read_ident(&mut self) -> Result<String, XPathError> {
         let start = self.pos;
-        while self.pos < self.input.len() {
-            let b = self.input.as_bytes()[self.pos];
-            if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' {
-                self.pos += 1;
+        for c in self.remaining().chars() {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' || !c.is_ascii() {
+                self.pos += c.len_utf8();
             } else {
                 break;
             }
@@ -614,12 +603,31 @@ mod tests {
     }
 
     #[test]
+    fn parse_trailing_separator_error() {
+        for expr in ["/div/", "/div/ ", "/div//text()", "/div//p", "/"] {
+            assert!(parse_xpath(expr).is_err(), "{expr}");
+        }
+        assert!(matches!(
+            parse_xpath("/div/text()").unwrap(),
+            XPathExpr::TextExtract(_)
+        ));
+        assert_eq!(
+            parse_xpath("/ div / p").unwrap(),
+            parse_xpath("/div/p").unwrap()
+        );
+    }
+
+    #[test]
     fn only_ascii_whitespace_is_trimmed() {
         assert_eq!(
             parse_xpath(" \t//div \r\n").unwrap(),
             parse_xpath("//div").unwrap()
         );
         assert!(parse_xpath("\u{a0}//div").is_err());
-        assert!(parse_xpath("//div\u{3000}").is_err());
+        // Non-ASCII whitespace is not trimmed: U+3000 is part of the name.
+        assert_eq!(
+            parse_xpath("//div\u{3000}").unwrap(),
+            XPathExpr::DescendantByTag(NameTest::Literal("div\u{3000}".into()))
+        );
     }
 }

@@ -313,14 +313,13 @@ impl<'a> Selection<'a> {
                 // Resolve positions once per parent across all roots instead of
                 // rescanning each root's siblings.
                 XPathExpr::PositionPredicate { tag, pos } if self.nodes.len() > 1 => {
-                    for node in xpath::eval::find_descendants_by_tag_at_position_for_roots(
+                    candidates.extend(xpath::eval::find_descendants_by_tag_at_position_for_roots(
                         arena,
                         &self.nodes,
                         tag,
                         *pos,
-                    ) {
-                        xpath::eval::collect_direct_text_children(arena, node, &mut candidates);
-                    }
+                        xpath::eval::Collect::TextChildren,
+                    ));
                 }
                 _ => {
                     for &node_id in &self.nodes {
@@ -333,10 +332,16 @@ impl<'a> Selection<'a> {
             }
 
             let mut seen = std::collections::HashSet::new();
+            let mut text_nodes: Vec<NodeId> = candidates
+                .into_iter()
+                .filter(|&id| seen.insert(id))
+                .collect();
+            if self.nodes.len() > 1 && merge_needs_document_order(&parsed) {
+                xpath::eval::sort_in_document_order(arena, self.doc.root_id(), &mut text_nodes);
+            }
             return Ok(XPathResult::Strings(
-                candidates
+                text_nodes
                     .into_iter()
-                    .filter(|&id| seen.insert(id))
                     .map(|id| arena.text(id).to_owned())
                     .collect(),
             ));
@@ -350,6 +355,7 @@ impl<'a> Selection<'a> {
                         &self.nodes,
                         tag,
                         *pos,
+                        xpath::eval::Collect::Elements,
                     ),
                 ));
             }
@@ -376,11 +382,34 @@ impl<'a> Selection<'a> {
             }
         }
 
+        if self.nodes.len() > 1 && merge_needs_document_order(&parsed) {
+            xpath::eval::sort_in_document_order(
+                self.doc.arena(),
+                self.doc.root_id(),
+                &mut all_nodes,
+            );
+        }
+
         if !all_strings.is_empty() {
             Ok(XPathResult::Strings(all_strings))
         } else {
             Ok(XPathResult::Nodes(all_nodes))
         }
+    }
+}
+
+/// Whether merging `expr`'s per-root results needs a document-order sort.
+///
+/// Descendant axes evaluated from document-ordered roots return a nested
+/// root's results as a subset of its ancestor root's results, so
+/// concatenation plus deduplication is already in document order; parent and
+/// absolute-path results are not.
+#[cfg(feature = "xpath")]
+fn merge_needs_document_order(expr: &XPathExpr) -> bool {
+    match expr {
+        XPathExpr::Parent | XPathExpr::AbsolutePath(_) => true,
+        XPathExpr::TextExtract(inner) => merge_needs_document_order(inner),
+        _ => false,
     }
 }
 

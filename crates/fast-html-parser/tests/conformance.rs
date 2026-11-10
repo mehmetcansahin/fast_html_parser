@@ -164,6 +164,31 @@ fn assert_oracle_case(name: &str, html: &str) {
         borrowed_dom, oracle,
         "{name}: FHP differs from scraper/html5ever"
     );
+
+    let mut reused = HtmlParser::parse("<p>previous document</p>").unwrap();
+    reused.reparse(html).unwrap();
+    assert_eq!(canonical_fhp(&reused), oracle, "{name}: reparse differs");
+
+    #[cfg(feature = "encoding")]
+    {
+        use fast_html_parser::streaming::{EarlyStopOutcome, EarlyStopParser, StreamParser};
+
+        let bytes = HtmlParser::parse_bytes(html.as_bytes()).unwrap();
+        assert_eq!(canonical_fhp(&bytes), oracle, "{name}: byte parse differs");
+
+        let mut streamed = StreamParser::new();
+        let mut early = EarlyStopParser::stop_on_create(|_| false);
+        for chunk in html.as_bytes().chunks(7) {
+            streamed.feed(chunk).unwrap();
+            early.feed(chunk).unwrap();
+        }
+        let streamed = streamed.finish().unwrap();
+        assert_eq!(canonical_fhp(&streamed), oracle, "{name}: stream differs");
+        let EarlyStopOutcome::Done(early) = early.finish().unwrap() else {
+            panic!("{name}: a nonmatching predicate must parse the whole document");
+        };
+        assert_eq!(canonical_fhp(&early), oracle, "{name}: early-stop differs");
+    }
 }
 
 #[test]
@@ -428,6 +453,34 @@ fn supported_recovery_subset_matches_html5ever() {
         (
             "end tag in column group closes it",
             "<table><colgroup></p><col></colgroup></table>",
+        ),
+        (
+            "mismatched cell end tag is ignored",
+            "<table><tr><td>A</th>B</table>",
+        ),
+        (
+            "mismatched table section end tag is ignored",
+            "<table><tbody><tr><td>A</thead><tr><td>B</table>",
+        ),
+        (
+            "stray optgroup end tag keeps the option open",
+            "<select><option>A</optgroup>B</select>",
+        ),
+        (
+            "ignored style start tag in select keeps tokenizing markup",
+            "<select><style></select><p>x</p>",
+        ),
+        (
+            "ignored title start tag in select keeps tokenizing markup",
+            "<select><title></select><p>x</p>",
+        ),
+        (
+            "ignored xmp start tag in select keeps tokenizing markup",
+            "<select><xmp></select><p>x</p>",
+        ),
+        (
+            "ignored plaintext start tag in select keeps tokenizing markup",
+            "<select><plaintext></select><p>x</p>",
         ),
     ];
 

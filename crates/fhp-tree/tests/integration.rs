@@ -853,3 +853,51 @@ fn shrink_to_fit_keeps_the_tree() {
     doc.shrink_to_fit();
     assert_eq!(doc.root().text_content(), "after");
 }
+
+/// A token sink that lets the builder veto text elements and leaves text
+/// decoding to the tokenizer, as an external `StreamTokenizer` consumer may.
+struct VetoingSink<'a>(&'a mut fhp_tree::builder::TreeBuilder);
+
+impl fhp_tokenizer::streaming::TokenSink for VetoingSink<'_> {
+    fn token(&mut self, token: fhp_tokenizer::token::Token<'_>) {
+        self.0.process(&token).unwrap();
+    }
+
+    fn text_element_opened(&self, _tag: Tag) -> bool {
+        self.0.last_start_tag_opened()
+    }
+}
+
+#[test]
+fn builder_does_not_decode_text_after_a_vetoed_text_element_start_tag() {
+    // The tokenizer never enters the ignored `<style>`, so no `</style>`
+    // arrives; later tokens must not pass through raw-text recovery decoding.
+    let mut tokenizer = fhp_tokenizer::streaming::StreamTokenizer::new();
+    let mut builder = fhp_tree::builder::TreeBuilder::new();
+    tokenizer.feed_str_into(
+        "<select><style></select><p>&amp;amp;</p>",
+        &mut VetoingSink(&mut builder),
+    );
+    tokenizer.finish_into(&mut VetoingSink(&mut builder));
+    let (arena, root) = builder.finish().unwrap();
+
+    let mut texts = Vec::new();
+    let mut stack = vec![root];
+    while let Some(id) = stack.pop() {
+        let node = arena.get(id);
+        if node.flags.has(fhp_tree::node::NodeFlags::IS_TEXT) {
+            texts.push(arena.text(id).to_owned());
+        }
+        let mut child = node.first_child;
+        while !child.is_null() {
+            stack.push(child);
+            child = arena.get(child).next_sibling;
+        }
+    }
+    let expected = if cfg!(feature = "entity-decode") {
+        "&amp;"
+    } else {
+        "&amp;amp;"
+    };
+    assert_eq!(texts, [expected]);
+}

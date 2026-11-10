@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `TreeSink::text_element_opened` and the streaming `TokenSink` counterpart,
+  with `StreamTokenizer::feed_str_into` and `finish_into`, let tree builders
+  keep tokenizing markup when they ignore a text-element start tag.
+  `TreeBuilder::last_start_tag_opened` reports whether a start tag inserted
+  an element. Existing token collectors and closure callbacks retain their
+  text-mode behavior by default.
+
 - `Document::reparse`, `reparse_owned` and `reparse_bytes` (each with a
   `_with_limit` variant), and `HtmlParser::reparse_str`, `reparse_str_owned`
   and `reparse_raw`: parse the next input into an existing document, keeping
@@ -58,6 +65,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- XPath merges check real tree links before building a document-order set or
+  walking the whole document, so already ordered parent and absolute-path
+  results skip that extra allocation and traversal. Element and direct-text
+  descendant searches use separately compiled collection loops.
+- The streaming tokenizer reports text-element openings directly from its
+  boundary scanner instead of probing the text context after every segment.
+  Ignored start tags still leave the tokenizer in the data state.
+- `StreamParser` reuses bounded decoded-chunk storage, as the early-stop
+  parser already does, instead of allocating a new string for every chunk.
+
 - Documents with more than 512 open elements parse instead of failing with
   `ParseError::NestingTooDeep`. A start tag past the limit inserts an empty
   element, and the content after it goes to the innermost open element, so
@@ -75,6 +92,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stores.
 
 ### Fixed
+
+- Table end tags close only same-named elements in table scope: `</th>`
+  no longer closes a `td`, nor `</thead>` a `tbody`.
+- A stray `</optgroup>` inside `select` no longer closes an option unless
+  its parent is an open `optgroup`.
+- Ignored text-element start tags inside `select`, including `style`,
+  `title`, `xmp`, and `plaintext`, no longer swallow subsequent markup.
+  One-shot, byte, streaming, early-stop, and reused-document parsing agree.
+- XPath `text()` results from nested matches and positional predicates stay
+  in document order. Multi-root parent and absolute-path queries also merge
+  their node and text results in document order.
+- XPath accepts Unicode custom element names and rejects absolute paths
+  ending in `/` or containing an empty step.
 
 - `DecodingReader` decodes with the encoding it is given, like `decode`: a
   BOM for a different encoding is decoded as content instead of switching
