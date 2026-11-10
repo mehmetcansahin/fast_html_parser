@@ -9,6 +9,12 @@ Thank you for your interest in contributing to fast-html-parser! This document p
 - **cargo-fuzz** and Rust nightly: Required only for the maintainer release gate
 - Additional Rust targets: The release command reports the exact missing target
   installation command; it never installs prerequisites automatically
+- **Windows/MSVC fuzzing**: The matching MSVC AddressSanitizer runtime
+  (`clang_rt.asan_dynamic-x86_64.dll` for x64) must be discoverable through
+  `PATH`. Add the installed x64 MSVC toolchain's `bin\Hostx64\x64` directory
+  to the release process's `PATH`, or use a developer shell that includes it.
+  A fuzz executable exiting with `0xc0000135` (`STATUS_DLL_NOT_FOUND`)
+  indicates a missing runtime DLL; keep AddressSanitizer enabled.
 
 ## Getting Started
 
