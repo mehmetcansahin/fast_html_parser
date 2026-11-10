@@ -158,6 +158,31 @@ fn empty_css_substring_operands_never_match() {
 
 #[cfg(feature = "xpath")]
 #[test]
+fn xpath_empty_contains_matches_missing_and_empty_attributes() {
+    let doc = parse(
+        "<div><p id='missing'></p><p id='boolean' x></p>\
+         <p id='empty' x=''></p><p id='value' x='abc'></p></div>",
+    )
+    .unwrap();
+    let all = XPathResult::Nodes(doc.select("p").unwrap().node_ids().to_vec());
+    let value = XPathResult::Nodes(doc.select("#value").unwrap().node_ids().to_vec());
+
+    for prefix in ["//p", "/div/p"] {
+        assert_eq!(
+            doc.xpath(&format!("{prefix}[contains(@x,'')]")).unwrap(),
+            all,
+            "{prefix}"
+        );
+        assert_eq!(
+            doc.xpath(&format!("{prefix}[contains(@x,'ab')]")).unwrap(),
+            value,
+            "{prefix}"
+        );
+    }
+}
+
+#[cfg(feature = "xpath")]
+#[test]
 fn valueless_attributes_have_an_empty_string_value_for_queries() {
     let doc = parse("<input disabled>").unwrap();
 
@@ -533,6 +558,27 @@ fn general_sibling_combinator_is_linear_in_the_sibling_count() {
     assert_eq!(expected.len(), SIBLINGS);
     assert_eq!(matched.node_ids(), expected.as_slice());
     assert_eq!(chained.node_ids(), &expected[1..]);
+}
+
+#[test]
+fn boundary_pseudos_are_linear_with_comment_heavy_siblings() {
+    const SIBLINGS: usize = 20_000;
+    let comments = "<!--x-->".repeat(SIBLINGS);
+    let doc = parse(&format!(
+        "<div>{comments}{}{comments}</div>",
+        "<i></i>".repeat(SIBLINGS)
+    ))
+    .unwrap();
+    let elements = doc.select("i").unwrap();
+    let expected = elements.node_ids();
+
+    let start = Instant::now();
+    let first = doc.select("i:first-child").unwrap();
+    let last = doc.select("i:last-child").unwrap();
+    let elapsed = start.elapsed();
+    assert!(elapsed < TIME_LIMIT, "boundary selection took {elapsed:?}");
+    assert_eq!(first.node_ids(), &expected[..1]);
+    assert_eq!(last.node_ids(), &expected[SIBLINGS - 1..]);
 }
 
 #[test]

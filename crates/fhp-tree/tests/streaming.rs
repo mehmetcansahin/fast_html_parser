@@ -863,53 +863,6 @@ mod async_tests {
     }
 }
 
-#[cfg(feature = "async-async-std")]
-mod async_std_tests {
-    use std::future::Future;
-    use std::task::{Context, Poll, Waker};
-
-    use fhp_tree::async_std_parser::AsyncStdParser;
-
-    fn block_on<F: Future>(future: F) -> F::Output {
-        let mut context = Context::from_waker(Waker::noop());
-        let mut future = std::pin::pin!(future);
-        loop {
-            match future.as_mut().poll(&mut context) {
-                Poll::Ready(output) => return output,
-                Poll::Pending => std::thread::yield_now(),
-            }
-        }
-    }
-
-    #[test]
-    fn async_std_matches_one_shot_dom() {
-        block_on(async {
-            let html = b"<table><tr><td>A</td><td>B</table><p>x<p>y";
-            let expected = fhp_tree::parse_bytes(html).unwrap().to_html();
-            let actual = AsyncStdParser::new(&html[..])
-                .with_buf_size(5)
-                .parse()
-                .await
-                .unwrap();
-            assert_eq!(actual.to_html(), expected);
-        });
-    }
-
-    #[test]
-    fn async_std_applies_the_same_depth_limit() {
-        block_on(async {
-            let html = format!("{}x<p>y", "<div>".repeat(513));
-            let expected = fhp_tree::parse(&html).unwrap().to_html();
-            let actual = AsyncStdParser::new(html.as_bytes())
-                .with_buf_size(23)
-                .parse()
-                .await
-                .unwrap();
-            assert_eq!(actual.to_html(), expected);
-        });
-    }
-}
-
 /// A CR written as a character reference right after `<pre>` is content for
 /// every parser, also when the reference is long enough for the streaming
 /// tokenizer to compact its digits.

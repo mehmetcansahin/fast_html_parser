@@ -154,38 +154,12 @@ fn match_attr(arena: &Arena, node: NodeId, sel: &AttrSelector) -> bool {
 
 /// Check if the node is the first element child of its parent.
 fn is_first_element_child(arena: &Arena, node: NodeId) -> bool {
-    let n = arena.get(node);
-    if n.parent.is_null() {
-        return false;
-    }
-    let parent = arena.get(n.parent);
-    let mut child = parent.first_child;
-    while !child.is_null() {
-        let c = arena.get(child);
-        if is_element(c) {
-            return child == node;
-        }
-        child = c.next_sibling;
-    }
-    false
+    is_nth_element_child(arena, node, 0, 1)
 }
 
 /// Check if the node is the last element child of its parent.
 fn is_last_element_child(arena: &Arena, node: NodeId) -> bool {
-    let n = arena.get(node);
-    if n.parent.is_null() {
-        return false;
-    }
-    let parent = arena.get(n.parent);
-    let mut child = parent.last_child;
-    while !child.is_null() {
-        let c = arena.get(child);
-        if is_element(c) {
-            return child == node;
-        }
-        child = c.prev_sibling;
-    }
-    false
+    !arena.get(node).parent.is_null() && next_element_sibling(arena, node).is_none()
 }
 
 /// Check if the node is the nth element child (1-based) matching `an+b`.

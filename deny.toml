@@ -11,9 +11,6 @@ targets = [
 [advisories]
 db-path = "~/.cargo/advisory-db"
 db-urls = ["https://github.com/rustsec/advisory-db"]
-ignore = [
-    { id = "RUSTSEC-2025-0052", reason = "async-std is discontinued upstream; the optional async-async-std feature is retained for existing users" },
-]
 
 [licenses]
 allow = [

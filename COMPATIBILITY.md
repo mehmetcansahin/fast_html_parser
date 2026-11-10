@@ -109,8 +109,8 @@ A start tag beyond that inserts an empty element at depth 513, and the content
 after it goes to the innermost open element, so deeply nested input still
 parses into a tree no deeper than 513.
 
-Size errors are terminal for a streaming parser. Iterator, Tokio, and
-async-std adapters stop pulling their source after the first error.
+Size errors are terminal for a streaming parser. Iterator and Tokio adapters
+stop pulling their source after the first error.
 
 The streaming tokenizer bounds unfinished raw-text/RCDATA closing-tag candidates
 by discarding oversized prefixes while retaining the original tag name, scanner

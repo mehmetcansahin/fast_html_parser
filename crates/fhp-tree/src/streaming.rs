@@ -202,7 +202,7 @@ impl TokenSink for BuilderSink<'_> {
         }
     }
 
-    fn text_element_opened(&self, _tag: Tag) -> bool {
+    fn text_element_opened(&mut self, _tag: Tag) -> bool {
         self.error.is_some() || self.builder.last_start_tag_opened()
     }
 }
@@ -391,7 +391,7 @@ impl TokenSink for EarlyStopSink<'_> {
         }
     }
 
-    fn text_element_opened(&self, _tag: Tag) -> bool {
+    fn text_element_opened(&mut self, _tag: Tag) -> bool {
         self.found.is_some() || self.error.is_some() || self.builder.last_start_tag_opened()
     }
 }

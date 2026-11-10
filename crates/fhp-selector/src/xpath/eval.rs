@@ -218,11 +218,12 @@ fn collect_descendants_mode<const TEXT: bool>(
             &|a, id, n| {
                 is_element(n)
                     && matches_name_test(a, id, n, tag)
-                    && a.attrs(id).iter().any(|at| {
-                        a.attr_name_is(at, attr)
-                            && a.attr_value_len(at) >= substr.len()
-                            && a.attr_value(at).unwrap_or("").contains(substr.as_str())
-                    })
+                    && (substr.is_empty()
+                        || a.attrs(id).iter().any(|at| {
+                            a.attr_name_is(at, attr)
+                                && a.attr_value_len(at) >= substr.len()
+                                && a.attr_value(at).unwrap_or("").contains(substr.as_str())
+                        }))
             },
             &mut results,
         ),
@@ -678,11 +679,14 @@ fn matches_predicate(arena: &Arena, node: NodeId, pred: &Predicate, position: us
             .iter()
             .any(|a| arena.attr_name_is(a, attr) && value_is(arena, a, value)),
 
-        Predicate::Contains { attr, substr } => arena.attrs(node).iter().any(|a| {
-            arena.attr_name_is(a, attr)
-                && arena.attr_value_len(a) >= substr.len()
-                && arena.attr_value(a).unwrap_or("").contains(substr.as_str())
-        }),
+        Predicate::Contains { attr, substr } => {
+            substr.is_empty()
+                || arena.attrs(node).iter().any(|a| {
+                    arena.attr_name_is(a, attr)
+                        && arena.attr_value_len(a) >= substr.len()
+                        && arena.attr_value(a).unwrap_or("").contains(substr.as_str())
+                })
+        }
 
         Predicate::Position(pos) => position == *pos,
 

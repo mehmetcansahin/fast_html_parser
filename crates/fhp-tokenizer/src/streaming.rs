@@ -62,9 +62,10 @@ pub trait TokenSink {
     /// that ignores the start tag (for example `<style>` inside `<select>`)
     /// returns `false`, and the following input is tokenized as markup, as
     /// the HTML tree-construction stage leaves the tokenizer in the data
-    /// state for a start tag it ignores. The default opens every text
-    /// element.
-    fn text_element_opened(&self, tag: Tag) -> bool {
+    /// state for a start tag it ignores. The mutable receiver lets the sink
+    /// synchronize text-decoding state with that decision. The default opens
+    /// every text element.
+    fn text_element_opened(&mut self, tag: Tag) -> bool {
         let _ = tag;
         true
     }

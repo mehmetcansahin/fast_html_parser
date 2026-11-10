@@ -13,8 +13,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with `StreamTokenizer::feed_str_into` and `finish_into`, let tree builders
   keep tokenizing markup when they ignore a text-element start tag.
   `TreeBuilder::last_start_tag_opened` reports whether a start tag inserted
-  an element. Existing token collectors and closure callbacks retain their
-  text-mode behavior by default.
+  an element and synchronizes text-decoding recovery with that decision.
+  Existing token collectors and closure callbacks retain their text-mode
+  behavior by default.
 
 - `Document::reparse`, `reparse_owned` and `reparse_bytes` (each with a
   `_with_limit` variant), and `HtmlParser::reparse_str`, `reparse_str_owned`
@@ -65,6 +66,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `TokenSink::text_element_opened` and
+  `TreeBuilder::last_start_tag_opened` now take `&mut self` so a veto can
+  clear raw-text recovery before already-decoded data tokens arrive. The
+  one-shot `TreeSink` callback remains shared.
+
 - XPath merges check real tree links before building a document-order set or
   walking the whole document, so already ordered parent and absolute-path
   results skip that extra allocation and traversal. Element and direct-text
@@ -84,6 +90,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `phf_generator`, `rand` and `siphasher` into every build; its only
   dependencies are now `memchr` and `thiserror`.
 
+### Removed
+
+- **Breaking:** Remove the discontinued `async-async-std` feature and the
+  `async_std_parser` module (`AsyncStdParser`, `parse_async_std`) from
+  `fast-html-parser` and `fhp-tree`. This also removes the `async-std` and
+  `pin-utils` dependency chain and its maintenance advisory exception.
+  Use `async-tokio` or feed runtime-independent chunks into `StreamParser`.
+
 ### Deprecated
 
 - `fhp_selector::bloom::AncestorBloom`, `build_ancestor_blooms`, `hash_tag`,
@@ -92,6 +106,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stores.
 
 ### Fixed
+
+- CSS `:first-child` and `:last-child` no longer scan the same leading or
+  trailing comments for every candidate; selections over comment-heavy
+  sibling sets take linear time.
+- `TreeBuilder` no longer decodes entities twice immediately after a
+  streaming tokenizer vetoes an ignored raw-text start tag. Recovery for
+  independent token producers that still enter raw-text mode is preserved.
+- XPath `contains(@attr, '')` matches elements without that attribute, as
+  XPath converts the missing attribute to the empty string, for both
+  descendant queries and absolute paths.
 
 - Table end tags close only same-named elements in table scope: `</th>`
   no longer closes a `td`, nor `</thead>` a `tbody`.

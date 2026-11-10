@@ -18,7 +18,6 @@ entity-decode = ["fhp-tokenizer/entity-decode"]
 simd = ["fhp-tokenizer/simd"]
 encoding = ["dep:fhp-encoding", "dep:encoding_rs"]
 async-tokio = ["dep:tokio", "encoding"]
-async-async-std = ["dep:async-std", "encoding"]
 
 [dependencies]
 fhp-core = { version = "0.2.0", path = "../fhp-core" }
@@ -28,7 +27,6 @@ thiserror = { workspace = true }
 encoding_rs = { workspace = true, optional = true }
 memchr = "2"
 tokio = { workspace = true, features = ["io-util"], optional = true }
-async-std = { workspace = true, optional = true, features = ["std"] }
 
 [dev-dependencies]
 criterion = { workspace = true }

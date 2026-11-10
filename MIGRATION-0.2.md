@@ -37,8 +37,8 @@ let document = parse_stream_with_limit(bytes.chunks(4), 8 * 1024 * 1024)?;
 The configured limit applies to both raw and decoded bytes and is capped at
 2 GiB. A nesting or size failure makes that parser terminal.
 The first operation returns the specific error; later `feed`/`finish` calls
-return `HtmlError::ParserTerminated`. Iterator, Tokio, and async-std wrappers
-stop reading their source at the first failure.
+return `HtmlError::ParserTerminated`. Iterator and Tokio wrappers stop reading
+their source at the first failure.
 
 The first chunk no longer needs to be small: at most 1 KiB is copied for the
 encoding prescan, and the remainder is processed during the same call in
@@ -66,6 +66,17 @@ assert!(text.ends_with("caf\u{e9}"));
 `fast_html_parser::encoding` now re-exports the whole `fhp-encoding` crate
 (including `DecodingReader`), and `fast_html_parser::selector` re-exports the
 whole `fhp-selector` crate when `css-selector` is enabled.
+
+## async-std support is removed
+
+The `async-async-std` feature, `async_std_parser` module, `AsyncStdParser`,
+and `parse_async_std` are removed from both `fast-html-parser` and `fhp-tree`.
+Upstream `async-std` and its `pin-utils` dependency are unmaintained; the
+release no longer accepts maintenance advisory exceptions for them.
+
+Use `async-tokio` with `async_parser::AsyncParser` or `parse_async`, or feed
+byte chunks from another runtime into `StreamParser`. The streaming parser
+itself does not require an async runtime.
 
 ## XPath requires the `xpath` feature
 
@@ -169,6 +180,15 @@ slash appeared in the source start tag. Determine HTML voidness with
 `TreeBuilder::set_source` and `set_source_ptr` are no longer public. Feed
 tokens or sink events directly; text and attribute values are copied into the
 arena.
+
+For low-level streaming `TokenSink` implementations, the callback is now
+`fn text_element_opened(&mut self, tag: Tag) -> bool`. After forwarding a
+text-element start tag to a `TreeBuilder`, return
+`builder.last_start_tag_opened()` from that callback. This method also
+requires `&mut self`: a veto clears recovery for raw text the tokenizer will
+not emit, preventing a second entity decode. Independent token collectors
+still enter text mode by default; `TreeSink::text_element_opened` keeps its
+`&self` receiver.
 
 ## `Tag` has more variants
 

@@ -22,10 +22,6 @@ pub mod arena;
 /// Async HTML parser (requires `async-tokio` feature).
 #[cfg(feature = "async-tokio")]
 pub mod async_parser;
-/// Async HTML parser powered by async-std (requires `async-async-std`).
-#[cfg(feature = "async-async-std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async-async-std")))]
-pub mod async_std_parser;
 /// Tree builder — converts a [`Token`] stream into a DOM tree.
 ///
 /// [`Token`]: fhp_tokenizer::token::Token

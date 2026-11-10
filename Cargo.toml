@@ -22,7 +22,6 @@ thiserror = "2"
 criterion = { version = "0.5", features = ["html_reports"] }
 encoding_rs = "0.8"
 tokio = { version = "1", default-features = false }
-async-std = { version = "1", default-features = false }
 
 [profile.release]
 lto = "fat"

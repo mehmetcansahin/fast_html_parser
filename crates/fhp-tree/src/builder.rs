@@ -498,10 +498,10 @@ pub struct TreeBuilder {
     /// Text node flushed immediately before the most recently processed
     /// non-text token.
     flushed_text_node: Option<NodeId>,
-    /// Raw-text start tag (`xmp`, `style`, `plaintext`, ...) the builder
-    /// ignored, e.g. inside `select`. The tokenizer still emits that
-    /// element's content undecoded, while no raw-text parent exists; the token
-    /// path then decodes it exactly as the sink path does.
+    /// Raw-text start tag (`xmp`, `style`, `plaintext`, ...) without a
+    /// raw-text parent. Independent token producers still emit its content
+    /// undecoded; a tokenizer honoring `last_start_tag_opened` clears this
+    /// recovery state when the start tag was ignored.
     ignored_raw_text: Option<Tag>,
     /// Whether the most recent start tag inserted an element.
     last_start_tag_opened: bool,
@@ -702,13 +702,18 @@ impl TreeBuilder {
         Ok(created)
     }
 
-    /// Whether the most recent start tag inserted an element.
+    /// Report whether the most recent start tag inserted an element to a
+    /// tokenizer that honors the builder's decision.
     ///
-    /// Returns `false` for a start tag the insertion mode ignored. An element
-    /// inserted empty at the depth limit still counts as opened. This answers
-    /// `TokenSink::text_element_opened` when building from `StreamTokenizer`
-    /// tokens.
-    pub fn last_start_tag_opened(&self) -> bool {
+    /// Call this from `TokenSink::text_element_opened` immediately after the
+    /// start tag. When it returns `false`, the tokenizer stays in data mode
+    /// and decodes subsequent text itself, so raw-text recovery is cleared.
+    /// An element inserted empty at the depth limit still counts as opened:
+    /// its raw text needs recovery because it has no raw-text parent.
+    pub fn last_start_tag_opened(&mut self) -> bool {
+        if !self.last_start_tag_opened {
+            self.ignored_raw_text = None;
+        }
         self.last_start_tag_opened
     }
 

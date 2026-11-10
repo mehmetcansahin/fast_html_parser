@@ -1212,7 +1212,7 @@ impl TokenSink for RejectingTokenSink {
     fn token(&mut self, token: Token<'_>) {
         self.0.extend(merge_text(std::slice::from_ref(&token)));
     }
-    fn text_element_opened(&self, _tag: Tag) -> bool {
+    fn text_element_opened(&mut self, _tag: Tag) -> bool {
         false
     }
 }
@@ -1276,7 +1276,7 @@ fn streaming_can_alternate_opened_and_ignored_text_elements() {
             self.0.token(token);
         }
 
-        fn text_element_opened(&self, tag: Tag) -> bool {
+        fn text_element_opened(&mut self, tag: Tag) -> bool {
             tag != Tag::Style
         }
     }

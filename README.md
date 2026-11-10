@@ -201,7 +201,6 @@ scraper needs that signal.
 | `xpath` | No | XPath expression support |
 | `encoding` | Yes | Raw-byte and streaming parsing with encoding detection (BOM, meta charset) |
 | `async-tokio` | No | Async parsing via Tokio |
-| `async-async-std` | No | Async parsing via async-std (discontinued upstream, RUSTSEC-2025-0052; kept for existing users) |
 | `simd` | Yes | Runtime-dispatched SIMD scanning; disable default features for scalar-only execution |
 
 ## Architecture

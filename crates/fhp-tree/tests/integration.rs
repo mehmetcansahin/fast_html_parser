@@ -863,41 +863,63 @@ impl fhp_tokenizer::streaming::TokenSink for VetoingSink<'_> {
         self.0.process(&token).unwrap();
     }
 
-    fn text_element_opened(&self, _tag: Tag) -> bool {
+    fn text_element_opened(&mut self, _tag: Tag) -> bool {
         self.0.last_start_tag_opened()
     }
 }
 
 #[test]
-fn builder_does_not_decode_text_after_a_vetoed_text_element_start_tag() {
-    // The tokenizer never enters the ignored `<style>`, so no `</style>`
-    // arrives; later tokens must not pass through raw-text recovery decoding.
-    let mut tokenizer = fhp_tokenizer::streaming::StreamTokenizer::new();
-    let mut builder = fhp_tree::builder::TreeBuilder::new();
-    tokenizer.feed_str_into(
-        "<select><style></select><p>&amp;amp;</p>",
-        &mut VetoingSink(&mut builder),
-    );
-    tokenizer.finish_into(&mut VetoingSink(&mut builder));
-    let (arena, root) = builder.finish().unwrap();
-
-    let mut texts = Vec::new();
-    let mut stack = vec![root];
-    while let Some(id) = stack.pop() {
-        let node = arena.get(id);
-        if node.flags.has(fhp_tree::node::NodeFlags::IS_TEXT) {
-            texts.push(arena.text(id).to_owned());
-        }
-        let mut child = node.first_child;
-        while !child.is_null() {
-            stack.push(child);
-            child = arena.get(child).next_sibling;
-        }
-    }
+fn builder_decodes_text_once_after_ignored_text_element_start_tags() {
+    let cases = [
+        ("<select><style></select><p>&amp;amp;</p>", true),
+        ("<select><style>&amp;amp;</select>", true),
+        ("<select><xmp>&amp;amp;</select>", true),
+        ("<select><plaintext>&amp;amp;</select>", true),
+        // Independent token producers enter raw-text mode even when the
+        // builder ignores the start tag, so their text still needs decoding.
+        ("<select><style>&amp;amp;", false),
+        ("<select><xmp>&amp;amp;", false),
+        ("<select><plaintext>&amp;amp;", false),
+    ];
     let expected = if cfg!(feature = "entity-decode") {
         "&amp;"
     } else {
         "&amp;amp;"
     };
-    assert_eq!(texts, [expected]);
+
+    for (html, veto) in cases {
+        for chunk_size in [1, 7, html.len()] {
+            let mut tokenizer = fhp_tokenizer::streaming::StreamTokenizer::new();
+            let mut builder = fhp_tree::builder::TreeBuilder::new();
+            for chunk in html.as_bytes().chunks(chunk_size) {
+                if veto {
+                    tokenizer.feed_str_into(
+                        std::str::from_utf8(chunk).unwrap(),
+                        &mut VetoingSink(&mut builder),
+                    );
+                } else {
+                    for token in tokenizer.feed(chunk) {
+                        builder.process(&token).unwrap();
+                    }
+                }
+            }
+            if veto {
+                tokenizer.finish_into(&mut VetoingSink(&mut builder));
+            } else {
+                for token in tokenizer.finish() {
+                    builder.process(&token).unwrap();
+                }
+            }
+            let (arena, root) = builder.finish().unwrap();
+            let texts: Vec<_> = fhp_tree::traverse::DepthFirst::new(&arena, root)
+                .filter(|id| arena.get(*id).flags.has(fhp_tree::node::NodeFlags::IS_TEXT))
+                .map(|id| arena.text(id))
+                .collect();
+            assert_eq!(
+                texts,
+                [expected],
+                "{html}, veto={veto}, chunk_size={chunk_size}"
+            );
+        }
+    }
 }

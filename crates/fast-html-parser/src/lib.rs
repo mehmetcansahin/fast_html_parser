@@ -76,7 +76,6 @@
 //! | `xpath` | No | XPath expression support |
 //! | `encoding` | Yes | Raw-byte and streaming parsing with encoding detection |
 //! | `async-tokio` | No | Async parsing via Tokio |
-//! | `async-async-std` | No | Async parsing via async-std |
 
 // ---------------------------------------------------------------------------
 // Re-exports: core types
@@ -141,13 +140,6 @@ pub use fhp_encoding as encoding;
 #[cfg_attr(docsrs, doc(cfg(feature = "async-tokio")))]
 pub mod async_parser {
     pub use fhp_tree::async_parser::{AsyncParser, parse_async};
-}
-
-/// Async parser powered by async-std (requires `async-async-std`).
-#[cfg(feature = "async-async-std")]
-#[cfg_attr(docsrs, doc(cfg(feature = "async-async-std")))]
-pub mod async_std_parser {
-    pub use fhp_tree::async_std_parser::{AsyncStdParser, parse_async_std};
 }
 
 // ---------------------------------------------------------------------------

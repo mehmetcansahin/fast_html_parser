@@ -20,7 +20,6 @@ css-selector = ["dep:fhp-selector"]
 xpath = ["css-selector", "fhp-selector/xpath"]
 encoding = ["dep:fhp-encoding", "fhp-tree/encoding"]
 async-tokio = ["fhp-tree/async-tokio", "encoding"]
-async-async-std = ["fhp-tree/async-async-std", "encoding"]
 entity-decode = ["fhp-tree/entity-decode", "fhp-tokenizer/entity-decode"]
 simd = ["fhp-tokenizer/simd", "fhp-tree/simd"]
 
