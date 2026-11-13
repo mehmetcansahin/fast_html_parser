@@ -19,6 +19,35 @@ python3 scripts/bench.py compare main
 python3 scripts/bench.py publish
 ```
 
+## Resuming an interrupted publication
+
+`publish` prints its run directory and writes `publication-progress.json`
+there before measuring. After each successful harness/permutation slice, it
+atomically records the command and a fingerprint of the parsed Criterion
+results. Resume with the exact directory printed by the interrupted run:
+
+```bash
+python3 scripts/bench.py publish --resume target/criterion/publish/<report>/<run>
+```
+
+Completed slices, including completed earlier attempts, are re-read from their
+original raw artifacts and verified instead of measured again. The interrupted
+slice that was not checkpointed is repeated. Original capture time, commit and
+provenance are retained; resumed sessions are recorded in the result sidecar.
+
+Both new runs and resumes require a clean worktree. A resume also requires the
+same commit, source, lockfile, fixtures, semantic contract, CPU/OS, Rust
+toolchain, build flags and harness matrix. Changed or missing completed
+results, reordered checkpoints and incompatible environments are rejected
+before new measurements. Review and restore any partially written generated
+report updates before resuming if they left the worktree dirty.
+
+Only one publication or resume can run per repository. Its OS lock is released
+on process exit or reboot; do not delete a lock file to bypass a running
+publication. Runs created before checkpoint support cannot be resumed.
+Resuming never relaxes the stability criteria or discards completed unstable
+measurements.
+
 ## Latest results
 
 <!-- latest-benchmark:start -->

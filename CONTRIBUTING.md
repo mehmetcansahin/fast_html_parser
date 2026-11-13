@@ -165,6 +165,13 @@ requires a clean worktree and updates both the root README and benchmark index.
 The dirty 2026-07-15 report is provisional historical data, not an official
 v0.2 result.
 
+If publication is interrupted, use `python3 scripts/bench.py publish --resume
+<run-directory>` with the exact directory printed by the original run.
+Completed slices are verified and reused; the source commit and measurement
+environment must remain unchanged. See
+[resuming a publication](benchmarks/README.md#resuming-an-interrupted-publication)
+for checkpoint integrity and clean-worktree requirements.
+
 Treat a failed local comparison as a regression candidate. Before attributing
 it to a code change, rerun the exact failing benchmark at least twice against
 the same immutable baseline. Short selector/XPath compilation measurements,

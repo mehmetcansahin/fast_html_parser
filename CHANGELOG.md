@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `scripts/bench.py publish --resume RUN_DIRECTORY` continues interrupted
+  official benchmark publications from atomically saved per-slice progress.
+  Completed Criterion results are verified and reused with the original
+  provenance; changed sources, commits, environments or results are rejected.
+  A non-blocking OS lock prevents concurrent publication or resume in one repo.
+
 - `TreeSink::text_element_opened` and the streaming `TokenSink` counterpart,
   with `StreamTokenizer::feed_str_into` and `finish_into`, let tree builders
   keep tokenizing markup when they ignore a text-element start tag.

@@ -10,6 +10,7 @@ exit status.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import datetime as datetime_module
 import hashlib
@@ -24,7 +25,12 @@ import statistics
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+if sys.platform == "win32":
+    import msvcrt
+else:
+    import fcntl
 
 
 SCHEMA_VERSION = 3
@@ -939,6 +945,27 @@ def _benchmark_environment(home: Path, order: Optional[str]) -> Dict[str, str]:
     return environment
 
 
+def harness_command_record(
+    root: Path,
+    harness: Harness,
+    home: Path,
+    criterion_args: Sequence[str],
+    order: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Provenance identity of one harness execution, shared by run and resume."""
+
+    return {
+        "harness": harness.id,
+        "command": build_cargo_command(harness, criterion_args),
+        "criterion_home": str(home.relative_to(root)),
+        "environment": {
+            "CARGO_INCREMENTAL": CARGO_INCREMENTAL,
+            "RUSTFLAGS": RUSTFLAGS,
+            "FHP_BENCH_ORDER": order,
+        },
+    }
+
+
 def run_harness(
     root: Path,
     harness: Harness,
@@ -949,7 +976,8 @@ def run_harness(
     if order is not None and order not in ORDER_ROTATIONS:
         raise BenchError(f"invalid FHP_BENCH_ORDER value: {order}")
     home.mkdir(parents=True, exist_ok=True)
-    command = build_cargo_command(harness, criterion_args)
+    record = harness_command_record(root, harness, home, criterion_args, order)
+    command = record["command"]
     print(f"\n[{harness.id}] CRITERION_HOME={home}")
     if order:
         print(f"FHP_BENCH_ORDER={order}")
@@ -964,16 +992,7 @@ def run_harness(
         raise BenchError(
             f"benchmark harness {harness.id} failed with exit code {completed.returncode}"
         )
-    return {
-        "harness": harness.id,
-        "command": command,
-        "criterion_home": str(home.relative_to(root)),
-        "environment": {
-            "CARGO_INCREMENTAL": CARGO_INCREMENTAL,
-            "RUSTFLAGS": RUSTFLAGS,
-            "FHP_BENCH_ORDER": order,
-        },
-    }
+    return record
 
 
 def _load_json_object(path: Path) -> Dict[str, Any]:
@@ -2462,7 +2481,200 @@ def _report_stem(metadata: Mapping[str, Any]) -> str:
     return f"{date}-{str(metadata['source_digest'])[:12]}-{target}"
 
 
-def command_publish(root: Path) -> int:
+PUBLISH_PROGRESS_NAME = "publication-progress.json"
+PUBLISH_PROGRESS_SCHEMA_VERSION = 1
+PUBLISH_PROGRESS_KEYS = {"schema_version", "metadata", "completed_runs", "resume_sessions"}
+
+
+def _publish_root(root: Path) -> Path:
+    return root / "target" / "criterion" / "publish"
+
+
+@contextlib.contextmanager
+def publish_lock(root: Path) -> Iterator[None]:
+    """Serialize publish/resume per repository with a non-blocking OS lock.
+
+    The OS releases the lock when its process exits or the machine reboots, so
+    an interrupted run never leaves a stale lock behind.
+    """
+
+    path = _publish_root(root) / ".publish.lock"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a+b") as handle:
+        handle.seek(0)
+        try:
+            if sys.platform == "win32":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            raise BenchError(
+                "another benchmark publish or resume is running in this repository "
+                f"(lock: {path.relative_to(root)})"
+            ) from error
+        try:
+            yield
+        finally:
+            if sys.platform == "win32":
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+def _canonical_json(value: Any) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
+def _estimates_sha256(estimates: Sequence[Estimate]) -> str:
+    rows = [estimate.as_metadata() for estimate in estimates]
+    return hashlib.sha256(_canonical_json(rows).encode("utf-8")).hexdigest()
+
+
+def _parse_publish_slice(
+    home: Path, harness: Harness, permutation: Optional[str], attempt: int
+) -> List[Estimate]:
+    parsed = [
+        dataclasses.replace(estimate, attempt=attempt)
+        for estimate in parse_new_estimates(home, harness, permutation)
+    ]
+    if not parsed:
+        raise BenchError(f"publish attempt {attempt} produced no estimates: {harness.id}")
+    return parsed
+
+
+def load_publish_progress(
+    root: Path, run_directory: Path, fixtures: Sequence[FixtureRecord]
+) -> Tuple[Path, Dict[str, Any]]:
+    """Validate an interrupted publish checkpoint before any benchmark executes.
+
+    Only a checkpointed run directory of this repository's publish tree may
+    continue, and only while its initial metadata still matches the current
+    commit, environment, build contract, and benchmark inputs.
+    """
+
+    publish_root = _publish_root(root)
+    resolved = run_directory.resolve()
+    if not resolved.is_dir() or resolved.parent.parent != publish_root.resolve():
+        raise BenchError(
+            "--resume requires an existing run directory "
+            f"target/criterion/publish/<stem>/<namespace> of this repository: {run_directory}"
+        )
+    raw_root = publish_root / resolved.parent.name / resolved.name
+    progress_path = raw_root / PUBLISH_PROGRESS_NAME
+    if not progress_path.is_file():
+        raise BenchError(
+            f"{raw_root.relative_to(root)} has no {PUBLISH_PROGRESS_NAME}; publish runs "
+            "without a checkpoint cannot be resumed"
+        )
+    try:
+        progress = json.loads(progress_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise BenchError(f"unreadable publication checkpoint {progress_path}: {error}") from error
+    if (
+        not isinstance(progress, dict)
+        or set(progress) != PUBLISH_PROGRESS_KEYS
+        or type(progress["schema_version"]) is not int
+        or progress["schema_version"] != PUBLISH_PROGRESS_SCHEMA_VERSION
+        or not isinstance(progress["metadata"], dict)
+        or not isinstance(progress["completed_runs"], list)
+        or not isinstance(progress["resume_sessions"], list)
+        or not all(
+            isinstance(session, dict)
+            and set(session) == {"resumed_at_utc", "reused_runs"}
+            and isinstance(session["resumed_at_utc"], str)
+            and type(session["reused_runs"]) is int
+            for session in progress["resume_sessions"]
+        )
+    ):
+        raise BenchError(f"malformed publication checkpoint: {progress_path.relative_to(root)}")
+
+    initial = progress["metadata"]
+    if (
+        initial.get("mode") != "publish"
+        or initial.get("official") is not True
+        or _deep_get(initial, "git.dirty") is not False
+        or _deep_get(initial, "build_contract.scope") != "full"
+    ):
+        raise BenchError("publication checkpoint is not an official full publish run")
+    try:
+        stem = _report_stem(initial)
+    except (KeyError, TypeError, ValueError) as error:
+        raise BenchError(f"malformed publication checkpoint metadata: {error!r}") from error
+    if stem != raw_root.parent.name:
+        raise BenchError(
+            f"publication checkpoint metadata belongs to report {stem}, "
+            f"not {raw_root.parent.name}"
+        )
+    current = capture_metadata(root, "publish", FULL_MATRIX, fixtures)
+    if set(initial) != set(current):
+        raise BenchError("publication checkpoint metadata does not match the publish schema")
+    initial_commit = _deep_get(initial, "git.commit")
+    if initial_commit != current["git"]["commit"]:
+        raise BenchError(
+            "git commit changed since the interrupted publish: "
+            f"{str(initial_commit)[:12]} -> {str(current['git']['commit'])[:12]}"
+        )
+    errors = compatibility_errors(initial, current)
+    if errors:
+        raise BenchError(
+            "benchmark environment or build contract changed since the interrupted "
+            "publish:\n  - " + "\n  - ".join(errors)
+        )
+    assert_run_inputs_unchanged(root, initial)
+    return raw_root, progress
+
+
+def _restore_publish_slice(
+    root: Path,
+    record: Any,
+    index: int,
+    harness: Harness,
+    home: Path,
+    permutation: Optional[str],
+    attempt: int,
+) -> List[Estimate]:
+    """Re-parse one checkpointed slice from its original Criterion artifacts.
+
+    The record must carry exactly the planned command identity and home, and
+    the re-parsed rows must reproduce the checkpointed digest.
+    """
+
+    label = (
+        f"publication checkpoint record {index + 1} "
+        f"({harness.id}, order {permutation or 'none'}, attempt {attempt})"
+    )
+    if (
+        not isinstance(record, dict)
+        or set(record) != {"command", "estimates_sha256"}
+        or not isinstance(record["estimates_sha256"], str)
+    ):
+        raise BenchError(f"malformed {label}")
+    expected = harness_command_record(root, harness, home, PUBLISH_RUN_ARGS, permutation)
+    expected["attempt"] = attempt
+    if _canonical_json(record["command"]) != _canonical_json(expected):
+        raise BenchError(
+            f"{label} does not match the planned command, environment, or "
+            "CRITERION_HOME; refusing a reordered or foreign checkpoint"
+        )
+    if not home.is_dir():
+        raise BenchError(
+            f"missing original Criterion artifacts for {label}: {home.relative_to(root)}"
+        )
+    parsed = _parse_publish_slice(home, harness, permutation, attempt)
+    if _estimates_sha256(parsed) != record["estimates_sha256"]:
+        raise BenchError(
+            f"original Criterion artifacts for {label} changed after checkpointing"
+        )
+    return parsed
+
+
+def command_publish(root: Path, resume: Optional[Path] = None) -> int:
+    """Run the publication matrix, or continue the checkpointed run ``resume``."""
+
+    with publish_lock(root):
+        return _run_publication(root, resume)
+
+
+def _run_publication(root: Path, resume: Optional[Path]) -> int:
     ensure_clean_publish_worktree(root)
     fixtures = validate_fixture_manifest(root)
     readme_path = root / "README.md"
@@ -2478,9 +2690,54 @@ def command_publish(root: Path) -> int:
         BENCH_INDEX_END,
     )
 
-    metadata = capture_metadata(root, "publish", FULL_MATRIX, fixtures)
+    if resume is None:
+        metadata = capture_metadata(root, "publish", FULL_MATRIX, fixtures)
+        raw_root = _publish_root(root) / _report_stem(metadata) / _run_namespace()
+        try:
+            raw_root.mkdir(parents=True)
+        except FileExistsError as error:
+            raise BenchError(
+                f"publish run directory already exists: {raw_root.relative_to(root)}"
+            ) from error
+        checkpointed_runs: List[Any] = []
+        resume_sessions: List[Dict[str, Any]] = []
+    else:
+        raw_root, saved = load_publish_progress(root, resume, fixtures)
+        metadata = saved["metadata"]
+        checkpointed_runs = saved["completed_runs"]
+        resume_sessions = saved["resume_sessions"]
+        resume_sessions.append(
+            {
+                "resumed_at_utc": datetime_module.datetime.now(datetime_module.timezone.utc)
+                .replace(microsecond=0)
+                .isoformat(),
+                "reused_runs": len(checkpointed_runs),
+            }
+        )
     stem = _report_stem(metadata)
-    raw_root = root / "target" / "criterion" / "publish" / stem / _run_namespace()
+    # Only validated or newly measured records enter `completed_runs`, so the
+    # checkpoint is never rewritten until every checkpointed slice is verified.
+    completed_runs: List[Dict[str, Any]] = []
+    progress_path = raw_root / PUBLISH_PROGRESS_NAME
+    progress = {
+        "schema_version": PUBLISH_PROGRESS_SCHEMA_VERSION,
+        "metadata": metadata,
+        "completed_runs": completed_runs,
+        "resume_sessions": resume_sessions,
+    }
+    if resume is None:
+        _atomic_write_json(progress_path, progress)
+    else:
+        print(
+            f"resuming publication: verifying {len(checkpointed_runs)} checkpointed "
+            "slices against their original Criterion artifacts"
+        )
+    print(f"publication checkpoint: {progress_path.relative_to(root)}")
+    print(
+        "resume after interruption: python scripts/bench.py publish --resume "
+        + raw_root.relative_to(root).as_posix(),
+        flush=True,
+    )
     commands: List[Dict[str, Any]] = []
     attempt_estimates: List[List[Estimate]] = []
     stability_attempts: List[List[StabilityDecision]] = []
@@ -2498,23 +2755,30 @@ def command_publish(root: Path) -> int:
                 )
                 if permutation:
                     home = home / permutation
-                command = run_harness(
-                    root,
-                    harness,
-                    home,
-                    PUBLISH_RUN_ARGS,
-                    permutation,
-                )
-                command["attempt"] = attempt
-                commands.append(command)
-                parsed = [
-                    dataclasses.replace(estimate, attempt=attempt)
-                    for estimate in parse_new_estimates(home, harness, permutation)
-                ]
-                if not parsed:
-                    raise BenchError(
-                        f"publish attempt {attempt} produced no estimates: {harness.id}"
+                index = len(completed_runs)
+                if index < len(checkpointed_runs):
+                    record = checkpointed_runs[index]
+                    parsed = _restore_publish_slice(
+                        root, record, index, harness, home, permutation, attempt
                     )
+                    completed_runs.append(record)
+                else:
+                    assert_run_inputs_unchanged(root, metadata)
+                    command = run_harness(
+                        root,
+                        harness,
+                        home,
+                        PUBLISH_RUN_ARGS,
+                        permutation,
+                    )
+                    command["attempt"] = attempt
+                    parsed = _parse_publish_slice(home, harness, permutation, attempt)
+                    assert_run_inputs_unchanged(root, metadata)
+                    completed_runs.append(
+                        {"command": command, "estimates_sha256": _estimates_sha256(parsed)}
+                    )
+                    _atomic_write_json(progress_path, progress)
+                commands.append(completed_runs[-1]["command"])
                 estimates.extend(parsed)
         validate_publish_run_cardinality(estimates, FULL_MATRIX)
         attempt_estimates.append(estimates)
@@ -2524,6 +2788,13 @@ def command_publish(root: Path) -> int:
     if any(not decision.stable for decision in stability_attempts[0]):
         run_attempt(2)
         run_attempt(3)
+    # Leftover records lie beyond the plan; every planned slice was restored,
+    # so this rejection happens before any new measurement.
+    if len(completed_runs) < len(checkpointed_runs):
+        raise BenchError(
+            f"publication checkpoint has {len(checkpointed_runs) - len(completed_runs)} "
+            "records beyond the planned publication slices"
+        )
 
     _validate_attempt_estimate_ids(attempt_estimates, "publish")
     assert_run_inputs_unchanged(root, metadata)
@@ -2547,6 +2818,7 @@ def command_publish(root: Path) -> int:
         ratios.append(dataclasses.replace(ratio, stable=bool(related) and all(related)))
 
     metadata["commands"] = commands
+    metadata["resume_sessions"] = resume_sessions
     metadata["publish_permutations"] = list(ORDER_ROTATIONS)
     metadata["attempt_count"] = len(attempt_estimates)
     metadata["stability_attempts"] = [
@@ -2627,7 +2899,16 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="compare the reduced regression matrix using Criterion quick mode",
     )
-    commands.add_parser("publish", help="run the publication matrix and update marked docs")
+    publish = commands.add_parser(
+        "publish", help="run the publication matrix and update marked docs"
+    )
+    publish.add_argument(
+        "--resume",
+        type=Path,
+        metavar="RUN_DIRECTORY",
+        help="continue an interrupted, checkpointed run in "
+        "target/criterion/publish/<stem>/<namespace>",
+    )
     return parser
 
 
@@ -2644,7 +2925,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if arguments.command == "compare":
             return command_compare(root, arguments.name, arguments.quick)
         if arguments.command == "publish":
-            return command_publish(root)
+            return command_publish(root, arguments.resume)
         raise BenchError(f"unknown command: {arguments.command}")
     except BenchError as error:
         print(f"benchmark error: {error}", file=sys.stderr)
