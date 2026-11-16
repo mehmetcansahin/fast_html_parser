@@ -234,17 +234,17 @@ Criterion samples remain machine-local; each published summary
 records the source, fixture, machine, toolchain, build flags, and commands.
 
 <!-- benchmark-summary:start -->
-_No official schema-3 v0.2 benchmark has been published yet. A clean,
-user-approved commit must be measured with `python3 scripts/bench.py publish`
-before release._
+_0.2.0 was released without an official schema-3 benchmark report: the
+clean-source publication run did not pass its stability checks. Generate one
+with `python3 scripts/bench.py publish`; until then, no official speed claims
+are made for this release._
 <!-- benchmark-summary:end -->
 
 The [2026-07-15 report](benchmarks/results/2026-07-15-b4fcf640b253-aarch64-apple-darwin.md)
 came from a dirty worktree and is kept only as provisional historical data; it
 is excluded from the latest link and official comparisons.
 `bench.py publish` now requires a clean source tree and updates this README and
-the benchmark index together. A clean, approved commit must replace the report
-before release.
+the benchmark index together; a clean official report will replace this note.
 
 The current comparison harness counterbalances parser order with the complete
 set of all six parser permutations. The provisional report predates that contract.
